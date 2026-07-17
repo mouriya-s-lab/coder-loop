@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { basename, resolve } from "node:path"
+import { basename, dirname, resolve } from "node:path"
 
 export type ClosureReachabilitySeed =
 	| { kind: "active-run"; closureId: string }
@@ -56,6 +56,17 @@ export function closureBranchName(chainName: string, closureId: string): string 
 
 export function closureBranchPrefix(chainName: string): string {
 	return `refs/heads/coder-loop/closures/${safeComponent(chainName)}/`
+}
+
+export function closureResourcesBelongToEngine(repoCwd: string, closureId: string, worktreePath: string, branchName: string): boolean {
+	const branchParts = branchName.split("/")
+	const worktreeRoot = dirname(worktreePath)
+	const branchOwned = branchParts.length === 6
+		&& branchParts.slice(0, 4).join("/") === "refs/heads/coder-loop/closures"
+		&& branchParts[4] === basename(dirname(worktreeRoot))
+		&& branchParts[5] === shortHash(closureId)
+	const expectedSuffix = `-${shortHash(repoCwd)}-${shortHash(closureId)}`
+	return branchOwned && basename(worktreeRoot) === "worktrees" && basename(worktreePath).endsWith(expectedSuffix)
 }
 
 export type PersistedParPinSource = {

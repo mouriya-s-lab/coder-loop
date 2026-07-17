@@ -8,7 +8,7 @@
  *   引擎按 preset phase 顺序真实 spawn 子进程 stub runner（PATH shim 把 `claude`
  *   解析到 scripts/engine-integration-stub-runner.ts）→ iteration 在 closure worktree 真实
  *   commit → review 经 daemon socket 凭据准入（#397 gate）写终态 → 断言 SQLite
- *   runs / 审计事件 / terminal closure 保留 / 显式 chain delete 回收 / 无孤儿 → teardown。
+ *   runs / 审计事件 / successful-chain closure 消费回收 / 无孤儿 → teardown。
  *
  * 无 LLM、无 GitHub、无网络；不持有任何跨运行共享资源——多个实例可并发运行
  * （#681 并发前提）。预算：单次 60 秒内。
@@ -383,8 +383,15 @@ async function assertEngineOutcome(
 	if (admissionEvents < 1) fail(`未观察到 item.status.write_admission 审计事件`)
 
 	log("assert: stub runner 的 marker commit 真实落在 fixture 的 git 对象库")
-	const markerLog = sh(["git", "log", "--all", "--oneline", "--grep", "engine-integration: marker"], { cwd: fixtureCwd })
-	const markerCommit = markerLog.stdout.trim().split("\n")[0] ?? ""
+	const unreachable = sh(["git", "fsck", "--no-reflogs", "--unreachable", "--no-progress"], { cwd: fixtureCwd })
+	let markerCommit = ""
+	for (const line of unreachable.stdout.split("\n")) {
+		const match = /^unreachable commit ([0-9a-f]+)$/.exec(line.trim())
+		if (match === null) continue
+		const sha = match[1]!
+		const subject = sh(["git", "show", "-s", "--format=%s", sha], { cwd: fixtureCwd }).stdout.trim()
+		if (subject.includes("engine-integration: marker")) { markerCommit = `${sha.slice(0, 12)} ${subject}`; break }
+	}
 	if (markerCommit === "") fail("fixture git log 中找不到 stub runner 的 marker commit")
 
 	return {
@@ -395,18 +402,31 @@ async function assertEngineOutcome(
 	}
 }
 
-async function assertTerminalClosureRetained(fixtureCwd: string, loopDataRoot: string, chainName: string): Promise<void> {
-	log("assert: terminal 本身不消费 active closure，worktree 保留到显式 chain delete")
+type ClosureStateRow = { lifecycle: string; worktree_path: string | null; branch_name: string | null }
+
+async function assertSuccessfulChainClosuresConsumed(fixtureCwd: string, loopDataRoot: string, chainName: string): Promise<void> {
+	log("assert: successful chain completion 消费 closure 并回收 worktree")
+	const deadline = Date.now() + 10_000
+	let rows: ClosureStateRow[] = []
+	while (Date.now() < deadline) {
+		const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
+		try {
+			rows = db.query<ClosureStateRow, { $chain: string }>("SELECT tc.lifecycle,tc.worktree_path,tc.branch_name FROM task_closures tc JOIN items i ON i.id=tc.item_row_id JOIN chains c ON c.id=i.chain_id WHERE c.name=$chain").all({ $chain: chainName })
+		} finally { db.close() }
+		if (rows.length >= 2 && rows.every((row) => row.lifecycle === "consumed" && row.worktree_path === null && row.branch_name === null)) break
+		await Bun.sleep(100)
+	}
+	if (rows.length < 2 || rows.some((row) => row.lifecycle !== "consumed" || row.worktree_path !== null || row.branch_name !== null)) fail(`successful chain closures 未消费: ${JSON.stringify(rows)}`)
 	const worktreesDir = resolve(loopDataRoot, "chains", chainName, "worktrees")
 	const leftovers = existsSync(worktreesDir) ? await readdir(worktreesDir) : []
-	if (leftovers.length === 0) fail(`terminal chain 未保留 closure worktree: ${worktreesDir}`)
+	if (leftovers.length > 0) fail(`successful chain closure worktree 未回收: ${worktreesDir} → ${leftovers.join(", ")}`)
 	const registered = sh(["git", "worktree", "list", "--porcelain"], { cwd: fixtureCwd }).stdout
 	const entries = registered.split("\n\n").filter((block) => block.trim().startsWith("worktree "))
-	if (entries.length <= 1) fail(`terminal chain 的 closure worktree 未注册:\n${registered}`)
+	if (entries.length > 1) fail(`successful chain 仍注册 closure worktree:\n${registered}`)
 }
 
 function deleteChain(daemon: DaemonHandle, chainName: string): void {
-	log("chain delete: 显式消费 closure 并回收其 engine-owned resources")
+	log("chain delete: 删除已消费 chain 的运行记录")
 	sh(["bun", LOOP_ENTRY, "chain", "delete", chainName, "--loop-data-root", daemon.loopDataRoot, "--json"], { env: daemon.shimmedEnv })
 }
 
@@ -481,7 +501,7 @@ async function runHarness(options: HarnessOptions): Promise<number> {
 		}
 
 		const evidence = await assertEngineOutcome(fixtureCwd, daemon, chainName, startedAt)
-		await assertTerminalClosureRetained(fixtureCwd, daemon.loopDataRoot, chainName)
+		await assertSuccessfulChainClosuresConsumed(fixtureCwd, daemon.loopDataRoot, chainName)
 		deleteChain(daemon, chainName)
 		await assertWorktreesRecycled(fixtureCwd, daemon.loopDataRoot, chainName)
 		await stopDaemon(daemon)

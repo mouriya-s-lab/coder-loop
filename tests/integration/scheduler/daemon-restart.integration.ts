@@ -316,7 +316,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 	}
 })
 
-test("completed chain retains its real closure worktree registration and local directory", async () => {
+test("completed chain consumes its real closure worktree registration and local directory", async () => {
 	const root = resolve(TEST_ROOT, "completed-worktree-cleanup")
 	const loopDataRoot = resolve(root, "loop-data")
 	const target = resolve(root, "target")
@@ -392,8 +392,13 @@ console.log("done:" + input.itemId)
 		expect(store.getItem(item.id)?.status).toBe("done")
 		expect(completed.status).toBe("completed")
 		expect(schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId: chain.id }))
-		expect(await pathExists(worktreePath)).toBe(true)
-		expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
+		const completedRoot = store.getTaskTree(chain.id)?.root
+		if (completedRoot?.kind !== "seq") throw new Error("expected completed seq task tree")
+		expect(completedRoot.children.flatMap((node) => node.kind === "leaf" ? [node.closure] : [])).toEqual(expect.arrayContaining([
+			expect.objectContaining({ phase: "iteration", lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] }),
+		]))
+		expect(await pathExists(worktreePath)).toBe(false)
+		expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
 	} finally {
 		await runtime.daemon.stop()
 		store.close()
@@ -507,6 +512,7 @@ test("daemon restart after crash recovers in-flight item through observable sock
 	const root = resolve(TEST_ROOT, "daemon-crash-restart-resume")
 	const loopDataRoot = resolve(root, "loop-data")
 	const bin = resolve(root, "bin")
+	const target = resolve(root, "target")
 	const eventLog = resolve(root, "runner-events.jsonl")
 	const fakeCodex = resolve(bin, "codex")
 	await mkdir(bin, { recursive: true })
@@ -520,6 +526,7 @@ echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 	)
 	await chmod(fakeCodex, 0o755)
 	await mkdir(loopDataRoot, { recursive: true })
+	await initGitTarget(target)
 
 	const store = openSqliteStateStore({ loopDataRoot })
 	let firstDaemon: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null
@@ -537,7 +544,7 @@ echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 		const item = store.createItem({
 			chainId: chain.id,
 			itemId: "359001",
-			repoCwd: REPO_ROOT,
+			repoCwd: target,
 			status: runtimeStatus("queued"),
 			attempts: 0,
 			extra: storedItemExtra({}),

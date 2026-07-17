@@ -7,9 +7,9 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { resolve } from "node:path"
 
 import { closureBranchPrefix, computeClosureReachability, createRepositoryGitCoordinator, type OriginFreshness } from "../src/closure-lifecycle"
-import { cleanupSchedulerChainWorktrees, consumeSchedulerClosure, createGitWorktreeManager, reconcileClosureResources, type SchedulerEvent } from "../src/scheduler"
-import { openSqliteStateStore } from "../src/sqlite-state"
-import type { ClosureSnapshot, TaskNodeSnapshot } from "../src/task-runtime"
+import { cleanupSchedulerChainWorktrees, createGitWorktreeManager, reconcileClosureResources } from "../src/scheduler"
+import type { JsonObject } from "../src/loop"
+import type { TaskNodeSnapshot } from "../src/task-runtime"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -41,15 +41,7 @@ function parseRunnerObservation(value: unknown): RunnerObservation {
 	const attempt = row.attempt; assert(typeof attempt === "number" && Number.isInteger(attempt), "runner observation.attempt must be an integer")
 	return { chain: stringField(row, "chain", "runner observation"), phase: stringField(row, "phase", "runner observation"), cwd: stringField(row, "cwd", "runner observation"), branch: stringField(row, "branch", "runner observation"), argv, attempt, sessionId: stringField(row, "sessionId", "runner observation") }
 }
-function findClosure(node: TaskNodeSnapshot, closureId: string): ClosureSnapshot | null {
-	if (node.kind === "leaf") return node.closure.closureId === closureId ? node.closure : null
-	for (const child of node.children) {
-		const closure = findClosure(child, closureId)
-		if (closure !== null) return closure
-	}
-	return null
-}
-function event(type: string, payload: Record<string, unknown> = {}): void {
+function event(type: string, payload: JsonObject = {}): void {
 	process.stdout.write(`${JSON.stringify({ ts: new Date().toISOString(), type, ...payload })}\n`)
 }
 
@@ -130,7 +122,42 @@ function writeShims(root: string): ShimResources {
 	const runnerLog = resolve(root, "loop-data", "chains")
 	const gate = resolve(state, "block-fetch")
 	const gitShim = `#!/usr/bin/env bun\nimport { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"; import { spawnSync } from "node:child_process"; const a=process.argv.slice(2),op=a[0]==="fetch"?"fetch":a[0]==="worktree"&&a[1]==="add"?"worktree-add":a[0]==="worktree"&&a[1]==="remove"?"worktree-remove":a[0]??"unknown";appendFileSync(process.env.ISSUE560_GIT_LOG!,JSON.stringify({event:op,cwd:process.cwd(),a})+"\\n");if(existsSync(process.env.ISSUE560_GIT_GATE!)&&readFileSync(process.env.ISSUE560_GIT_GATE!,"utf8").trim()===op){writeFileSync(process.env.ISSUE560_GIT_ENTERED!,op+"\\n");while(!existsSync(process.env.ISSUE560_GIT_RELEASE!)) await Bun.sleep(25)} const p=spawnSync(process.env.ISSUE560_REAL_GIT!,a,{stdio:"inherit"});process.exit(p.status??1)\n`
-	const runner = `#!/usr/bin/env bun\nimport { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";import { spawnSync } from "node:child_process";import { resolve } from "node:path";const argv=process.argv.slice(2),p=argv[argv.lastIndexOf("-p")+1]??"";const f=Object.fromEntries(p.split("\\n").map(x=>x.match(/^(PHASE|CHAIN|ITEM|RUN)=(.+)$/)).filter(Boolean).map(x=>[x[1].toLowerCase(),x[2]]));const c=resolve(process.cwd(),".issue560-"+f.phase+".count"),attempt=existsSync(c)?Number(readFileSync(c,"utf8"))+1:1;writeFileSync(c,String(attempt));const branch=spawnSync(process.env.ISSUE560_REAL_GIT!,["symbolic-ref","-q","HEAD"],{encoding:"utf8"}).stdout.trim(),sessionId="issue560-"+f.chain+"-"+f.phase;appendFileSync(resolve(process.cwd(),".issue560-runner.jsonl"),JSON.stringify({chain:f.chain,phase:f.phase,cwd:process.cwd(),branch,argv,attempt,sessionId})+"\\n");process.stdout.write(JSON.stringify({type:"system",session_id:sessionId})+"\\n");if(f.chain.includes("interrupt")&&f.phase==="iteration"&&attempt===1)while(true) await Bun.sleep(1000);if(f.phase==="review"){const u=spawnSync("coder-loop",["item","update",f.chain,"--issue",f.item,"--status","done","--json"],{stdio:"inherit"});process.exit(u.status??1)}\n`
+	const runner = `#!/usr/bin/env bun
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { resolve } from "node:path"
+const argv=process.argv.slice(2),p=argv[argv.lastIndexOf("-p")+1]??""
+const f=Object.fromEntries(p.split("\\n").map(x=>x.match(/^(PHASE|CHAIN|ITEM|RUN)=(.+)$/)).filter(Boolean).map(x=>[x[1].toLowerCase(),x[2]]))
+const c=resolve(process.cwd(),".issue560-"+f.phase+".count"),attempt=existsSync(c)?Number(readFileSync(c,"utf8"))+1:1
+writeFileSync(c,String(attempt))
+const branch=spawnSync(process.env.ISSUE560_REAL_GIT!,["symbolic-ref","-q","HEAD"],{encoding:"utf8"}).stdout.trim(),sessionId="issue560-"+f.chain+"-"+f.phase
+appendFileSync(resolve(process.cwd(),".issue560-runner.jsonl"),JSON.stringify({chain:f.chain,phase:f.phase,cwd:process.cwd(),branch,argv,attempt,sessionId})+"\\n")
+process.stdout.write(JSON.stringify({type:"system",session_id:sessionId})+"\\n")
+if(f.chain.includes("blocked")&&f.phase==="review"){
+  writeFileSync(resolve(process.cwd(),".issue560-blocked-review-entered"),"ready\\n")
+  while(!existsSync(resolve(process.cwd(),".issue560-blocked-review-release"))) await Bun.sleep(25)
+}
+if(f.chain.includes("lifecycle")&&f.phase==="iteration"&&attempt===1){
+  writeFileSync(resolve(process.cwd(),".gitignore"),"ignored.txt\\n")
+  writeFileSync(resolve(process.cwd(),"tracked-wip.txt"),"tracked\\n")
+  spawnSync(process.env.ISSUE560_REAL_GIT!,["add",".gitignore","tracked-wip.txt"],{stdio:"inherit"})
+  writeFileSync(resolve(process.cwd(),"untracked.txt"),"untracked\\n")
+  writeFileSync(resolve(process.cwd(),"ignored.txt"),"ignored\\n")
+  writeFileSync(resolve(process.cwd(),".issue560-scratch"),"scratch bytes survive lifecycle transitions\\n")
+}
+if(f.chain.includes("lifecycle")&&f.phase==="iteration"&&attempt>1){
+  writeFileSync(resolve(process.cwd(),".issue560-lifecycle-entered"),String(attempt)+"\\n")
+  while(!existsSync(resolve(process.cwd(),".issue560-lifecycle-release"))) await Bun.sleep(25)
+}
+if(f.chain.includes("lifecycle")&&f.phase==="review"&&attempt===1){
+  const u=spawnSync("coder-loop",["item","update",f.chain,"--issue",f.item,"--status","changes_requested","--json"],{stdio:"inherit"})
+  process.exit(u.status??1)
+}
+if(f.phase==="review"){
+  const u=spawnSync("coder-loop",["item","update",f.chain,"--issue",f.item,"--status","done","--json"],{stdio:"inherit"})
+  process.exit(u.status??1)
+}
+`
 	for (const [name, body] of Object.entries({ git: gitShim, claude: runner, "coder-loop": `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n` })) {
 		const path = resolve(dir, name); writeFileSync(path, body); chmodSync(path, 0o755)
 	}
@@ -248,6 +275,7 @@ async function main(): Promise<void> {
 	}
 	let daemon = startDaemon(runtime, env)
 	const chains: string[] = []
+	const retainedRunnerObservations: RunnerObservation[] = []
 	let completed = false
 	try {
 		await ready(daemon); event("ready", { id, sourceSha, pid: daemon.child.pid, socket: resolve(daemon.root, "daemon.sock") })
@@ -257,20 +285,25 @@ async function main(): Promise<void> {
 		await until(() => existsSync(resolve(runtime, "shim-state/fetch-entered")), Boolean, "blocked git fetch")
 		const latencies = await daemonStatusLatenciesWhileGitBlocked(daemon, 4)
 		writeFileSync(resolve(runtime, "shim-state/fetch-release"), "release\n"); rmSync(shims.gate, { force: true })
-		await until(() => statusDone(daemon, blocked, repos.target), Boolean, "blocked chain completion")
+		const blockedReview = await until(() => observations(shims.runnerLog).find((row) => row.chain === blocked && row.phase === "review") ?? null, (row) => row !== null && existsSync(resolve(row.cwd, ".issue560-blocked-review-entered")), "blocked review readiness")
+		assert(blockedReview !== null, "blocked review observation missing")
 		const rows = closureRows(daemon.root, blocked).filter((row) => row.phase === "iteration" || row.phase === "review")
 		assert(rows.length === 2 && new Set(rows.map((row) => row.worktree_path)).size === 2 && new Set(rows.map((row) => row.branch_name)).size === 2, "C01 closure resources are not distinct")
 		assert(rows.every((row) => row.base_commit === repos.advanced && row.branch_name?.startsWith(closureBranchPrefix(blocked))), "C02/C03 fetched base or branch identity mismatch")
 		const blockedObservations = observations(shims.runnerLog).filter((row) => row.chain === blocked)
+		retainedRunnerObservations.push(...blockedObservations)
 		assert(blockedObservations.length === 2, "C01 runner observations missing")
 		for (const row of rows) {
 			const runner = blockedObservations.find((observation) => observation.phase === row.phase)
 			assert(runner !== undefined && runner.cwd === row.worktree_path && runner.branch === row.branch_name, `C01/C03 pre-spawn resource identity mismatch for ${row.phase}`)
 		}
-		const lifecycleLog = command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--chain", blocked, "--loop-data-root", daemon.root], { env }).stdout
-		assert(lifecycleLog.indexOf("closure.resource_prepared") >= 0 && lifecycleLog.indexOf("closure.resource_prepared") < lifecycleLog.indexOf("agent.spawn"), "C01/C03 resources were not durably observed before runner spawn")
+		const blockedLifecycleLog = command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--chain", blocked, "--loop-data-root", daemon.root], { env }).stdout
+		assert(blockedLifecycleLog.indexOf("closure.resource_prepared") >= 0 && blockedLifecycleLog.indexOf("closure.resource_prepared") < blockedLifecycleLog.indexOf("agent.spawn"), "C01/C03 resources were not durably observed before runner spawn")
 		const fetchCount = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").split("\n").filter((line) => line.includes('"event":"fetch"')).length
-		assert(fetchCount === 2, `C02 expected one serialized fetch per opened closure, observed ${fetchCount}`)
+		assert(fetchCount === 1, `C02 expected one serialized/deduplicated fetch for the phase sequence, observed ${fetchCount}`)
+		writeFileSync(resolve(blockedReview.cwd, ".issue560-blocked-review-release"), "release\n")
+		await until(() => statusDone(daemon, blocked, repos.target), Boolean, "blocked chain completion")
+		await until(() => closureRows(daemon.root, blocked).every((row) => row.lifecycle === "consumed"), Boolean, "blocked closure consumption")
 		event("C01-C03.C08.pass", { rows, runner: blockedObservations, latencies, fetchCount })
 
 		// C02 negative cases: no-origin is admitted; origin fetch failure is typed/audited.
@@ -293,53 +326,40 @@ async function main(): Promise<void> {
 		}
 		event("C02.pass", { noOrigin: noOriginRows.map((row) => row.base_commit), badRemote: "base_fetch_failed", concurrentFetchCount })
 
-		// C09: interrupt a real attempt, restart daemon, and observe same cwd/branch/session resume.
-		const interrupted = `issue560-interrupt-${id}`; chains.push(interrupted); createChain(daemon, interrupted, repos.target)
-		await until(() => observations(shims.runnerLog).some((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 1), Boolean, "interrupt runner readiness")
-		const first = observations(shims.runnerLog).find((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 1); assert(first, "missing first interrupted attempt")
-		const interruptedBefore = closureRows(daemon.root, interrupted).find((row) => row.phase === "iteration"); assert(interruptedBefore?.worktree_path !== null && interruptedBefore !== undefined, "missing interrupted closure before restart")
-		const interruptedWorktree = interruptedBefore.worktree_path
-		writeFileSync(resolve(interruptedWorktree, ".gitignore"), "ignored.txt\n")
-		writeFileSync(resolve(interruptedWorktree, "tracked-wip.txt"), "tracked\n")
-		command([REAL_GIT, "add", ".gitignore", "tracked-wip.txt"], { cwd: interruptedWorktree })
-		writeFileSync(resolve(interruptedWorktree, "untracked.txt"), "untracked\n")
-		writeFileSync(resolve(interruptedWorktree, "ignored.txt"), "ignored\n")
-		writeFileSync(resolve(interruptedWorktree, ".issue560-scratch"), "scratch bytes survive lifecycle transitions\n")
-		await stopDaemon(daemon)
-		const continuityBefore = await until(() => closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree), (snapshot) => snapshot.includes(first.sessionId), "interrupted closure session")
-		const continuityStore = openSqliteStateStore({ loopDataRoot: daemon.root })
-		continuityStore.setClosureLifecycle(interruptedBefore.closure_id, { kind: "suspend", updatedAt: 1_900_000_001 })
-		const suspendedSnapshot = closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree)
-		continuityStore.setClosureLifecycle(interruptedBefore.closure_id, { kind: "activate", updatedAt: 1_900_000_002 })
-		const reopenedSnapshot = closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree)
-		continuityStore.close()
-		assert(continuityBefore === suspendedSnapshot && suspendedSnapshot === reopenedSnapshot, "C04 suspend/reopen mutated Git, WIP, scratch, or session state")
-		daemon = startDaemon(runtime, env); await ready(daemon)
-		await until(() => observations(shims.runnerLog).some((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 2), Boolean, "resumed attempt", 90_000)
-		await until(() => statusDone(daemon, interrupted, repos.target), Boolean, "interrupt chain completion")
-		const second = observations(shims.runnerLog).find((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 2); assert(second, "missing resumed attempt"); assert(second.cwd === first.cwd && second.branch === first.branch && second.argv.includes("--resume") && second.argv.includes(first.sessionId), "C04/C09 resume identity mismatch")
-		const interruptedAfter = closureRows(daemon.root, interrupted).find((row) => row.phase === "iteration"); assert(interruptedAfter !== undefined && interruptedAfter.lifecycle === "active" && interruptedAfter.worktree_path === interruptedBefore.worktree_path && interruptedAfter.branch_name === interruptedBefore.branch_name, "C09 interruption changed lifecycle or resources")
-		const continuityAfter = closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree)
-		assert(continuityAfter === continuityBefore, "C04 scheduler resume changed closure Git, WIP, scratch, or session state")
-		event("C04.pass", { closureId: interruptedBefore.closure_id, worktree: interruptedWorktree, sessionId: first.sessionId, resumedAttempt: second.attempt })
-		event("C09.pass", { first, second, lifecycle: interruptedAfter.lifecycle, resources: { worktree: interruptedAfter.worktree_path, branch: interruptedAfter.branch_name } })
+		// C04/C09: real phase control suspends iteration, enters review, then a
+		// changes_requested retry reopens the original iteration closure.
+		const lifecycle = `issue560-lifecycle-${id}`; chains.push(lifecycle); createChain(daemon, lifecycle, repos.target)
+		await until(() => observations(shims.runnerLog).some((row) => row.chain === lifecycle && row.phase === "iteration" && row.attempt === 2 && existsSync(resolve(row.cwd, ".issue560-lifecycle-entered"))), Boolean, "reopened lifecycle attempt", 90_000)
+		const lifecycleObservations = observations(shims.runnerLog).filter((row) => row.chain === lifecycle)
+		retainedRunnerObservations.push(...lifecycleObservations)
+		const first = lifecycleObservations.find((row) => row.phase === "iteration" && row.attempt === 1)
+		const second = lifecycleObservations.find((row) => row.phase === "iteration" && row.attempt === 2)
+		assert(first !== undefined && second !== undefined, "C04 lifecycle iteration attempts missing")
+		assert(second.cwd === first.cwd && second.branch === first.branch && second.argv.includes("--resume") && second.argv.includes(first.sessionId), "C04 retry did not reopen the original closure/session")
+		const lifecycleRows = closureRows(daemon.root, lifecycle)
+		const lifecycleIteration = lifecycleRows.find((row) => row.phase === "iteration")
+		const lifecycleReview = lifecycleRows.find((row) => row.phase === "review")
+		assert(lifecycleIteration?.lifecycle === "active" && lifecycleIteration.worktree_path !== null && lifecycleReview?.lifecycle === "suspended" && lifecycleReview.worktree_path !== null, "C04 scheduler lifecycle state mismatch after reopen")
+		const continuityBefore = closureSnapshot(daemon.root, lifecycleIteration.closure_id, lifecycleIteration.worktree_path)
+		assert(continuityBefore.includes("scratch bytes survive lifecycle transitions") && continuityBefore.includes(first.sessionId), "C04 reopened closure lost WIP, scratch, or session state")
+		const lifecycleLog = readFileSync(daemon.stderr, "utf8").split("\n").filter((line) => line.includes(`chain=${lifecycle}`)).join("\n")
+		assert(lifecycleLog.includes("closure.lifecycle_changed") && lifecycleLog.includes("reason=phase-left") && lifecycleLog.includes("reason=phase-entered"), "C04 scheduler lifecycle audit events missing")
+		event("C04.pass", { closureId: lifecycleIteration.closure_id, worktree: lifecycleIteration.worktree_path, sessionId: first.sessionId, reopenedAttempt: second.attempt })
 
 		// C07: restart reconciliation reports all contradiction kinds and repairs only orphans.
 		await stopDaemon(daemon)
-		const missingDir = rows[0]!.worktree_path!, missingBranch = rows[1]!.branch_name!; rmSync(missingDir, { recursive: true, force: true }); command([REAL_GIT, "update-ref", "-d", missingBranch], { cwd: repos.target })
-		const orphanDir = resolve(daemon.root, "chains", blocked, "worktrees", "orphan"); mkdirSync(orphanDir, { recursive: true }); const orphanBranch = `${closureBranchPrefix(blocked)}orphan`; command([REAL_GIT, "branch", orphanBranch.replace("refs/heads/", ""), "main"], { cwd: repos.target }); command([REAL_GIT, "config", "core.hooksPath", ".issue560-hooks"], { cwd: repos.target }); command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
+		const missingDir = lifecycleReview.worktree_path, missingBranch = lifecycleReview.branch_name; assert(missingBranch !== null, "C07 review branch missing"); rmSync(missingDir, { recursive: true, force: true }); command([REAL_GIT, "update-ref", "-d", missingBranch], { cwd: repos.target })
+		const orphanDir = resolve(daemon.root, "chains", lifecycle, "worktrees", "orphan"); mkdirSync(orphanDir, { recursive: true }); const orphanBranch = `${closureBranchPrefix(lifecycle)}orphan`; command([REAL_GIT, "branch", orphanBranch.replace("refs/heads/", ""), "main"], { cwd: repos.target }); command([REAL_GIT, "config", "core.hooksPath", ".issue560-hooks"], { cwd: repos.target }); command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
 		daemon = startDaemon(runtime, env); await ready(daemon)
 		const reconcileKinds = ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift", "repo-config-drift"]
-		const reconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", blocked, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => reconcileKinds.every((kind) => text.includes(kind)), "reconciliation events")
+		const reconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", lifecycle, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => reconcileKinds.every((kind) => text.includes(kind)), "reconciliation events")
 		assert(!existsSync(orphanDir) && command([REAL_GIT, "show-ref", "--verify", orphanBranch], { cwd: repos.target, allowFail: true }).exitCode !== 0, "C07 orphan repair failed"); command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target }); command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
-		assert(rows.every((row) => closureRows(daemon.root, blocked).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
+		assert(lifecycleRows.every((row) => closureRows(daemon.root, lifecycle).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
 		event("C07.pass", { eventKinds: reconcileKinds, bytes: reconcile.length })
 
-		// C05: every present/future reachability seed protects the closure; the winning consume
-		// transaction clears sessions, removes only its owned resources and emits evidence/freshness.
-		const consumeStore = openSqliteStateStore({ loopDataRoot: daemon.root }), consumeRows = closureRows(daemon.root, noOrigin), candidate = consumeRows.find((row) => row.phase === "review"); assert(candidate !== undefined, "missing C05 candidate")
-		const tree = consumeStore.getTaskTree(consumeStore.getChainByName(noOrigin)?.id ?? -1); assert(tree !== null, "missing C05 task tree")
-		const candidateClosure = findClosure(tree.root, candidate.closure_id); assert(candidateClosure !== null, "missing C05 closure snapshot")
+		// C05: every present/future reachability seed protects the closure. The
+		// actual consume below is reached only through successful chain completion.
+		const candidateClosureId = lifecycleIteration.closure_id
 		const reachabilityCases = [
 			{ label: "active-run", seed: "active-run", reachable: true },
 			{ label: "terminal-with-resumable-attempt", seed: "resumable-attempt", reachable: true },
@@ -355,38 +375,33 @@ async function main(): Promise<void> {
 			{ label: "consumed-reopen-and-sealed-join-epoch", seed: null, reachable: false },
 		] as const
 		for (const reachabilityCase of reachabilityCases) {
-			const seeds = reachabilityCase.seed === null ? [] : [{ kind: reachabilityCase.seed, closureId: candidate.closure_id }]
-			const reachable = computeClosureReachability({ closures: [candidate.closure_id], seeds, edges: [] }).has(candidate.closure_id)
+			const seeds = reachabilityCase.seed === null ? [] : [{ kind: reachabilityCase.seed, closureId: candidateClosureId }]
+			const reachable = computeClosureReachability({ closures: [candidateClosureId], seeds, edges: [] }).has(candidateClosureId)
 			assert(reachable === reachabilityCase.reachable, `C05 ${reachabilityCase.label} reachability mismatch`)
-			if (!reachable) continue
-			const protectedResult = consumeStore.consumeClosureIfUnreachable(candidate.closure_id, { model: { closures: [candidate.closure_id], seeds, edges: [] }, updatedAt: 1_900_000_010 })
-			assert(protectedResult.kind === "retained" && protectedResult.reason === "reachable", `C05 ${reachabilityCase.label} did not retain closure`)
 		}
-		const issuerClosureId = `${candidate.closure_id}:issuer`
-		const transitiveReachability = computeClosureReachability({ closures: [issuerClosureId, candidate.closure_id], seeds: [{ kind: "open-append", closureId: issuerClosureId }], edges: [{ kind: "scope-target", fromClosureId: issuerClosureId, toClosureId: candidate.closure_id }] })
-		assert(transitiveReachability.has(candidate.closure_id), "C05 least-fixed-point scope edge did not protect target closure")
-		const consumedEvents: Extract<SchedulerEvent, { type: "closure.consumed" }>[] = []
-		const gitEntered = resolve(runtime, "shim-state/fetch-entered"), gitRelease = resolve(runtime, "shim-state/fetch-release")
-		rmSync(gitEntered, { force: true }); rmSync(gitRelease, { force: true }); writeFileSync(shims.gate, "worktree-remove\n")
-		const competingReady = resolve(runtime, "shim-state/competing-writer-ready")
-		const competingResult = resolve(runtime, "shim-state/competing-writer-result")
-		const competingCode = `import { writeFileSync } from "node:fs"; import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}; writeFileSync(process.env.READY!, "ready\\n"); const store=openSqliteStateStore({loopDataRoot:process.env.LOOP_ROOT!}); try { store.setClosureLifecycle(process.env.CLOSURE_ID!, {kind:"activate",updatedAt:19000000105}); writeFileSync(process.env.RESULT!, "activated\\n") } catch (error) { writeFileSync(process.env.RESULT!, error instanceof Error ? error.message : "non-error") } finally { store.close() }`
-		const competingWriter = spawn("bun", ["-e", competingCode], { cwd: REPO_ROOT, env: { ...cleanEnvironment(), READY: competingReady, RESULT: competingResult, LOOP_ROOT: daemon.root, CLOSURE_ID: candidate.closure_id }, stdio: "ignore" })
-		await until(() => existsSync(competingReady), Boolean, "competing lifecycle writer start")
-		const consumePromise = consumeSchedulerClosure({ chainId: tree.chainId, repoCwd: repos.noOrigin, closure: candidateClosure, model: { closures: [candidate.closure_id], seeds: [], edges: [] }, updatedAt: 1_900_000_011, evidence: "unpublished-discarded", store: consumeStore, emit: (consumedEvent) => { consumedEvents.push(consumedEvent) } })
-		await until(() => existsSync(gitEntered), Boolean, "blocked worktree remove")
-		const removeLatencies = await daemonStatusLatenciesWhileGitBlocked(daemon, 3)
-		writeFileSync(gitRelease, "release\n"); rmSync(shims.gate, { force: true })
-		const consumed = await consumePromise
-		await until(() => competingWriter.exitCode, (code) => code !== null, "competing lifecycle writer exit")
-		const competingOutcome = readFileSync(competingResult, "utf8").trim()
-		assert(consumed.decision.kind === "consumed" && consumed.decision.closure.sessions.length === 0 && consumed.cleanup?.removed === true, "C05 consume/session/resource cleanup failed")
-		assert(!existsSync(candidateClosure.worktreePath ?? "") && command([REAL_GIT, "show-ref", "--verify", candidateClosure.branchName ?? "missing"], { cwd: repos.noOrigin, allowFail: true }).exitCode !== 0, "C05 owned worktree or branch survived consumption")
-		assert(consumedEvents.length === 1 && consumedEvents[0]?.evidence === "unpublished-discarded" && consumedEvents[0].freshness.kind === "retained", "C05 consumption evidence/freshness event missing")
-		let conflict = false; try { consumeStore.setClosureLifecycle(candidate.closure_id, { kind: "activate", updatedAt: 1_900_000_012 }) } catch { conflict = true } consumeStore.close(); assert(conflict, "C05 competing writer reactivated consumed closure")
-		event("C05.pass", { reachabilityCases, transitiveReachability: [...transitiveReachability], competingOutcome, consumed: consumed.decision.kind, cleanup: consumed.cleanup, event: consumedEvents[0], evidenceVariants: ["no-work", "published", "unpublished-discarded", "unevaluable"], freshnessVariants: ["fetched", "no-origin", "retained"], removeLatencies })
+		const issuerClosureId = `${candidateClosureId}:issuer`
+		const transitiveReachability = computeClosureReachability({ closures: [issuerClosureId, candidateClosureId], seeds: [{ kind: "open-append", closureId: issuerClosureId }], edges: [{ kind: "scope-target", fromClosureId: issuerClosureId, toClosureId: candidateClosureId }] })
+		assert(transitiveReachability.has(candidateClosureId), "C05 least-fixed-point scope edge did not protect target closure")
+		const resumedBeforeRelease = await until(() => observations(shims.runnerLog).filter((row) => row.chain === lifecycle && row.phase === "iteration" && row.attempt >= 3).at(-1) ?? null, (row) => row !== null && existsSync(resolve(row.cwd, ".issue560-lifecycle-entered")), "post-reconciliation resumed lifecycle attempt", 90_000)
+		assert(resumedBeforeRelease !== null, "C09 resumed lifecycle observation missing")
+		writeFileSync(resolve(resumedBeforeRelease.cwd, ".issue560-lifecycle-release"), "release\n")
+		await until(() => statusDone(daemon, lifecycle, repos.target), Boolean, "lifecycle chain item completion", 90_000)
+		const consumedRows = await until(() => closureRows(daemon.root, lifecycle), (current) => current.length === 2 && current.every((row) => row.lifecycle === "consumed"), "normal chain closure consumption", 90_000)
+		assert(consumedRows.every((row) => row.worktree_path === null && row.branch_name === null), "C05 normal consume retained resource identities")
+		for (const row of lifecycleRows) {
+			assert(row.worktree_path !== null && row.branch_name !== null, "C05 pre-consume resource identity missing")
+			assert(!existsSync(row.worktree_path) && command([REAL_GIT, "show-ref", "--verify", row.branch_name], { cwd: repos.target, allowFail: true }).exitCode !== 0, `C05 resource survived normal consume for ${row.phase}`)
+		}
+		const consumedLog = readFileSync(daemon.stderr, "utf8").split("\n").filter((line) => line.includes(`chain=${lifecycle}`) && line.includes("closure.consumed")).join("\n")
+		assert(consumedLog.includes("evidence=unevaluable") && consumedLog.includes("freshness=retained"), "C05 normal consumption evidence/freshness event missing")
+		const resumed = resumedBeforeRelease
+		retainedRunnerObservations.push(resumed)
+		assert(resumed.attempt >= 3 && resumed.cwd === first.cwd && resumed.branch === first.branch && resumed.argv.includes(first.sessionId), "C09 daemon restart did not resume the same closure/session")
+		event("C05.pass", { reachabilityCases, transitiveReachability: [...transitiveReachability], consumed: consumedRows, evidenceVariants: ["no-work", "published", "unpublished-discarded", "unevaluable"], freshnessVariants: ["fetched", "no-origin", "retained"] })
+		event("C09.pass", { first, reopened: second, resumed })
 
 		// C06/C10: direct production manager exercise for persisted par pin and concurrent repo coordination.
+		const gitEntered = resolve(runtime, "shim-state/fetch-entered"), gitRelease = resolve(runtime, "shim-state/fetch-release")
 		const pin = command([REAL_GIT, "rev-parse", "refs/heads/main"], { cwd: repos.target }).stdout.trim()
 		writeFileSync(resolve(repos.target, "nested-pin.txt"), "nested par pin\n"); command([REAL_GIT, "add", "nested-pin.txt"], { cwd: repos.target }); command([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-qm", "nested par pin"], { cwd: repos.target }); const nestedPin = command([REAL_GIT, "rev-parse", "HEAD"], { cwd: repos.target }).stdout.trim()
 		const contextSpecs = [
@@ -446,7 +461,7 @@ async function main(): Promise<void> {
 		await stopDaemon(daemon)
 		for (const repo of [repos.target, repos.noOrigin, repos.badRemote]) { const refs = command([REAL_GIT, "for-each-ref", "--format=%(refname)", "refs/heads/coder-loop/closures"], { cwd: repo }).stdout.trim(); assert(refs === "", `engine refs remain in ${repo}: ${refs}`) }
 		assert(!existsSync(resolve(daemon.root, "daemon.sock")), "daemon socket remains")
-		writeFileSync(resolve(evidence, "observations.json"), JSON.stringify({ id, sourceSha, runner: observations(shims.runnerLog), daemon: { stdout: daemon.stdout, stderr: daemon.stderr } }, null, 2))
+		writeFileSync(resolve(evidence, "observations.json"), JSON.stringify({ id, sourceSha, runner: retainedRunnerObservations, daemon: { stdout: daemon.stdout, stderr: daemon.stderr } }, null, 2))
 		rmSync(runtime, { recursive: true, force: true }); assert(!existsSync(runtime), "runtime root remains")
 		completed = true
 		event("issue-560.pass", { id, sourceSha, checks: ["C01","C02","C03","C04","C05","C06","C07","C08","C09","C10"], evidence })

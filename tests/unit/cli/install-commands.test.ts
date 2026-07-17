@@ -45,6 +45,19 @@ describe("doctor command ownership", () => {
 		expect(await buildGitOriginHealthLine(target)).toBe("WARN: git origin unavailable; closure freshness=no-origin/unavailable")
 	})
 
+	test("configured origin health never renders credential-bearing remote URLs", async () => {
+		const target = resolve(TEST_ROOT, "doctor-origin-redaction")
+		await mkdir(target, { recursive: true })
+		const init = Bun.spawnSync({ cmd: ["git", "init", "--initial-branch", "main"], cwd: target, stdout: "pipe", stderr: "pipe" })
+		expect(init.exitCode).toBe(0)
+		const remote = Bun.spawnSync({ cmd: ["git", "remote", "add", "origin", "https://user:secret@example.invalid/repo.git"], cwd: target, stdout: "pipe", stderr: "pipe" })
+		expect(remote.exitCode).toBe(0)
+		const line = await buildGitOriginHealthLine(target)
+		expect(line).toBe("OK: git origin configured")
+		expect(line).not.toContain("secret")
+		expect(line).not.toContain("https://")
+	})
+
 	test("does not carry the preset kind label bootstrap asset", async () => {
 		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
 		expect(source).not.toContain("KIND_LABELS")

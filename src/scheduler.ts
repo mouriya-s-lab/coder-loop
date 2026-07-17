@@ -68,6 +68,7 @@ import { createStreamTextState } from "./runner-output"
 import {
 	closureBranchName,
 	closureBranchPrefix,
+	closureResourcesBelongToEngine,
 	closureWorktreePath,
 	createRepositoryGitCoordinator,
 	persistedParPin,
@@ -197,7 +198,9 @@ export type SchedulerStore = Pick<
 	| "getCurrentRun"
 	| "clearCurrentRun"
 	| "getTaskTree"
+	| "setClosureLifecycle"
 	| "setClosureResources"
+	| "consumeClosureIfUnreachable"
 >
 
 export type SchedulerSpawnContext = {
@@ -233,6 +236,7 @@ export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Pr
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
 	| { type: "closure.resource_prepared"; chainId: number; itemId: number; phase: string; closureId: string; worktreePath: string; branchName: string; baseCommit: string; freshness: OriginFreshness }
+	| { type: "closure.lifecycle_changed"; chainId: number; itemId: number; phase: string; closureId: string; from: "active" | "suspended"; to: "active" | "suspended"; reason: "phase-left" | "phase-entered" }
 	| { type: "closure.consumed"; chainId: number; closureId: string; evidence: ClosureConsumptionEvidence; freshness: OriginFreshness }
 	| { type: "closure.git_failed"; chainId: number; itemId: number; phase: string; closureId: string; code: SchedulerError["code"]; error: string }
 	| { type: "closure.reconciled"; chainId: number; closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }
@@ -897,7 +901,10 @@ export function createGitWorktreeManager(
 		return await coordinator.run(context.repoCwd, async () => {
 			await mkdir(dirname(worktreePath), { recursive: true })
 			if (await gitWorktreeListIncludesPath(context.repoCwd, worktreePath)) {
-				if (!existsSync(worktreePath)) await git(context.repoCwd, ["worktree", "prune"])
+				if (!existsSync(worktreePath)) {
+					const remove = await git(context.repoCwd, ["worktree", "remove", "--force", worktreePath])
+					if (remove.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to remove stale closure worktree registration ${worktreePath}: ${remove.stderr}`)
+				}
 				else {
 					const head = await requireGitCommit(worktreePath, "HEAD", "closure_head_unavailable")
 					return { worktreePath, branchName, baseCommit: context.existing?.baseCommit ?? head, freshness: { kind: "retained", commit: head } }
@@ -949,7 +956,7 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 	const findings: ClosureReconciliationFinding[] = []
 	const items = new Map(input.items.map((item) => [item.id, item]))
 	const closures = collectClosures(input.tree)
-	const registeredPaths = new Set(closures.flatMap((closure) => closure.worktreePath === null ? [] : [closure.worktreePath]))
+	const registeredPaths = new Set(closures.flatMap((closure) => closure.lifecycle === "consumed" || closure.worktreePath === null ? [] : [closure.worktreePath]))
 	const branchesByRepo = new Map<string, Set<string>>()
 	for (const closure of closures) {
 		const item = items.get(closure.itemRowId)
@@ -982,7 +989,15 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 			if (!entry.isDirectory()) continue
 			const path = resolve(worktreeRoot, entry.name)
 			if (registeredPaths.has(path)) continue
-			await rm(path, { recursive: true, force: true })
+			let removedRegistration = false
+			for (const repoCwd of new Set(input.items.map((item) => item.repoCwd))) {
+				const listed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "list", "--porcelain"]))
+				if (listed.exitCode !== 0 || !gitWorktreeListOutputIncludesPath(listed.stdout, path)) continue
+				const removed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "remove", "--force", path]))
+				if (removed.exitCode === 0) removedRegistration = true
+				break
+			}
+			if (!removedRegistration && existsSync(path)) await rm(path, { recursive: true, force: true })
 			findings.push({ closureId: null, repoCwd: input.items[0]?.repoCwd ?? "", mismatch: { kind: "orphan-directory", path, repaired: true } })
 		}
 	} catch (error) {
@@ -1005,6 +1020,18 @@ export async function cleanupSchedulerChainWorktrees(
 		if (closure.lifecycle !== "consumed" || closure.worktreePath === null || closure.branchName === null) continue
 		const worktreePath = closure.worktreePath
 		const branchName = closure.branchName
+		if (!closureResourcesBelongToEngine(repoCwd, closure.closureId, worktreePath, branchName)) {
+			cleaned.push({
+				repoCwd,
+				worktreePath,
+				registered: false,
+				removed: false,
+				directoryRemoved: false,
+				pruned: false,
+				error: `closure ${closure.closureId} resources are outside engine closure namespace`,
+			})
+			continue
+		}
 		const result = await repositoryGitCoordinator.run(repoCwd, async (): Promise<SchedulerChainWorktreeCleanup> => {
 			const listResult = await git(repoCwd, ["worktree", "list", "--porcelain"])
 			if (listResult.exitCode !== 0) {
@@ -1039,13 +1066,8 @@ export async function cleanupSchedulerChainWorktrees(
 			}
 
 			const deleteBranchResult = await git(repoCwd, ["update-ref", "-d", branchName])
-			const pruneResult = await git(repoCwd, ["worktree", "prune"])
-			const pruned = pruneResult.exitCode === 0
+			const pruned = false
 			if (deleteBranchResult.exitCode !== 0) error = `git update-ref failed (exit ${deleteBranchResult.exitCode}): ${deleteBranchResult.stderr}`
-			if (!pruned) {
-				const pruneError = `git worktree prune failed (exit ${pruneResult.exitCode}): ${pruneResult.stderr}`
-				error = error === null ? pruneError : `${error}; ${pruneError}`
-			}
 
 			return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned, error }
 		})
@@ -1193,6 +1215,7 @@ async function spawnSchedulerRun(
 			branchName: resources.branchName,
 			updatedAt: startedAt,
 		})
+		await enterClosurePhase(options, chain, item, phase, closureId, startedAt)
 		options.store.setCurrentRun({
 			chainId: chain.id,
 			phase,
@@ -1259,7 +1282,7 @@ async function spawnSchedulerRun(
 			env: spawnEnv,
 		})
 		await waitForChildSpawn(child)
-		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
+		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, phasePlan, child, runner, credential, credentialContext)
 		slot.activeRun = activeRun
 		options.store.setCurrentRun({
 			chainId: chain.id,
@@ -1306,6 +1329,48 @@ async function spawnSchedulerRun(
 		await containSchedulerPreparationFailure(options, chain, item, slot, attribution, failure)
 		return null
 	}
+}
+
+async function enterClosurePhase(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	phase: string,
+	closureId: string,
+	updatedAt: number,
+): Promise<void> {
+	if (item.phase !== null && item.phase !== phase) {
+		const previous = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, item.phase)
+		if (previous?.lifecycle === "active") {
+			options.store.setClosureLifecycle(previous.closureId, { kind: "suspend", updatedAt })
+			await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase: item.phase, closureId: previous.closureId, from: "active", to: "suspended", reason: "phase-left" })
+		}
+	}
+	const current = findClosure(options.store.getTaskTree(chain.id)?.root ?? null, closureId)
+	if (current?.lifecycle === "suspended") {
+		options.store.setClosureLifecycle(closureId, { kind: "activate", updatedAt })
+		await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase, closureId, from: "suspended", to: "active", reason: "phase-entered" })
+	}
+}
+
+function runLeavesPhase(input: {
+	itemAtSpawn: ItemRecord
+	currentItem: ItemRecord | null
+	phase: string
+	phasePlan: SchedulerPhasePlan
+	chainStatuses: SchedulerChainStatuses
+	exitCode: number
+	startedAt: number
+}): boolean {
+	if (input.exitCode !== 0 || input.currentItem === null || input.chainStatuses.terminal.includes(input.currentItem.status)) return false
+	const index = input.phasePlan.nonTriggerPhases.indexOf(input.phase)
+	if (index < 0) return false
+	if (index < input.phasePlan.nonTriggerPhases.length - 1) return true
+	const statusChanged = input.currentItem.statusUpdatedAt !== input.itemAtSpawn.statusUpdatedAt
+		&& input.currentItem.statusUpdatedAt >= input.startedAt
+	return statusChanged
+		&& input.currentItem.status !== input.itemAtSpawn.status
+		&& input.chainStatuses.pending.includes(input.currentItem.status)
 }
 
 async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void> {
@@ -1440,6 +1505,7 @@ function attachRunCloseHandler(
 	worktreePath: string,
 	startedAt: number,
 	phase: string,
+	phasePlan: SchedulerPhasePlan,
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
 	// #406: the credential minted at spawn for this run, revoked here when the run closes
@@ -1538,7 +1604,8 @@ function attachRunCloseHandler(
 					options.state.rateLimitedUntilMs = rateLimit.reset.resetsAt * 1000
 				}
 				const rateLimitExit = (rateLimit.code !== null && isRateLimitErrorCode(rateLimit.code)) || rateLimit.reset !== null
-				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
+				const chainStatuses = await schedulerStatusesForChain(options, chain)
+				const terminalStatuses = new Set(chainStatuses.terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = (currentItem ?? item).status
 				const endedAt = nowSeconds(options)
@@ -1654,6 +1721,13 @@ function attachRunCloseHandler(
 						})
 					} else if (parsedSessionId !== null) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
+					}
+					if (runLeavesPhase({ itemAtSpawn: item, currentItem, phase, phasePlan, chainStatuses, exitCode, startedAt })) {
+						const closure = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, phase)
+						if (closure?.lifecycle === "active") {
+							options.store.setClosureLifecycle(closure.closureId, { kind: "suspend", updatedAt: endedAt })
+							await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase, closureId: closure.closureId, from: "active", to: "suspended", reason: "phase-left" })
+						}
 					}
 					if (itemTransitionedToTerminal) {
 						await emit(options, {
@@ -2215,15 +2289,35 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 		const completionItems = options.store.listItems(chain.id)
 		if (completionItems.length === 0) return false
 		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
+		await consumeCompletedChainClosures(options, current, completionItems)
 		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 		await emit(options, { type: "chain.completed", chainId: current.id, chainName: current.name, ...(runId === undefined ? {} : { runId }) })
-		// A terminal chain is not proof that a closure can never be reached again. #560
-		// consumption owns resource removal after its fixed-point recheck; completion only
-		// records scheduler state and deliberately preserves active/suspended closures.
 		void updated
 		return true
 	} finally {
 		options.state.finalizingChainIds.delete(chain.id)
+	}
+}
+
+async function consumeCompletedChainClosures(options: SchedulerOptions, chain: ChainRecord, items: readonly ItemRecord[]): Promise<void> {
+	const tree = options.store.getTaskTree(chain.id)
+	if (tree === null) return
+	const closures = collectClosures(tree.root)
+	const repoByItem = new Map(items.map((item) => [item.id, item.repoCwd]))
+	const model: ClosureReachabilityModel = { closures: closures.map((closure) => closure.closureId), seeds: [], edges: [] }
+	for (const closure of closures) {
+		const repoCwd = repoByItem.get(closure.itemRowId)
+		if (repoCwd === undefined) continue
+		await consumeSchedulerClosure({
+			chainId: chain.id,
+			repoCwd,
+			closure,
+			model,
+			evidence: "unevaluable",
+			updatedAt: nowSeconds(options),
+			store: options.store,
+			emit: async (event) => await emit(options, event),
+		})
 	}
 }
 

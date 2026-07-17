@@ -31,6 +31,7 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("queue.terminal"),
 	arkType.unit("item.dependency_unblocked"),
 	arkType.unit("closure.resource_prepared"),
+	arkType.unit("closure.lifecycle_changed"),
 	arkType.unit("closure.consumed"),
 	arkType.unit("closure.git_failed"),
 	arkType.unit("closure.reconciled"),
@@ -349,6 +350,12 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 		kind: arkType.unit("audit"),
 		type: arkType.unit("closure.resource_prepared"),
 		payload: { closureId: "string>0", worktreePath: "string>0", branchName: "string>0", baseCommit: "string>0", freshness: OriginFreshnessBoundary },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("closure.lifecycle_changed"),
+		payload: { closureId: "string>0", from: arkType("'active'|'suspended'"), to: arkType("'active'|'suspended'"), reason: arkType("'phase-left'|'phase-entered'") },
 	},
 	{
 		...EventBaseBoundary,
@@ -1042,6 +1049,8 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			return `${event.ts} audit item.dependency_unblocked chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} ${event.payload.fromStatus}->${event.payload.toStatus}`
 		case "closure.resource_prepared":
 			return `${event.ts} audit closure.resource_prepared chain=${event.chain ?? "-"} closure=${event.payload.closureId} branch=${event.payload.branchName} freshness=${event.payload.freshness.kind}`
+		case "closure.lifecycle_changed":
+			return `${event.ts} audit closure.lifecycle_changed chain=${event.chain ?? "-"} closure=${event.payload.closureId} ${event.payload.from}->${event.payload.to} reason=${event.payload.reason}`
 		case "closure.consumed":
 			return `${event.ts} audit closure.consumed chain=${event.chain ?? "-"} closure=${event.payload.closureId} evidence=${event.payload.evidence} freshness=${event.payload.freshness.kind}`
 		case "closure.git_failed":

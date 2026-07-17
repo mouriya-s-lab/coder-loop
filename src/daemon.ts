@@ -743,6 +743,7 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 			return { kind: "chain", chainId: event.chainId }
 		case "slot.busy":
 		case "closure.resource_prepared":
+		case "closure.lifecycle_changed":
 		case "closure.consumed":
 		case "closure.git_failed":
 		case "closure.reconciled":
@@ -835,6 +836,16 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				phase: event.phase,
 				subject: { kind: "engine" },
 				payload: { closureId: event.closureId, worktreePath: event.worktreePath, branchName: event.branchName, baseCommit: event.baseCommit, freshness: event.freshness },
+			})
+		case "closure.lifecycle_changed":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				item: event.itemId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, from: event.from, to: event.to, reason: event.reason },
 			})
 		case "closure.consumed":
 			return makeObservabilityEvent({

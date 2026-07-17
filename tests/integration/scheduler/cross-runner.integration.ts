@@ -33,7 +33,7 @@ afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
 })
 
-test("cross-runner happy path stores iteration/codex and review/claude session ids independently", async () => {
+test("cross-runner happy path stores phase sessions until successful completion consumes them", async () => {
 	const fixture = await createCrossRunnerFixture("happy-path", [
 		{
 			runner: "codex",
@@ -59,6 +59,7 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 		const iterClosed = await iterTick.spawnedRuns[0]!.closed
 		expect(iterClosed.status).toBe("queued")
 		expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
+		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
 
 		const reviewTick = await schedulerTick(options)
 		expect(reviewTick.spawnedRuns).toHaveLength(1)
@@ -67,8 +68,8 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 		expect(fixture.store.getItem(item.id)?.phase).toBe("review")
 		expect(fixture.store.getItem(item.id)?.status).toBe("done")
 
-		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
-		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe("019e6cf2-5b39-7b83-9bc5-8c8b96122682")
+		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBeNull()
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBeNull()
 		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
 		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "codex" })).toBeNull()
 
@@ -216,7 +217,7 @@ test("invalid review session id clears only review/claude and the next review sp
 		expect(freshReviewTick.spawnedRuns).toHaveLength(1)
 		const freshReviewClosed = await freshReviewTick.spawnedRuns[0]!.closed
 		expect(freshReviewClosed.status).toBe("done")
-		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe(freshReviewSessionId)
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBeNull()
 
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
@@ -314,7 +315,7 @@ test("invalid review session id on opencode clears only review/opencode and the 
 		expect(freshReviewTick.spawnedRuns).toHaveLength(1)
 		const freshReviewClosed = await freshReviewTick.spawnedRuns[0]!.closed
 		expect(freshReviewClosed.status).toBe("done")
-		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBe(freshReviewSessionId)
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBeNull()
 
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([

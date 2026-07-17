@@ -261,7 +261,7 @@ export async function buildGitOriginHealthLine(target: string): Promise<string> 
 	if (inside.code !== 0 || inside.stdout.trim() !== "true") return "FAIL: target is not a Git worktree"
 	const origin = await spawnCapture("git", ["-C", target, "remote", "get-url", "origin"])
 	return origin.code === 0
-		? `OK: git origin ${origin.stdout.trim()}`
+		? "OK: git origin configured"
 		: "WARN: git origin unavailable; closure freshness=no-origin/unavailable"
 }
 
