@@ -83,7 +83,7 @@ trigger 角色（blocked-responder / umbrella-finalizer）任务简单，未调�
 
 **quality/**（3）— iter 与 review 共用的品质判据，每份内含执行/判断双侧规则：
 
-- `quality/evidence` — 证据真实性：真实路径、log 文本化、synthetic 拒收、CI parity、测试清单 delta（runner 汇总行取头端计数，不用静态 rg / grep）、弱信号不算验收
+- `quality/evidence` — 证据真实性：真实路径、log 文本化、synthetic 拒收、套件计数只认 runner 汇总行（不用静态 rg / grep；测试完整性归 diff-audit 按 diff 枚举）、弱信号不算验收
 - `quality/honesty` — 声明=观察、七类 scope-reduction 触发（cosmetic-handwave 一律硬拒；含 test-weakening）、intent-action 对照、字面授权规则 + stale-baseline 例外
 - `quality/cleanup` — 副作用申报与调度者收尾清扫（iter 只扫 scratch；review 拆环境 + 扫自身）
 
@@ -94,7 +94,7 @@ trigger 角色（blocked-responder / umbrella-finalizer）任务简单，未调�
 | `iter/steps/research` | 可选调查步（实现方向不明时派） |
 | `iter/steps/resolve-blocker` | unblock-deliverable 前置 scoping（阻塞条件 / 最小成功条件 / replay 计划） |
 | `iter/steps/implement` | 写代码 + **本地 commit**（分支续接、读契约、思考框架、intent statement；不 push——verify/e2e 对 committed HEAD 执行） |
-| `iter/steps/verify` | 跑验收行（browser 行转交 e2e 步）+ 测试套件两侧清点 + CI parity + 项目命令 |
+| `iter/steps/verify` | 跑验收行（browser 行转交 e2e 步）+ 测试套件 + 项目命令 |
 | `iter/steps/e2e` | 按 marker Canonical runtime 驱动真实路径（可使用 target-mandated repository script；含 typed browser Checks）+ 留 standing environment + 写 runtime manifest |
 | `iter/steps/submit` | intent-vs-action delta、push（commit 归 implement）、**draft** PR（fresh）或 PR comment（retry）+ `coder-loop:candidate-ref` block（绑定 exact pushed head SHA；publish 才把 draft 翻 ready） |
 | `iter/steps/source-spike` | source-writing-spike-deliverable 整步（PoC 分支 + 命令 + no-merge comment） |
@@ -148,7 +148,7 @@ Step 0 读契约 → Step 1 调查（**核心项亲自读取**：trace、shared 
 - **verification-audit** = packet 链 / identity / 覆盖真值：CandidateRef→VerificationPacket 解析、三方 SHA binding、check 覆盖表核对、artifact identity 抽查、live checks、runtime-conclusion 一致性、有界 spot 复跑；不复跑 canonical suite / 完整 check 表 / E2E。
 - **diff-audit** = scope / 卫生 / 代码 / 测试完整性真值：files 映射、runtime artifacts 卫生、diff 中测试变更逐条枚举（含 test-collection 层变化）、锚定 issue 设计的 4 类 code findings、marker-declared Pattern scope单次全 site 枚举。
 
-→ Step 4 亲自判断：trace honesty / PR protocol / title-intent / caveat honesty / evidence form / checks-mergeability 实测。先收集全部失败再 verdict → Step 5 Completeness judgment → Step 6 Verdict action（PR 回复是**全量 review 报告**：每个 check 一节引实测值 + `## 缺失汇总` 单一权威缺口区 + `## Skipped checks` 写明理由；retry 反馈质量线：契约发现领先措辞发现）：`accepted` / `moot` → 同一 comment 落 durable `coder-loop:review-verdict` block 后**干净收尾进 closure**（不 merge、不 close、不写 done/moot）；`retry` / `reenrich` / `blocked` → status write；`stop` → exit-action → Step 7 最终 exit 选择、global assessment、handoff、清场、`REVIEW SUMMARY:` 一行。
+→ Step 4 亲自判断：trace honesty / PR protocol / title-intent / caveat honesty / evidence form / checks-mergeability（后两者消费 VerificationPacket 与 VerificationAuditReport 的记录——不重开 artifact、不重复 `gh pr view`）。先收集全部失败再 verdict → Step 5 Completeness judgment → Step 6 Verdict action（PR 回复是**全量 review 报告**：每个 check 一节引实测值 + `## 缺失汇总` 单一权威缺口区 + `## Skipped checks` 写明理由；retry 反馈质量线：契约发现领先措辞发现）：`accepted` / `moot` → 同一 comment 落 durable `coder-loop:review-verdict` block 后**干净收尾进 closure**（不 merge、不 close、不写 done/moot）；`retry` / `reenrich` / `blocked` → status write；`stop` → exit-action → Step 7 最终 exit 选择、global assessment、handoff、清场、`REVIEW SUMMARY:` 一行。
 
 **review 可独立复验但绝不替被审工作修**。Review 的 marker Deliverable 分流见 `review-entry.md` 底部的 routing matrix（contract.md §4 有 issue 作者视角摘要）。状态写出通过 `coder-loop item exits` + `item update --status` 或 `item exit-action --action stop` 落 phase-exit。
 

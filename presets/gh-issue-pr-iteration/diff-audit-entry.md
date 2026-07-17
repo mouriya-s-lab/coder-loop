@@ -71,9 +71,7 @@ Flag staged runtime artifacts anywhere in the diff: loop-data files, scheduling 
 
 ### Step 5 — Test-integrity check (in the diff)
 
-From `git diff <base>...<head>`, enumerate every test **removed** (test/it block or test file deleted), **renamed**, **skipped** (`.skip`, `.todo`, commented out, condition wrapped), or **weakened** (assertion deleted/loosened, expected value broadened, error-path assertion removed) in the diff. Also flag test-collection changes that would broaden or narrow the runnable set without touching a specific test (config edits, glob changes, skip-marker introductions, CI-config changes to the test invocation). Quote each: file, test name, what happened. The empty case is written explicitly — "none" — only after enumeration, never assumed.
-
-The head-side suite count and canonical test command belong to the verification phase's VerificationPacket (audited by verification-audit). A static `rg` / `grep` declaration count published as the inventory integer is a protocol violation for that packet — you flag it in the diff, but the count itself is verification-audit's responsibility.
+From `git diff <base>...<head>`, enumerate every test **removed** (test/it block or test file deleted), **renamed**, **skipped** (`.skip`, `.todo`, commented out, condition wrapped), or **weakened** (assertion deleted/loosened, expected value broadened, error-path assertion removed) in the diff. Also flag test-collection changes that would broaden or narrow the runnable set without touching a specific test (config edits, glob changes, skip-marker introductions, CI-config changes to the test invocation). Quote each: file, test name, what happened. The empty case is written explicitly — "none" — only after enumeration, never assumed. This enumeration is the loop's test-integrity authority; judge each entry against the marker `Test delta` authorization.
 
 ### Step 6 — Code review against the issue's design
 

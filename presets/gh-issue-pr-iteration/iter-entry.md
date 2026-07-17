@@ -142,7 +142,7 @@ coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --field-json '{"branch":
 
 (only verified non-empty values; omit entirely on no-PR routes; the engine binds your run credential automatically — never copy it anywhere).
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with each line's outcome; files changed; CI-parity status; test-inventory delta; the typed runtime manifest (`durable` or `recreatable`) from the e2e step; artifacts; PR number / URL or comment URL plus the CandidateRef identity; blockers / unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
+Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with each line's outcome; files changed; the typed runtime manifest (`durable` or `recreatable`) from the e2e step; artifacts; PR number / URL or comment URL plus the CandidateRef identity; blockers / unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
 
 ### Step 6 — Cleanup (by declared runtime ownership)
 

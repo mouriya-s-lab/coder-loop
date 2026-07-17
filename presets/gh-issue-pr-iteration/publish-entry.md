@@ -30,7 +30,7 @@ Read now, yourself:
 2. `{{PRESET_ROOT}}/common/packets.md` — the CandidateRef and VerificationPacket you consume, and the revision-join rule that binds Step 2.
 3. `{{PRESET_ROOT}}/common/github-routing.md` — where the deliverable and any feedback must go.
 4. `{{PRESET_ROOT}}/common/state-contract.md` — what queue state you may and may not touch.
-5. `{{PRESET_ROOT}}/quality/evidence.md` — the packet-form standard the PR body must meet (layers, Analysis, manifest, test-inventory delta).
+5. `{{PRESET_ROOT}}/quality/evidence.md` — the packet-form standard the PR body must meet (layers, Analysis, manifest).
 6. `{{PRESET_ROOT}}/quality/honesty.md` — every claim in the body you assemble must trace to an observation the VerificationPacket actually carries; you add no new claims.
 
 ### Step 1 — Investigate
@@ -55,7 +55,7 @@ If an operator correction superseded the contract's delivery route or requiremen
 **Implementation-PR route:**
 
 1. Title: aligned with the issue subject per target conventions (strip/keep prefixes as the target mandates).
-2. Body: first line exactly `Closes #{{ISSUE}}`; then the four evidence layers (Layer 1 Change preview / Layer 2 Landing checks / Layer 3 Startup / Layer 4 End-to-end) plus `Analysis`, assembled **from the VerificationPacket's checks and runtime record** — commands, exit codes, observations, artifact refs; the runtime manifest (auth by resolution location only — never a secret value); the test-inventory delta; CI detection + parity status. Repairing structural defects in the existing body (wrong closing keyword, missing section) is your job; do not rewrite evidence history in comments.
+2. Body: first line exactly `Closes #{{ISSUE}}`; then the four evidence layers (Layer 1 Change preview / Layer 2 Landing checks / Layer 3 Startup / Layer 4 End-to-end) plus `Analysis`, assembled **from the VerificationPacket's checks and runtime record** — commands, exit codes, observations, artifact refs; the runtime manifest (auth by resolution location only — never a secret value). Repairing structural defects in the existing body (wrong closing keyword, missing section) is your job; do not rewrite evidence history in comments.
 3. Keep the CandidateRef and `coder-loop:current-state` index blocks intact in the body.
 4. Flip draft → ready: `gh pr ready <PR> -R {{REPO}}`.
 5. Confirm live: `gh pr view <PR> -R {{REPO}} --json isDraft,url,body` shows ready and the assembled body.

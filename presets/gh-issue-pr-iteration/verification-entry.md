@@ -39,7 +39,7 @@ Read these yourself:
 
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,comments,state,url` → the current executable-contract marker (validate uniqueness and supersession per `common/executable-contract.md`) and any operator corrections posted after it.
 2. The CandidateRef: resolve the issue's linked PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage via the GraphQL query in `common/github-routing.md` — never text search), then read the PR **body only** (`gh pr view <PR> -R {{REPO}} --json body,headRefOid`): the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `common/packets.md`. Fetch only the objects the index names — do not enumerate the PR comments. Index absent or unparsable → one bootstrap scan per `common/packets.md`, write the index, proceed. On no-PR routes read the issue comments. Missing or unparsable CandidateRef → this is an iteration defect: publish the exact gap as a PR/issue comment and take the retry status exit (Step 5).
-3. Target repo `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` → project commands, required suites, CI-parity rules, canonical runtime/E2E driver.
+3. Target repo `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` → project commands, required suites, canonical runtime/E2E driver.
 4. `{{SHARED_CONTEXT_FILE}}` → what iteration recorded for this run generation (context only — its claims are not evidence).
 
 ### Step 2 — Revision join
@@ -56,7 +56,7 @@ Work in `AGENT_CWD`. Check out exactly the revision the CandidateRef names (`git
 Execute, recording for every run the exact command, cwd, exit code, and observed output:
 
 1. **Every contract check** from the marker, by stable ID, exactly as written (command, env, expectation). `REQUIRE_BROWSER_EVIDENCE` tells you whether browser-kind checks demand real browser evidence.
-2. **The target-required suite(s)** named by the target repo's `CLAUDE.md` / `AGENTS.md` (typecheck, unit, lint — whatever the target mandates as pre-merge).
+2. **The target-required suite(s)** named by the target repo's `CLAUDE.md` / `AGENTS.md` (typecheck, unit, lint — whatever the target mandates as pre-merge). A suite the marker already encodes as a `Checks` row runs once — record it under its Check ID and reference that observation here instead of executing the same command twice.
 3. **One real runtime/E2E pass** through the target's canonical driver: bring the runtime up, drive the real entry the issue's behavior lives behind, observe the result. Record the runtime as `durable` or `recreatable` with setup/readiness/behavior/cleanup per the packet schema.
 
 Store artifacts (logs, transcripts, screenshots) under `{{EVIDENCE_DIR}}` and reference them from the packet's `artifactRefs`. You may fix your own environment (installs, services) but MUST NOT touch product source, tests, or config to change a check's outcome — a check that cannot pass as written is a finding, not a repair job.

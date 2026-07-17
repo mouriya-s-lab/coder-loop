@@ -65,7 +65,7 @@ review 的 PR protocol 验收 grep PR body 第一行。缺失 / 在非第一行 
 
 ### 2.3 四层证据 packet
 
-PR body和每轮 retry comment都保留四个固定 heading，与 `templates/pr-body.md` 一致：
+PR body 保留四个固定 heading，与 `templates/pr-body.md` 一致：
 
 - `Layer 1 — Change preview`
 - `Layer 2 — Landing checks`
@@ -75,33 +75,20 @@ PR body和每轮 retry comment都保留四个固定 heading，与 `templates/pr-
 
 每层引用 current marker URL/schema/source revision，并把 claim 映射到稳定 Check ID。没有适用内容时保留 heading，写 marker-cited not-applicable reason，不删除层。Layer 4 按 marker `Canonical runtime` 运行 target-mandated real driver；driver 是仓库脚本并不使证据失效，关键是它是否驱动真实消费路径并产出可观察结果。
 
-### 2.4 CI parity 行
+四层 body 由 **publish phase** 每轮从 VerificationPacket 组装——iteration 的 draft body 只承载 `Closes` 行、简述 + fresh-check 表、CandidateRef 与 `coder-loop:current-state` index；retry comment 是 delta 形态（§2.4），不重述完整四层 packet。
 
-若 target 有可复现的 CI，PR body 或 PR 评论必须含一行 explicit 声明：
+### 2.4 Retry 时的 PR thread 评论
 
-```
-CI parity: 本地 `<command>` 与 CI 等价，已 PASS。
-```
+每次 iter retry 必须在 PR thread 发新评论（不是只改 PR body），delta 形态（权威定义在 `iter/steps/submit.md`）：
 
-无 CI 的 repo（本 repo 无 CI）则写：
+- headline + 更新到新 head 的 CandidateRef 块；
+- 最新 verdict 每条 feedback 的逐项回应（改了什么、`file:line`、证据指针）；
+- cross-round finding ledger（历史每条 finding 的 `addressed / regressed-and-refixed / deferred #<issue>` 状态 + 指针）；
+- 本轮 verify 步的 fresh-check 表。
 
-```
-CI parity: 本仓无 CI；本地 `<command>` 等价 CI gate，已 PASS。
-```
+PR protocol 验收检查"是否每轮有新 thread delta comment"。仅改 PR body 不算 retry response，会被判 retry；要求 retry comment 重述完整四层 packet 本身是 review 缺陷。
 
-PR protocol 验收 grep "CI parity" 或 "本仓无 CI" 任一 token。
-
-### 2.5 Retry 时的 PR thread 评论
-
-每次 iter retry 必须在 PR thread 发新评论（不是改 PR body），记录：
-
-- 本轮 addressed 的 review feedback；
-- 改了哪些文件 / 行为；
-- 当前完整的四层证据 packet（不要只贴 diff 的那一层）。
-
-PR protocol 验收检查"是否每轮有新 thread 评论"。仅改 PR body 不算 retry response，会被判 retry。
-
-### 2.6 PR vs Issue 评论位置
+### 2.5 PR vs Issue 评论位置
 
 PR 存在后：
 
@@ -121,12 +108,12 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 |---|---|---|---|---|
 | Diff audit | diff-audit phase 独立跑（fresh session，纯读） | PR diff vs base + changed code 本体 + diff 中的测试变更 + current marker 声明的 Pattern scope | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；diff 中的测试删/改名/skip/弱化逐条枚举（含 test-collection config/glob/skip-marker/CI 变化）；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷；并对 current marker 的 typed Pattern rows做一次性全仓 site 枚举——其余发散性发现不进 verdict。审查结论写入 durable DiffAuditReport，review 只读不重审 | diff-audit 自身写 `changes-requested` / `contract-invalid` 回 iteration / contract-enrichment；review 引用报告 findings 生成 retry action |
 | Verification audit | verification-audit phase 独立跑（fresh session，纯读 + 有限 spot 复跑） | current marker 的全部 stable-ID Checks + 最新 CandidateRef + VerificationPacket + live PR checks | 身份绑定三方相等（CandidateRef == packet.candidate == live head）；marker 每个 stable-ID 都在 packet.checks 覆盖（原命令、cwd、exit、具体 observation）；artifact refs 可解析且内容与 claim 一致；live CI 对 verified SHA 绿；runtime 记录（durable/recreatable）完整且 conclusion 与行结果自洽；unblock-deliverable 路由必含 blocked-path 行覆盖；不重跑完整 E2E/套件——verification phase 已独立执行。审查结论写入 durable VerificationAuditReport | verification-audit 自身写 `verification_drift`（packet 不足回 verification）/ `changes_requested`（candidate 需改回 iteration）/ `contract_invalid`；review 引用报告 findings |
-| Checks/mergeability | review 亲自 | live PR checks（names/conclusions/timestamps/head SHA）+ mergeStateStatus | 实测观察；pending/hung 不算 mergeable；CI 合法在跑 → retry 附 observe-again | retry action |
+| Checks/mergeability | review 亲自 | 最新 VerificationAuditReport 的 Live checks 段（names/conclusions/timestamps/head SHA/mergeStateStatus） | 消费审计报告的实测记录，不重复 `gh pr view`；pending/hung 不算 mergeable；CI 合法在跑 → retry 附 observe-again；merge 前的 live 复读归 closure | retry action |
 | Trace honesty | review 亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty.md` claim-vs-observation） | retry action |
-| PR protocol | review 亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
+| PR protocol | review 亲自 | PR body + thread + issue comments | first line `Closes #<N>`、四层 heading 在 body（publish 组装）、retry 必有新 PR-thread delta comment | retry action / no-PR 路由 |
 | Title-intent | review 亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
 | Caveat honesty | review 亲自 | handoff `Intent/Result (run …)` blocks + PR body/comments（scope-reduction 触发相关段落原文引用）+ DiffAuditReport 的 change footprint（intent↔action 比对） | `quality/honesty.md` 七类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 current marker Test delta 或可追溯 intent source，stale-baseline 例外见同文件 | retry action |
-| Evidence form | review 亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence.md`：分层齐全、claim 映射、artifact 可查、测试清单 delta 在场、**真实路径 E2E 证据**（按 marker Canonical runtime 的 target-mandated real driver；仓库脚本只要驱动真实消费路径即可）、**runtime manifest** 在场且可凭其重跑（auth 只写解析位置，secret 值入包即硬拒）；unblock-deliverable 路由额外要求 blocked-path 复测 | retry / blocked action |
+| Evidence form | review 亲自 | PR body（publish 从 VerificationPacket 组装的 packet）/ 最新 run 的 delta comment | `quality/evidence.md`：claim 映射到 VerificationPacket 的 observation、**真实路径 E2E 证据**（按 marker Canonical runtime 的 target-mandated real driver；仓库脚本只要驱动真实消费路径即可）、**runtime manifest** 在场且可凭其重跑（auth 只写解析位置，secret 值入包即硬拒）；artifact 解析与 packet 真值归 VerificationAuditReport，review 不重开 artifact；unblock-deliverable 路由额外要求 blocked-path 复测 | retry / blocked action |
 | Spike follow-up（comment-spike-deliverable） | review 亲自（`review/spike-followup.md`） | iter comment + issue `## 结果分支` | 选恰好一条分支 + 提议数 ≥ 分支动词词表要求 | retry action |
 | Source-spike audit（source-writing-spike-deliverable） | review 亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Completeness | review 亲自 | 上面验收点综合 + child closure table | 决定 verdict action（accept-pr / accept-no-pr / retry / expand-parent / moot / blocked / stop）；accepted/moot 发布 durable ReviewVerdict 后 clean exit，merge/close 由 closure phase 复读 live state 后执行 | 选 action 文件 |

@@ -21,7 +21,7 @@ The orchestrator selects an actionable `state.current` item before the front of 
 - run stdout log is per-run trace output for review. It is not durable task history.
 - `loop-data/chains/<chain>/shared.md` is the daemon-owned append-only local handoff. It is not durable executable-contract authority; that authority is the unique current GitHub marker comment selected by `common/executable-contract.md`. Cross-phase business facts travel as GitHub packets per `common/packets.md`, never as handoff-only state.
 - `loop-data/chains/<chain>/issues/<issue>.md` is an optional issue-local attachment. Its absence must not block any phase's startup.
-- Per-target policy / project commands / PR conventions live in the repo's own `CLAUDE.md` / `AGENTS.md`, not in `.coder-loop/`. Loop-internal policy (PR evidence layers, verdict semantics, CI parity rules) lives inside the preset fragments.
+- Per-target policy / project commands / PR conventions live in the repo's own `CLAUDE.md` / `AGENTS.md`, not in `.coder-loop/`. Loop-internal policy (PR evidence layers, verdict semantics) lives inside the preset fragments.
 - `loop-data runtime artifacts`, central daemon scheduling state, and run stdout log must not be staged into feature commits.
 
 ## Final state invariants
