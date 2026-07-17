@@ -33,7 +33,6 @@ describe("runtime path model", () => {
 		const paths = resolveLoopDataPaths({ loopDataRoot: "/var/lib/coder-loop/loop-data" })
 		expect(paths.daemonLogDir).toBe("/var/lib/coder-loop/loop-data/daemon")
 		expect(paths.daemonBatchDir("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43")
-		expect(paths.daemonLogFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/daemon.log")
 		expect(paths.daemonStdoutFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/stdout.log")
 		expect(paths.daemonStderrFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/stderr.log")
 		expect(paths.eventsFile).toBe("/var/lib/coder-loop/loop-data/events/events.jsonl")
@@ -66,8 +65,6 @@ describe("runtime path model", () => {
 		expect(paths.runsDir).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs")
 		expect(paths.runDir("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22")
 		expect(paths.runEventsFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/events.jsonl")
-		expect(paths.runStdoutFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/stdout.log")
-		expect(paths.runStderrFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/stderr.log")
 		expect(paths.runStatusFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/status.json")
 		expect(paths.runPhaseDir("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration")
 		expect(paths.runPhaseStdoutFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/stdout.jsonl")
@@ -77,7 +74,6 @@ describe("runtime path model", () => {
 		expect(paths.runPhaseActivityFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/activity.json")
 		expect(paths.daemonDir).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon")
 		expect(paths.daemonBatchDir("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22")
-		expect(paths.daemonLogFile("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22/daemon.log")
 	})
 
 	test("sanitization rejects empty traversal absolute control and separator input", () => {

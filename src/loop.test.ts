@@ -213,7 +213,6 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		evidenceRootDir: resolve(TEST_ROOT, "evidence"),
 		logDir: resolve(TEST_ROOT, "runs"),
 		loopDataRoot: TEST_ROOT,
-		logFile: resolve(TEST_ROOT, "runs/test.log"),
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
 		bindings: makeChainBindings(),

@@ -1640,8 +1640,6 @@ type SchedulerPhaseOutputPaths = {
 	stdoutPath: string
 	stderrPath: string
 	activityPath: string
-	runStdoutPath: string
-	runStderrPath: string
 }
 
 type SchedulerPhaseOutputWriters = {
@@ -1660,15 +1658,13 @@ function schedulerPhaseOutputPaths(
 		stdoutPath: paths.runPhaseStdoutFile(runId, phase),
 		stderrPath: paths.runPhaseStderrFile(runId, phase),
 		activityPath: paths.runPhaseActivityFile(runId, phase),
-		runStdoutPath: paths.runStdoutFile(runId),
-		runStderrPath: paths.runStderrFile(runId),
 	}
 }
 
 function createSchedulerPhaseOutputWriters(paths: SchedulerPhaseOutputPaths): SchedulerPhaseOutputWriters {
 	return {
-		stdout: [createWriteStream(paths.stdoutPath, { flags: "a" }), createWriteStream(paths.runStdoutPath, { flags: "a" })],
-		stderr: [createWriteStream(paths.stderrPath, { flags: "a" }), createWriteStream(paths.runStderrPath, { flags: "a" })],
+		stdout: [createWriteStream(paths.stdoutPath, { flags: "a" })],
+		stderr: [createWriteStream(paths.stderrPath, { flags: "a" })],
 	}
 }
 
@@ -2676,8 +2672,6 @@ async function initializeSchedulerRunArtifacts(
 	await mkdir(paths.runDir(runId), { recursive: true })
 	await mkdir(paths.runPhaseDir(runId, phase), { recursive: true })
 	await Promise.all([
-		writeFile(paths.runStdoutFile(runId), ""),
-		writeFile(paths.runStderrFile(runId), ""),
 		writeFile(paths.runPhaseStdoutFile(runId, phase), ""),
 		writeFile(paths.runPhaseStderrFile(runId, phase), ""),
 		writeSchedulerRunStatus(options, {
@@ -2721,8 +2715,6 @@ async function writeSchedulerRunCompletionArtifacts(
 	const stdoutBytes = input.output.kind === "streamed" ? input.output.stdoutBytes : Buffer.byteLength(input.output.stdoutText)
 	const stderrBytes = input.output.kind === "streamed" ? input.output.stderrBytes : Buffer.byteLength(input.output.stderrText)
 	const inlineWrites = input.output.kind === "streamed" ? [] : [
-		writeFile(paths.runStdoutFile(input.runId), input.output.stdoutText),
-		writeFile(paths.runStderrFile(input.runId), input.output.stderrText),
 		writeFile(paths.runPhaseStdoutFile(input.runId, input.phase), input.output.stdoutText),
 		writeFile(paths.runPhaseStderrFile(input.runId, input.phase), input.output.stderrText),
 	]
@@ -2783,8 +2775,6 @@ async function writeSchedulerRunStatus(
 		status: input.status,
 		stdoutBytes: input.stdoutBytes,
 		stderrBytes: input.stderrBytes,
-		stdoutPath: paths.runStdoutFile(input.runId),
-		stderrPath: paths.runStderrFile(input.runId),
 		eventsPath: resolveLoopDataPaths(options.loopDataRootOptions).eventsFile,
 	}, null, "\t")}\n`)
 }

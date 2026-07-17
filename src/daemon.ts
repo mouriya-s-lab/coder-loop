@@ -2097,7 +2097,6 @@ export class CoderLoopDaemon {
 		await mkdir(paths.runsDir, { recursive: true })
 		await mkdir(paths.daemonDir, { recursive: true })
 		await mkdir(paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
-		await writeFile(paths.daemonLogFile(this.daemonBatchTimestamp), "", { flag: "a" })
 		await writeFile(paths.sharedFile, "# Shared durable context\n\n", { flag: "wx" }).catch((error: unknown) => {
 			if (isNodeError(error) && error.code === "EEXIST") return
 			throw error
