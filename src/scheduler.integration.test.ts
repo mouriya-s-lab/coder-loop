@@ -719,7 +719,7 @@ async function pathExists(path: string): Promise<boolean> {
 
 function spawnDaemonUp(loopDataRoot: string, env: Record<string, string | undefined>): Bun.Subprocess<"ignore", "pipe", "pipe"> {
 	return Bun.spawn({
-		cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "20", "--json"],
+		cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--foreground", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "20", "--json"],
 		cwd: REPO_ROOT,
 		stdin: "ignore",
 		stdout: "pipe",

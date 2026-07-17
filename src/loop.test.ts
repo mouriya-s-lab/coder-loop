@@ -698,7 +698,7 @@ describe("runner and daemon helpers", () => {
 			chainName: "fixture",
 		})
 
-		expect(plan.command).toEqual([process.argv[0] ?? "bun", resolve(import.meta.dir, "loop.ts"), "daemon", "up", "--loop-data-root", TEST_ROOT])
+		expect(plan.command).toEqual([process.argv[0] ?? "bun", resolve(import.meta.dir, "loop.ts"), "daemon", "up", "--foreground", "--loop-data-root", TEST_ROOT])
 		expect(plan.commandLine).not.toContain("--target-cwd")
 		expect(plan.commandLine).not.toContain("--require-browser-evidence")
 		// The central daemon is global: its stdout/stderr land under loop-data/daemon, never

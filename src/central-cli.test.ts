@@ -558,7 +558,7 @@ attemptTimeoutSeconds = 3600
 	test("daemon up down", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-up-down")
 		const daemonProcess = Bun.spawn({
-			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100", "--json"],
+			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--foreground", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100", "--json"],
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -679,7 +679,7 @@ attemptTimeoutSeconds = 3600
 	test("daemon down emits human text without json flag", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-down-text")
 		const daemonProcess = Bun.spawn({
-			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
+			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--foreground", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -722,7 +722,7 @@ attemptTimeoutSeconds = 3600
 			await waitForDaemonFiles(loopDataRoot)
 			const firstPid = (await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim()
 
-			const duplicate = await runCli(["daemon", "up", "--loop-data-root", loopDataRoot])
+			const duplicate = await runCli(["daemon", "up", "--foreground", "--loop-data-root", loopDataRoot])
 			expect(duplicate.exitCode).toBe(1)
 			expect(duplicate.stderr).toContain("daemon socket is already accepting connections")
 
@@ -832,7 +832,7 @@ attemptTimeoutSeconds = 3600
 		await writeFile(parentFile, "not a directory\n")
 		const loopDataRoot = resolve(parentFile, "child")
 
-		const result = await runCli(["daemon", "up", "--loop-data-root", loopDataRoot, "--json"])
+		const result = await runCli(["daemon", "up", "--foreground", "--loop-data-root", loopDataRoot, "--json"])
 		const parsed = expectJsonError(result)
 		expect(result.stderr).toBe("")
 		expect(parsed.error).toMatchObject({
@@ -1266,7 +1266,7 @@ function boundaryRecord(value: unknown): BoundaryRecord {
 
 function spawnDaemonUp(loopDataRoot: string, env: Record<string, string> = {}): Bun.Subprocess<"ignore", "pipe", "pipe"> {
 	return Bun.spawn({
-		cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
+		cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--foreground", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
 		cwd: REPO_ROOT,
 		stdin: "ignore",
 		stdout: "pipe",

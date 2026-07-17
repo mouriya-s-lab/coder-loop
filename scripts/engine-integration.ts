@@ -174,7 +174,7 @@ function startDaemon(workDir: string): DaemonHandle {
 	log(`daemon: PATH 前置 shim: ${shimDir} (coder-loop → src/loop.ts, claude → stub runner)`)
 	const stdoutFd = openSync(stdoutPath, "a")
 	const stderrFd = openSync(stderrPath, "a")
-	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], {
+	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--foreground", "--loop-data-root", loopDataRoot], {
 		cwd: REPO_ROOT,
 		stdio: ["ignore", stdoutFd, stderrFd],
 		env: shimmedEnv,

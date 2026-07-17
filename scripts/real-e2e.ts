@@ -300,7 +300,7 @@ function startDaemon(workDir: string): DaemonHandle {
 	log(`daemon: PATH 前置 coder-loop CLI shim: ${shimDir} → ${LOOP_ENTRY}`)
 	const stdoutFd = openSync(stdoutPath, "a")
 	const stderrFd = openSync(stderrPath, "a")
-	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], {
+	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--foreground", "--loop-data-root", loopDataRoot], {
 		cwd: REPO_ROOT,
 		stdio: ["ignore", stdoutFd, stderrFd],
 		env: { ...operatorSubprocessEnvironment(process.env), PATH: shimmedPath },

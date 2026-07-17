@@ -3216,7 +3216,7 @@ process.exitCode = 0
 		const pidFile = resolve(loopDataRoot, "daemon.pid")
 		await mkdir(loopDataRoot, { recursive: true })
 		const daemonProcess = Bun.spawn({
-			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100", "--json"],
+			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--foreground", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100", "--json"],
 			cwd: REPO_ROOT,
 			stdin: "ignore",
 			stdout: "pipe",

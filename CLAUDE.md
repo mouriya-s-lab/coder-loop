@@ -32,10 +32,10 @@ Root usage（源：`src/loop.ts rootUsage`）：
 
 ```
 coder-loop status  [<target>] --json            # 带 <target> → target snapshot；不带 → 中央 daemon 存活探测
-coder-loop activity <item|all|log>
+coder-loop activity <item|all|log-path>         # `log` 是 `log-path` 的兼容 alias
 coder-loop logs    --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]
-coder-loop daemon  <up [--detach] | down>       # up 默认前台；--detach 才是真后台化（fork + unref + pid 文件）
-coder-loop chain   <create|list|status|stop|resume|delete|set-runner-model>
+coder-loop daemon  <up [--foreground] | down>   # up 默认后台（fork + unref + 写 pid，立即返回）；--foreground 供 launchd / systemd / e2e；--detach 保留为默认 no-op alias
+coder-loop chain   <create|list [--all]|status|stop|resume|delete|set-runner-model>
 coder-loop item    <add|batch-add|list|update|reorder|exits|exit-action>
 coder-loop queue   unblock <target> --issue <issue> [--start-daemon]   # --start-daemon 顺带把中央 daemon spawn detached
 coder-loop context append <chain> --scope <chain|item|group> --body <text>
@@ -46,13 +46,15 @@ coder-loop doctor  <target>
 
 | 想做的事 | 用这个 |
 |---|---|
-| 起中央 daemon | `coder-loop daemon up --detach`（或 `queue unblock ... --start-daemon` 顺带起） |
+| 起中央 daemon | `coder-loop daemon up`（默认后台；或 `queue unblock ... --start-daemon` 顺带起） |
+| 起前台 daemon（launchd/systemd/e2e） | `coder-loop daemon up --foreground` |
 | 停某 chain | `coder-loop chain stop <chain>` |
-| 重启 daemon | `coder-loop daemon down && coder-loop daemon up --detach` |
-| 查某 target 状态 | `coder-loop status <target> --json` |
+| 重启 daemon | `coder-loop daemon down && coder-loop daemon up` |
+| 列出活跃 chain | `coder-loop chain list`（默认隐藏 deleted；`--all` 显示全部） |
+| 查某 target 状态 | `coder-loop status <target> --json`（target cwd 不匹配任何 item.repoCwd 时会明确报错，不再静默 fallback 到唯一 active chain） |
 | 查中央 daemon 存活 | `coder-loop status --loop-data-root <dir> --json`（无 `<target>`） |
 
-`item exits` / `item exit-action` 是 agent 面（`--agent-run-id` / `--agent-phase` 必填），不是 operator 面。operator 常用运维流程见 `docs/operations.md`。
+`item exits` / `item exit-action` 是 agent 面（需要 spawn-time env credential），不是 operator 面；`item --help` 里 description 会前缀 `[AGENT ONLY]` 标签。operator 常用运维流程见 `docs/operations.md`。
 
 开发工作面：
 

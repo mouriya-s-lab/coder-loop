@@ -50,7 +50,7 @@ describe("smoke: v2 central chain CLI", () => {
 		const result = runCli([])
 		expect(result.exitCode).toBe(1)
 		expect(result.stdout).toContain("Usage: coder-loop <command> [options]")
-		expect(result.stdout).toContain("daemon <up [--detach] | down>")
+		expect(result.stdout).toContain("daemon <up [--foreground] | down>")
 	})
 
 	// #526 (closing #432 K2 末段 + close-verification row #4): the entire `runtime`

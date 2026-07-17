@@ -869,10 +869,29 @@ export async function queryObservabilityEvents(eventsFile: string, query: Observ
 	const events: ObservabilityEvent[] = []
 	for (const segment of await discoverObservabilityEventSegments(eventsFile)) {
 		const raw = await readFile(segment.path, "utf-8")
+		let lineNumber = 0
 		for (const line of raw.split("\n")) {
+			lineNumber += 1
 			if (line.trim() === "") continue
-			const parsed: unknown = JSON.parse(line)
-			const event = parseObservabilityEvent(parsed)
+			// The events file is append-only and holds records from every version of the daemon
+			// that wrote to it. A schema change (new required field on some event kind) will make
+			// pre-change records fail arktype validation. Drop those instead of failing the whole
+			// query — the alternative is that one stale record from a previous daemon version
+			// bricks `coder-loop logs` until the file is truncated.
+			let parsed: unknown
+			try {
+				parsed = JSON.parse(line)
+			} catch (error) {
+				writeObservabilityStderr(`coder-loop logs.query: skipping unparseable line ${segment.path}:${lineNumber}: ${errorMessage(error)}`)
+				continue
+			}
+			let event: ObservabilityEvent
+			try {
+				event = parseObservabilityEvent(parsed)
+			} catch (error) {
+				writeObservabilityStderr(`coder-loop logs.query: skipping schema-invalid event ${segment.path}:${lineNumber}: ${errorMessage(error)}`)
+				continue
+			}
 			if (matchesObservabilityQuery(event, query)) events.push(event)
 		}
 	}

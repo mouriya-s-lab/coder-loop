@@ -204,6 +204,7 @@ export type ChainCommandArgs =
 	  }
 	| {
 			action: "list"
+			includeDeleted: boolean
 			loopDataRoot: string | null
 			json: boolean
 	  }
@@ -1193,12 +1194,12 @@ const statusCliCommand = command({
 
 const activityItemCliCommand = command({
 	name: "item",
-	description: "Show recent output activity for one live task without contacting the daemon.",
+	description: "Show recent stdout activity (line rates over 10s/30s/1m/5m) for one live task.",
 	args: {
-		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		chain: positional({ displayName: "chain", type: cmdString, description: "Chain name." }),
+		issue: option({ long: "issue", type: cmdString, description: "REQUIRED. Item id." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "activity",
@@ -1214,10 +1215,10 @@ const activityItemCliCommand = command({
 
 const activityAllCliCommand = command({
 	name: "all",
-	description: "Show recent output activity for every live task without contacting the daemon.",
+	description: "Show recent stdout activity (line rates over 10s/30s/1m/5m) for every live task.",
 	args: {
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "activity",
@@ -1225,14 +1226,18 @@ const activityAllCliCommand = command({
 	}),
 })
 
+// Renamed `log` → `log-path`: `log` reads as "print the log", but this command only prints the
+// absolute path to `stdout.jsonl` (use it to `tail -f`). `log` is kept as an alias so existing
+// docs and scripts continue to work.
 const activityLogCliCommand = command({
-	name: "log",
-	description: "Print the absolute stdout log path for one live task without contacting the daemon.",
+	name: "log-path",
+	aliases: ["log"],
+	description: "Print the absolute path to a live task's current-phase stdout.jsonl (aliased as `log`).",
 	args: {
-		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		chain: positional({ displayName: "chain", type: cmdString, description: "Chain name." }),
+		issue: option({ long: "issue", type: cmdString, description: "REQUIRED. Item id." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "activity",
@@ -1248,13 +1253,13 @@ const activityLogCliCommand = command({
 
 const activityCliCommand = subcommands({
 	name: "activity",
-	description: "Inspect live task output rates directly from local runtime state.",
-	cmds: { item: activityItemCliCommand, all: activityAllCliCommand, log: activityLogCliCommand },
+	description: "Inspect live task output. Reads local runtime state; does not contact the daemon.",
+	cmds: { item: activityItemCliCommand, all: activityAllCliCommand, "log-path": activityLogCliCommand },
 })
 
 const logsCliCommand = command({
 	name: "logs",
-	description: "Query the unified coder-loop observability event stream (global, not target-scoped).",
+	description: "Query the daemon's observability event stream (global across chains). Requires --json.",
 	args: {
 		json: flag({ long: "json" }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
@@ -1286,31 +1291,35 @@ const logsCliCommand = command({
 
 const daemonUpCliCommand = command({
 	name: "up",
-	description: "Run the centralized coder-loop daemon process. Foreground by default; --detach forks a background process and returns immediately.",
+	description: "Start the central daemon. Detaches to background by default; pass --foreground to run blocking (e.g. under launchd/systemd/e2e supervisors).",
 	args: {
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		schedulerIntervalMs: option({ long: "scheduler-interval-ms", type: optional(cmdString) }),
-		detach: flag({ long: "detach" }),
-		json: flag({ long: "json" }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root (default: ~/.coder-loop/loop-data)." }),
+		schedulerIntervalMs: option({ long: "scheduler-interval-ms", type: optional(cmdString), description: "Scheduler tick interval in ms." }),
+		detach: flag({ long: "detach", description: "(Default.) Fork to background, write pid, return immediately. Kept for backwards compatibility." }),
+		foreground: flag({ long: "foreground", description: "Run in foreground (blocking). Use when a supervisor owns the process lifetime." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
-	handler: (args): CliCommand => ({
-		kind: "daemon",
-		args: {
-			action: "up",
-			loopDataRoot: args.loopDataRoot ?? null,
-			schedulerIntervalMs: parseOptionalPositiveInteger(args.schedulerIntervalMs ?? null, "--scheduler-interval-ms"),
-			detach: args.detach,
-			json: args.json,
-		},
-	}),
+	handler: (args): CliCommand => {
+		if (args.detach && args.foreground) fail("daemon up: --detach and --foreground are mutually exclusive")
+		return {
+			kind: "daemon",
+			args: {
+				action: "up",
+				loopDataRoot: args.loopDataRoot ?? null,
+				schedulerIntervalMs: parseOptionalPositiveInteger(args.schedulerIntervalMs ?? null, "--scheduler-interval-ms"),
+				detach: !args.foreground,
+				json: args.json,
+			},
+		}
+	},
 })
 
 const daemonDownCliCommand = command({
 	name: "down",
-	description: "Ask the centralized coder-loop daemon to shut down through its Unix socket.",
+	description: "Stop the central daemon via its Unix socket.",
 	args: {
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "daemon",
@@ -1324,7 +1333,7 @@ const daemonDownCliCommand = command({
 
 const daemonCliCommand = subcommands({
 	name: "daemon",
-	description: "Manage the central coder-loop daemon lifecycle. For target chain state use `coder-loop status <target>` / `chain stop|resume|delete`; to spawn the daemon detached from another command use `queue unblock ... --start-daemon`.",
+	description: "Central daemon lifecycle (`up` / `down`). For chain state use `chain stop|resume|delete`; for one-shot spawn from another command use `queue unblock ... --start-daemon`.",
 	cmds: {
 		up: daemonUpCliCommand,
 		down: daemonDownCliCommand,
@@ -1333,15 +1342,15 @@ const daemonCliCommand = subcommands({
 
 const chainCreateCliCommand = command({
 	name: "create",
-	description: "Create a centralized coder-loop chain through the daemon socket.",
+	description: "Create a chain. Requires <chain> and --config-json.",
 	args: {
-		name: positional({ displayName: "name", type: cmdString }),
-		configJson: option({ long: "config-json", type: cmdString }),
-		preset: option({ long: "preset", type: optional(cmdString) }),
-		umbrella: option({ long: "umbrella", type: optional(cmdString) }),
-		force: flag({ long: "force" }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		name: positional({ displayName: "chain", type: cmdString, description: "New chain name (must be unique)." }),
+		configJson: option({ long: "config-json", type: cmdString, description: "REQUIRED. JSON with chain bindings, e.g. '{\"repository\":\"owner/repo\",\"baseBranch\":\"main\"}'." }),
+		preset: option({ long: "preset", type: optional(cmdString), description: "Bundled preset name (default: gh-issue-pr-iteration)." }),
+		umbrella: option({ long: "umbrella", type: optional(cmdString), description: "Shorthand `owner/repo#123` merged into bindings as umbrellaRepo/umbrellaIssue." }),
+		force: flag({ long: "force", description: "Overwrite existing chain with the same name." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root (default: ~/.coder-loop/loop-data)." }),
+		json: flag({ long: "json", description: "Emit JSON instead of a summary line." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "chain",
@@ -1360,15 +1369,17 @@ const chainCreateCliCommand = command({
 
 const chainListCliCommand = command({
 	name: "list",
-	description: "List centralized coder-loop chains through the daemon socket.",
+	description: "List chains. Default hides deleted; pass --all to include them.",
 	args: {
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		all: flag({ long: "all", description: "Include deleted chains (default: hide them)." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON instead of a table." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "chain",
 		args: {
 			action: "list",
+			includeDeleted: args.all,
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
 		},
@@ -1377,11 +1388,11 @@ const chainListCliCommand = command({
 
 const chainStatusCliCommand = command({
 	name: "status",
-	description: "Show one centralized coder-loop chain through the daemon socket.",
+	description: "Show one chain.",
 	args: {
-		name: positional({ displayName: "name", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		name: positional({ displayName: "chain", type: cmdString, description: "Existing chain name (see `coder-loop chain list`)." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "chain",
@@ -1396,11 +1407,11 @@ const chainStatusCliCommand = command({
 
 const chainStopCliCommand = command({
 	name: "stop",
-	description: "Mark one centralized coder-loop chain as stopped through the daemon socket.",
+	description: "Mark one chain as stopped (resumable with `chain resume`).",
 	args: {
-		name: positional({ displayName: "name", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		name: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "chain",
@@ -1415,11 +1426,11 @@ const chainStopCliCommand = command({
 
 const chainResumeCliCommand = command({
 	name: "resume",
-	description: "Resume one stopped centralized coder-loop chain through the daemon socket.",
+	description: "Resume one stopped chain.",
 	args: {
-		name: positional({ displayName: "name", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		name: positional({ displayName: "chain", type: cmdString, description: "Existing stopped chain name." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "chain",
@@ -1434,11 +1445,11 @@ const chainResumeCliCommand = command({
 
 const chainDeleteCliCommand = command({
 	name: "delete",
-	description: "Mark one centralized coder-loop chain as deleted through the daemon socket.",
+	description: "Mark one chain as deleted (irreversible from CLI).",
 	args: {
-		name: positional({ displayName: "name", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		name: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "chain",
@@ -1464,13 +1475,13 @@ const chainDeleteCliCommand = command({
 // the existing `chain` subcommand group instead of resurrecting a top-level namespace.
 const chainSetRunnerModelCliCommand = command({
 	name: "set-runner-model",
-	description: "Patch one chain's `chain.metadata.<kind>.model` runner-binding override through the daemon socket.",
+	description: "Override the runner model for one chain (--kind claude|codex|opencode, --model <id>).",
 	args: {
-		name: positional({ displayName: "chain", type: cmdString }),
-		kind: option({ long: "kind", type: cmdString }),
-		model: option({ long: "model", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		name: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		kind: option({ long: "kind", type: cmdString, description: "REQUIRED. Runner kind: claude | codex | opencode." }),
+		model: option({ long: "model", type: cmdString, description: "REQUIRED. Model id passed to the runner CLI (e.g. claude-opus-4-7)." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "chain",
@@ -1487,7 +1498,7 @@ const chainSetRunnerModelCliCommand = command({
 
 const chainCliCommand = subcommands({
 	name: "chain",
-	description: "Operate centralized coder-loop chains through the daemon socket.",
+	description: "Manage chains: create, list, status, stop/resume, delete, override runner model.",
 	cmds: {
 		create: chainCreateCliCommand,
 		list: chainListCliCommand,
@@ -1501,27 +1512,25 @@ const chainCliCommand = subcommands({
 
 const itemAddCliCommand = command({
 	name: "add",
-	description: "Add an item to a centralized coder-loop chain through the daemon socket. Exactly one of --preset or --preset-path is required (#412).",
+	description: "Add an item to a chain. Exactly one of --preset or --preset-path is required.",
 	args: {
-		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
-		repoCwd: option({ long: "repo-cwd", type: cmdString }),
-		// #412: preset must be specified per-item; the CLI surfaces both bundled-name and absolute-path
-		// variants. The daemon rejects requests that pass neither or both.
-		preset: option({ long: "preset", type: optional(cmdString) }),
-		presetPath: option({ long: "preset-path", type: optional(cmdString) }),
-		status: option({ long: "status", type: optional(cmdString) }),
-		attempts: option({ long: "attempts", type: optional(cmdString) }),
-		title: option({ long: "title", type: optional(cmdString) }),
-		priority: option({ long: "priority", type: optional(cmdString) }),
-		fieldJson: option({ long: "field-json", type: optional(cmdString) }),
-		lastRunId: option({ long: "last-run-id", type: optional(cmdString) }),
-		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
-		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
-		agentCwd: option({ long: "agent-cwd", type: optional(cmdString) }),
-		runner: option({ long: "runner", type: optional(cmdString) }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		chain: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		issue: option({ long: "issue", type: cmdString, description: "REQUIRED. Opaque item id (for gh-issue-pr-iteration: issue URL or `owner/repo#N`)." }),
+		repoCwd: option({ long: "repo-cwd", type: cmdString, description: "REQUIRED. Absolute path to the working tree the agent runs in." }),
+		preset: option({ long: "preset", type: optional(cmdString), description: "Bundled preset name (exactly one of --preset or --preset-path)." }),
+		presetPath: option({ long: "preset-path", type: optional(cmdString), description: "Absolute path to a preset dir (exactly one of --preset or --preset-path)." }),
+		status: option({ long: "status", type: optional(cmdString), description: "Seed status literal from the preset (default: preset entry status)." }),
+		attempts: option({ long: "attempts", type: optional(cmdString), description: "Seed attempt count (non-negative integer)." }),
+		title: option({ long: "title", type: optional(cmdString), description: "Human-readable title for list/status output." }),
+		priority: option({ long: "priority", type: optional(cmdString), description: "Priority label used by the scheduler (preset-defined)." }),
+		fieldJson: option({ long: "field-json", type: optional(cmdString), description: "JSON object patched onto item.fields (schema is preset-defined)." }),
+		lastRunId: option({ long: "last-run-id", type: optional(cmdString), description: "Seed last-run-id (usually left unset; used for recovery imports)." }),
+		issueFile: option({ long: "issue-file", type: optional(cmdString), description: "Path to a checked-in issue markdown snapshot." }),
+		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString), description: "Override the per-item evidence dir (default: derived from chain runtime paths)." }),
+		agentCwd: option({ long: "agent-cwd", type: optional(cmdString), description: "Override the agent cwd if different from --repo-cwd (default: --repo-cwd)." }),
+		runner: option({ long: "runner", type: optional(cmdString), description: "Override runner kind for non-trigger phases: claude | codex | opencode." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => {
 		const presetSpec = parseItemPresetSpec(args.preset ?? null, args.presetPath ?? null)
@@ -1553,12 +1562,12 @@ const itemAddCliCommand = command({
 
 const itemBatchAddCliCommand = command({
 	name: "batch-add",
-	description: "Add multiple items to one centralized coder-loop chain atomically through the daemon socket.",
+	description: "Add multiple items to one chain atomically. Pass --items-json <json-array>.",
 	args: {
-		chain: positional({ displayName: "chain", type: cmdString }),
-		itemsJson: option({ long: "items-json", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		chain: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		itemsJson: option({ long: "items-json", type: cmdString, description: "REQUIRED. JSON array; each element accepts the same keys as `item add` (issue/repoCwd/preset/…)." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "item",
@@ -1574,11 +1583,11 @@ const itemBatchAddCliCommand = command({
 
 const itemListCliCommand = command({
 	name: "list",
-	description: "List items in a centralized coder-loop chain through the daemon socket.",
+	description: "List items in a chain.",
 	args: {
-		chain: positional({ displayName: "chain", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		chain: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "item",
@@ -1593,18 +1602,18 @@ const itemListCliCommand = command({
 
 const itemUpdateCliCommand = command({
 	name: "update",
-	description: "Update an item in a centralized coder-loop chain through the daemon socket.",
+	description: "Update an item's mutable fields.",
 	args: {
-		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
-		repoCwd: option({ long: "repo-cwd", type: optional(cmdString) }),
-		status: option({ long: "status", type: optional(cmdString) }),
-		title: option({ long: "title", type: optional(cmdString) }),
-		priority: option({ long: "priority", type: optional(cmdString) }),
-		fieldJson: option({ long: "field-json", type: optional(cmdString) }),
-		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
-		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
-		runner: option({ long: "runner", type: optional(cmdString) }),
+		chain: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		issue: option({ long: "issue", type: cmdString, description: "REQUIRED. Item id to update." }),
+		repoCwd: option({ long: "repo-cwd", type: optional(cmdString), description: "New agent working tree path." }),
+		status: option({ long: "status", type: optional(cmdString), description: "New status literal from the preset." }),
+		title: option({ long: "title", type: optional(cmdString), description: "New human-readable title." }),
+		priority: option({ long: "priority", type: optional(cmdString), description: "New scheduler priority label." }),
+		fieldJson: option({ long: "field-json", type: optional(cmdString), description: "JSON object patched onto item.fields." }),
+		issueFile: option({ long: "issue-file", type: optional(cmdString), description: "New issue-markdown snapshot path." }),
+		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString), description: "Override the per-item evidence dir." }),
+		runner: option({ long: "runner", type: optional(cmdString), description: "Runner kind override: claude | codex | opencode." }),
 		// #406: `--agent-run-id` / `--agent-phase` flags retired. The spawn-time env credential
 		// (`CODER_LOOP_RUN_CRED`) auto-attaches via `withInjectedRunCredential`. Operators run the
 		// CLI in their own env (no credential) and the daemon admits them as `operator`.
@@ -1637,13 +1646,13 @@ const itemUpdateCliCommand = command({
 
 const itemReorderCliCommand = command({
 	name: "reorder",
-	description: "Move an item to a new queue position in a centralized coder-loop chain through the daemon socket.",
+	description: "Move an item to a new queue position (0-based).",
 	args: {
-		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
-		position: option({ long: "position", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		json: flag({ long: "json" }),
+		chain: positional({ displayName: "chain", type: cmdString, description: "Existing chain name." }),
+		issue: option({ long: "issue", type: cmdString, description: "REQUIRED. Item id to move." }),
+		position: option({ long: "position", type: cmdString, description: "REQUIRED. New 0-based queue position." }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString), description: "Override loop data root." }),
+		json: flag({ long: "json", description: "Emit JSON." }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "item",
@@ -1666,7 +1675,7 @@ const itemReorderCliCommand = command({
 // (#396 contract row 5: no global state machine, no other phases' exits).
 const itemExitsCliCommand = command({
 	name: "exits",
-	description: "Query the typed phase-exits for an item in its current run phase (agent surface for the completion protocol).",
+	description: "[AGENT ONLY] Query allowed phase-exit statuses for the running phase. Requires spawn-time env credential.",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
@@ -1699,7 +1708,7 @@ const itemExitsCliCommand = command({
 // the only controlled channel that an agent may use to stop the chain it owns.
 const itemExitActionCliCommand = command({
 	name: "exit-action",
-	description: "Select a chain-action exit declared in the item's current run phase (agent surface for chain-side completion verbs).",
+	description: "[AGENT ONLY] Fire a chain-action exit (e.g. stop) for the running phase. Requires spawn-time env credential.",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
@@ -1726,7 +1735,7 @@ const itemExitActionCliCommand = command({
 
 const itemCliCommand = subcommands({
 	name: "item",
-	description: "Operate centralized coder-loop chain items through the daemon socket.",
+	description: "Manage items: add/batch-add, list, update, reorder. `exits`/`exit-action` are agent-only.",
 	cmds: {
 		add: itemAddCliCommand,
 		"batch-add": itemBatchAddCliCommand,
@@ -1740,7 +1749,7 @@ const itemCliCommand = subcommands({
 
 const contextAppendCliCommand = command({
 	name: "append",
-	description: "Append an opaque context entry through the daemon socket.",
+	description: "Append a shared-context entry (scope: chain|item|group).",
 	args: {
 		chainName: positional({ displayName: "chain", type: cmdString }),
 		scope: option({ long: "scope", type: cmdString }),
@@ -1766,8 +1775,11 @@ const contextAppendCliCommand = command({
 
 const contextCliCommand = subcommands({ name: "context", description: "Append daemon-owned context entries.", cmds: { append: contextAppendCliCommand } })
 
+const CONTEXT_LEAVES_WITH_REQUIRED = new Set(["append"])
+
 async function runContextCommand(args: string[]): Promise<void> {
-	const parsed = await runCmd(contextCliCommand, args)
+	const effectiveArgs = shouldInjectLeafHelp(args, CONTEXT_LEAVES_WITH_REQUIRED) ? [args[0]!, "--help"] : args
+	const parsed = await runCmd(contextCliCommand, effectiveArgs)
 	const value = parsed.value
 	if ((value.body === null) === (value.bodyFile === null)) fail("exactly one of --body or --body-file is required")
 	const body = value.body ?? await readFile(value.bodyFile ?? fail("body file missing"), "utf-8")
@@ -2007,8 +2019,11 @@ function formatDaemonStatusResult(result: JsonObject): string {
 	].join("\n")
 }
 
+const ACTIVITY_LEAVES_WITH_REQUIRED = new Set(["item", "log-path", "log"])
+
 async function runActivityCommand(args: string[]): Promise<void> {
-	const parsed = await runCmd(activityCliCommand, args)
+	const effectiveArgs = shouldInjectLeafHelp(args, ACTIVITY_LEAVES_WITH_REQUIRED) ? [args[0]!, "--help"] : args
+	const parsed = await runCmd(activityCliCommand, effectiveArgs)
 	if (parsed.value.kind !== "activity") return
 	const activityArgs = parsed.value.args
 	const result = await buildAgentActivityCommandResult(activityArgs)
@@ -2133,8 +2148,11 @@ function logsQueryRequestArgs(args: LogsCommandArgs): JsonObject {
 	return requestArgs
 }
 
+const CHAIN_LEAVES_WITH_REQUIRED = new Set(["create", "status", "stop", "resume", "delete", "set-runner-model"])
+
 async function runChainCommand(args: string[]): Promise<void> {
-	const parsed = await runCmd(chainCliCommand, args)
+	const effectiveArgs = shouldInjectLeafHelp(args, CHAIN_LEAVES_WITH_REQUIRED) ? [args[0]!, "--help"] : args
+	const parsed = await runCmd(chainCliCommand, effectiveArgs)
 	if (parsed.value.kind !== "chain") return
 	const chainArgs = parsed.value.args
 	if (chainArgs.action === "create") {
@@ -2172,7 +2190,8 @@ async function runChainCommand(args: string[]): Promise<void> {
 	}
 	if (chainArgs.action === "list") {
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.list")
-		writeCommandResult(result, chainArgs.json, formatChainListResult)
+		const filtered = filterChainListResult(result, chainArgs.includeDeleted)
+		writeCommandResult(filtered, chainArgs.json, formatChainListResult)
 		return
 	}
 	if (chainArgs.action === "status") {
@@ -2208,8 +2227,11 @@ async function runChainCommand(args: string[]): Promise<void> {
 	writeCommandResult(result, chainArgs.json, formatChainDeleteResult)
 }
 
+const ITEM_LEAVES_WITH_REQUIRED = new Set(["add", "batch-add", "list", "update", "reorder", "exits", "exit-action"])
+
 async function runItemCommand(args: string[]): Promise<void> {
-	const parsed = await runCmd(itemCliCommand, args)
+	const effectiveArgs = shouldInjectLeafHelp(args, ITEM_LEAVES_WITH_REQUIRED) ? [args[0]!, "--help"] : args
+	const parsed = await runCmd(itemCliCommand, effectiveArgs)
 	if (parsed.value.kind !== "item") return
 	const itemArgs = parsed.value.args
 	if (itemArgs.action === "add") {
@@ -2576,9 +2598,19 @@ function formatChainCreateResult(result: JsonObject): string {
 	return `created chain ${String(chain?.name ?? "")}\n`
 }
 
+function filterChainListResult(result: JsonObject, includeDeleted: boolean): JsonObject {
+	if (includeDeleted) return result
+	const chains = Array.isArray(result.chains) ? result.chains : []
+	const visible = chains.filter((raw) => {
+		const chain = jsonObjectEntry(raw)
+		return chain?.status !== "deleted"
+	})
+	return { ...result, chains: visible }
+}
+
 function formatChainListResult(result: JsonObject): string {
 	const chains = Array.isArray(result.chains) ? result.chains : []
-	if (chains.length === 0) return "no chains\n"
+	if (chains.length === 0) return "no chains (pass --all to include deleted)\n"
 	return chains.map((raw) => {
 		const chain = jsonObjectEntry(raw) ?? {}
 		return `${String(chain.name)}\t${String(chain.status)}\t${String(chain.repository)}\n`
@@ -2731,14 +2763,28 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 	await runDaemonDownCommand(daemonArgs)
 }
 
+const QUEUE_LEAVES_WITH_REQUIRED = new Set(["unblock"])
+
 async function runQueueCommand(args: string[]): Promise<void> {
-	const parsed = await runCmd(queueCliCommand, args)
+	const effectiveArgs = shouldInjectLeafHelp(args, QUEUE_LEAVES_WITH_REQUIRED) ? [args[0]!, "--help"] : args
+	const parsed = await runCmd(queueCliCommand, effectiveArgs)
 	if (parsed.value.kind !== "queue") return
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
+const TOP_LEVEL_COMMANDS = ["status", "activity", "logs", "daemon", "chain", "item", "queue", "context", "doctor"] as const
+
 async function main() {
 	const firstArg = process.argv[2]
+	if (firstArg === "--help" || firstArg === "-h") {
+		process.stdout.write(rootUsage())
+		return
+	}
+	if (firstArg === undefined) {
+		process.stdout.write(rootUsage())
+		process.exitCode = 1
+		return
+	}
 	if (firstArg === "status") {
 		await runStatusCommand(process.argv.slice(3))
 		return
@@ -2775,8 +2821,57 @@ async function main() {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
 	}
+	const suggestion = closestCommandName(firstArg, TOP_LEVEL_COMMANDS)
+	if (suggestion !== null) {
+		process.stderr.write(`coder-loop: unknown command '${firstArg}' — did you mean '${suggestion}'?\n\n`)
+	} else {
+		process.stderr.write(`coder-loop: unknown command '${firstArg}'\n\n`)
+	}
 	process.stdout.write(rootUsage())
 	process.exitCode = 1
+}
+
+// Show the leaf command's own --help output when the operator typed only the leaf name and
+// nothing else. Without this, cmd-ts fails required-arg validation and prints "found N errors:
+// No value provided for name" — which reads as a crash to anyone exploring the CLI. Groups
+// (`chain` on its own) already print their subcommand list via cmd-ts's default, so we only
+// touch leaves that own required positionals or options.
+function shouldInjectLeafHelp(args: readonly string[], leafSet: ReadonlySet<string>): boolean {
+	if (args.length !== 1) return false
+	const first = args[0]
+	if (first === undefined) return false
+	if (first.startsWith("-")) return false
+	return leafSet.has(first)
+}
+
+// Levenshtein distance ≤ 2 → suggest. Kept inline (~15 lines) rather than pulled in as a dep
+// since it's a single-use helper for `main`'s did-you-mean path.
+function closestCommandName(input: string, candidates: readonly string[]): string | null {
+	let best: { name: string; distance: number } | null = null
+	for (const candidate of candidates) {
+		const distance = levenshtein(input, candidate)
+		if (distance > 2) continue
+		if (best === null || distance < best.distance) best = { name: candidate, distance }
+	}
+	return best?.name ?? null
+}
+
+function levenshtein(a: string, b: string): number {
+	if (a === b) return 0
+	if (a.length === 0) return b.length
+	if (b.length === 0) return a.length
+	const prev: number[] = new Array(b.length + 1)
+	const curr: number[] = new Array(b.length + 1)
+	for (let j = 0; j <= b.length; j += 1) prev[j] = j
+	for (let i = 1; i <= a.length; i += 1) {
+		curr[0] = i
+		for (let j = 1; j <= b.length; j += 1) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1
+			curr[j] = Math.min((prev[j] ?? 0) + 1, (curr[j - 1] ?? 0) + 1, (prev[j - 1] ?? 0) + cost)
+		}
+		for (let j = 0; j <= b.length; j += 1) prev[j] = curr[j] ?? 0
+	}
+	return prev[b.length] ?? 0
 }
 
 function rootUsage(): string {
@@ -2786,10 +2881,10 @@ function rootUsage(): string {
 		"Commands:",
 		"  status [<target>] --json          # <target> → full snapshot; omit for central daemon liveness only",
 		"  activity item <chain> --issue <item-id> [--json] [--loop-data-root DIR]",
-		"  activity log <chain> --issue <item-id> [--json] [--loop-data-root DIR]",
+		"  activity log-path <chain> --issue <item-id> [--json] [--loop-data-root DIR]  # aliased as `log`",
 		"  activity all [--json] [--loop-data-root DIR]",
 		"  logs --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
-		"  daemon <up [--detach] | down>     # up: foreground by default, --detach forks background",
+		"  daemon <up [--foreground] | down>  # up defaults to detached background; --foreground runs blocking",
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue> [--start-daemon]  # --start-daemon spawns central daemon detached",
@@ -3526,6 +3621,7 @@ export function buildDaemonStartPlan(args: DaemonStartInputs): DaemonStartPlan {
 		resolve(import.meta.dir, "loop.ts"),
 		"daemon",
 		"up",
+		"--foreground",
 	]
 	if (args.loopDataRoot !== null) command.push("--loop-data-root", args.loopDataRoot)
 	return {
@@ -3612,11 +3708,15 @@ async function runDaemonUpDetached(args: Extract<DaemonCommandArgs, { action: "u
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const stdoutPath = loopDataPaths.daemonStdoutFile(timestamp)
 	const stderrPath = loopDataPaths.daemonStderrFile(timestamp)
+	// The forked child must run in the foreground of its own process so it doesn't re-enter this
+	// detach path and fork again. Pre-#12 the child inherited `daemon up`'s default (foreground),
+	// but the default is now background, so we must pass `--foreground` explicitly to the child.
 	const command = [
 		process.argv[0] ?? "bun",
 		resolve(import.meta.dir, "loop.ts"),
 		"daemon",
 		"up",
+		"--foreground",
 	]
 	if (args.loopDataRoot !== null) command.push("--loop-data-root", args.loopDataRoot)
 	if (args.schedulerIntervalMs !== null) command.push("--scheduler-interval-ms", String(args.schedulerIntervalMs))
@@ -3963,12 +4063,15 @@ async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<Cha
 		if (matchingByRepoCwd.length > 1) {
 			throw new CoderLoopError(`target ${targetCwd} matches multiple ${targetChainStatusExpectation(statusScope)} chains by repo_cwd: ${matchingByRepoCwd.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
 		}
-		if (active.length === 1) return active[0]!
+		// Removed the "active.length === 1 → return the only chain" fallback: it made
+		// `coder-loop status some-typo` silently return a snapshot for whichever chain happened to
+		// be the sole active one, hiding the fact that the target arg was wrong. Now the caller
+		// must either point at a real item.repoCwd or pass --chain <name> explicitly.
 		if (active.length === 0) {
 			const repoLabel = requestedRepo === null ? "any repository" : `repository ${requestedRepo}`
 			throw new CoderLoopError(`SQLite state DB has no ${targetChainStatusExpectation(statusScope)} chain for ${repoLabel} and target ${targetCwd}`)
 		}
-		throw new CoderLoopError(`target ${targetCwd} is ambiguous across ${targetChainStatusExpectation(statusScope)} chains: ${active.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
+		throw new CoderLoopError(`target ${targetCwd} does not match any item.repoCwd of ${targetChainStatusExpectation(statusScope)} chains (${active.map((chain) => chain.name).join(", ")}); pass --chain <name> to pick one explicitly, or use \`coder-loop status --loop-data-root <dir>\` for daemon-only status`)
 	} finally {
 		store.close()
 	}
