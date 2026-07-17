@@ -39,6 +39,8 @@ Read all of it live, this run — never trust a previous run's summary:
 2. The PR (bound `ISSUE_PR` or structural closing-keyword linkage per `common/github-routing.md`): `gh pr view <PR> -R {{REPO}} --json state,isDraft,mergedAt,mergeCommit,headRefOid,mergeStateStatus,statusCheckRollup,body,url`.
 3. From the body's `coder-loop:current-state` index (per `common/packets.md`), fetch the comment at `reviewVerdictUrls[length-1]` → the latest `coder-loop:review-verdict` block, plus the CandidateRef and VerificationPacket it references (fetch each referenced URL). Earlier entries in `reviewVerdictUrls` are prior rounds' verdicts kept as audit history; closure only ever acts on the latest one. Do not enumerate the PR comment history; index absent/unparsable or the latest verdict URL not resolving → one bootstrap scan per `common/packets.md` to locate the latest verdict, then proceed.
 
+4. Shortcut input (per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`): under `## Issue #{{ISSUE}}` → latest `### Round <n>`, the `#### Phase: review` note carries the ReviewVerdict URL + kind. Use it to skip re-discovering the verdict via the index when the note names it and its URL resolves. The live identity re-join in Step 2 remains mandatory — this note is a pointer, not a substitute for the drift check.
+
 No ReviewVerdict found → you cannot invent one: write the declared review-drift status (Step 3) so review re-adjudicates.
 
 **Crash recovery**: if live state shows the effect already happened (PR already merged / issue already closed with the closure comment), do not repeat it — resume at Step 4 and finish the remaining external steps and the local transition.
@@ -94,7 +96,14 @@ gh issue close {{ISSUE}} -R {{REPO}} --comment "Closed by coder-loop closure {{R
 
 ### Step 6 — Local terminal write and wrap-up
 
-Only after Step 4 fully confirmed: write the terminal status — `done` (accepted-pr / accepted-no-pr) or `moot` — through the same `item exits` + `item update --status` face, and verify the write landed. A `done` write is also the cross-repo unblock trigger: any queue item whose `dependsOn` targets this item is restored to actionable by the engine — no further action from you. A `moot` write does not satisfy dependencies; if this issue carried an `Unblocks:` back-link, the source stays blocked and your handoff must say so. Then append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID, verdict kind consumed, effects performed with URLs (merge commit, closure comment), or the drift found and status written.
+Only after Step 4 fully confirmed: write the terminal status — `done` (accepted-pr / accepted-no-pr) or `moot` — through the same `item exits` + `item update --status` face, and verify the write landed. A `done` write is also the cross-repo unblock trigger: any queue item whose `dependsOn` targets this item is restored to actionable by the engine — no further action from you. A `moot` write does not satisfy dependencies; if this issue carried an `Unblocks:` back-link, the source stays blocked and your handoff must say so.
+
+Then write your run note into `{{SHARED_CONTEXT_FILE}}` per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`, in one `apply_patch` call:
+
+- **`done` or `moot` terminal write (issue-section compaction)**: replace the entire `## Issue #{{ISSUE}}` section with a one-line closure summary — `<!-- coder-loop:shared:issue issue={{ISSUE}} closed=<done|moot> run={{RUN_ID}} -->\n## Issue #{{ISSUE}} — closed <done|moot> at {{RUN_ID}}, see <issue URL> (PR <URL> merged <mergeCommit>` or the moot proof URL, whichever applies). The full history stays in GitHub; shared.md never re-reads a closed issue's phase notes. Do not append a phase note first and then compact — the compaction is the only note this run writes.
+- **Any `*_drift` / `contract_invalid` exit (retry-writer branch, closure's non-terminal side)**: compact per the state-contract rule — replace `### Round <n>` with a `### Round <n> — closed by closure as <status> at {{RUN_ID}}` summary, open `### Round <n+1> — opened by closure as <status>` with a `<!-- coder-loop:shared:verdict source=closure status=<status> run={{RUN_ID}} -->` block naming the drifted identity (expected vs observed, URLs) so the re-entered phase has the pointer; append a `#### Phase: closure` note under the new round pointing at the drift comment.
+
+Note contents (concise, source-cited): run ID, verdict kind consumed, effects performed with URLs (merge commit, closure comment), or the drift found and status written.
 
 Print exactly one final line:
 

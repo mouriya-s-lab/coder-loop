@@ -71,14 +71,17 @@ auth 和 binary 永远是执行者自己解决的：交付物要么是能自己�
 
 e2e 单独成步而不并入 verify：捆在重步骤里的麻烦环节会被整体跳过——单独一行清单 + 独立验收，跳过就关不掉清单。禁 subagent 之后 verify 与 e2e 在同一 iteration session 内 sequential 跑：verify 先，e2e 后（e2e 观察的是 verify 观察到的 committed HEAD）。verify / e2e 里发现失败 → 清单插入 `implement — fix`，修完顺序重跑二者。
 
-## 前提六：每次运行无状态，GitHub 是唯一持久层
+## 前提六：跨 round 持久层是 GitHub，round 内传递面是 shared.md
 
-每次 spawn 的 agent 是独立进程，无跨轮记忆；本地文件会丢、会损坏、跨机不可用。持久业务语义只能落 GitHub（issue body / labels / comments / PR thread）。由此：
+每次 spawn 的 agent 是独立进程，无跨轮记忆；本地文件会丢、会损坏、跨机不可用——**跨 round / 跨 chain / 跨机器**的持久业务语义只能落 GitHub（issue body / labels / comments / PR thread），这条不变。executable contract 是 issue comment（`common/executable-contract.md` 按 marker schema / source revision / Supersedes 选唯一 current packet）；packet 链（CandidateRef / VerificationPacket / DiffAuditReport / VerificationAuditReport / ReviewVerdict）是 PR/issue comment；这些是任何 phase 都能独立复现出结论的底档。
 
-- executable contract 落 issue comment；`common/executable-contract.md` 按 marker schema / source revision / Supersedes 选唯一 current packet，shared.md 永不是权威副本。
-- issue↔PR 关联只认结构性链接（closing keyword 图，GraphQL `closedByPullRequestsReferences` 分页到穷尽），不做 body 文本搜索。
-- retry 的指令源是 PR 的全量读取（body + 全部 comments + 全部 reviews + inline review threads）。最新 retry comment 与 PR body 的 caveat 段（scope-reduction trigger 可能出现的位置）要求原文引用；其余允许摘要——verbatim 收窄到判断依据可能被消歧的位置。
-- 单 session phase 亲自读的是核心少量项 + 一跳图引用；bulk 材料通过 `coder-loop:current-state` 索引按名拉取（前面 audit 报告 / VerificationPacket / CandidateRef 全在这个索引里），避免整条 comment 时间轴 replay。禁 subagent 之后不再有"派 investigator 去读长材料"的分支——需要读就自己读，或路由回上游 phase 让它出一份 durable 摘要。
+但"每次都从 GitHub 读全量"付了一笔可省的税：同一 round 内 review 要读两份 audit 报告、closure 要读 review verdict、下一轮 iter 打回后要扫全部 verdict 数组建 cross-round ledger——这些都是**产出方是独立 session、消费方需要拿它的结论**的场景，反复回 GitHub 拉长材料只是"传递"层面的低效，不涉及信任。因此这层加一条 **round 内传递面**：`{{SHARED_CONTEXT_FILE}}` 的结构化段落（`## Issue #<n>` → `### Round <n>` → `#### Phase: <name>` 注 + 打回时的 `<!-- coder-loop:shared:verdict … -->` block），schema 与读写规则见 `common/packets.md`（Shared handoff block），生命周期规则见 `common/state-contract.md`（Shared handoff compaction）。
+
+- shared.md 是 per-round scratchpad，不是权威副本：contract 权威仍在 GitHub marker comment，packet 权威仍在 GitHub packet comment；shared 里的 verdict block / phase note 都是 **pointer + shorthand**，identity 重验、live 状态核对、drift 检查照做不误。
+- 打回者负责清场——任何 retry / drift 写方在 exit 前一次 apply_patch 关闭旧 round、开新 round、写自己的 verdict block；closure `done/moot` 折叠整个 `## Issue #<n>` section。这解决了原来 shared.md append-only、chain 生命周期内累积到几十 KB / 上千行 / 多 issue 混杂的问题（案例：`~/.coder-loop/loop-data/chains/v3-558/shared.md` 1851 行、357KB）。
+- retry 的指令源变了：从"扫全部 verdict 数组建 cross-round ledger"改为"读 shared 顶部当前 round 的 verdict block"；数组扫描仅在 shared 缺失 / verdict block 不可解析 / 需要按 URL 追溯历史 finding 时作 bootstrap fallback。
+- issue↔PR 关联仍只认结构性链接（closing keyword 图，GraphQL `closedByPullRequestsReferences` 分页到穷尽），不做 body 文本搜索。verbatim 原文引用范围不变——最新 retry comment 与 PR body 的 caveat 段（scope-reduction trigger 可能出现的位置）要求原文引用；shared 的 verdict block 里也是同样的原文引用要求，因为它是 review 要点名的 finding 直接进入下一 round iter 的输入。
+- 单 session phase 亲自读的是核心少量项 + 一跳图引用；bulk 材料通过 `coder-loop:current-state` 索引按名拉取，或通过 shared 里对应 phase note 的 shorthand 短路拉取。禁 subagent 之后不再有"派 investigator 去读长材料"的分支——需要读就自己读，或路由回上游 phase 让它出一份 durable 摘要。
 
 ## 前提七：Intent/Result 是工程日志，不是警察证据
 
@@ -99,7 +102,7 @@ step 文件里的过程纪律段以 superpowers 插件（参考版本 v6.1.1）�
 
 ## 前提九：一致性铁律（防 livelock）
 
-规则各有唯一事实源：`common/executable-contract.md` 拥有 authority/currentness，`enrichment/contract-schema.md` 拥有 packet schema；entry 拥有任务拆分与路由，step/quality/action 各自拥有执行、判据与副作用。其他文件只引用，不复述完整规则。
+规则各有唯一事实源：`common/executable-contract.md` 拥有 authority/currentness，`enrichment/contract-schema.md` 拥有 packet schema，`common/packets.md` 拥有 GitHub packet 链 + Shared handoff block 的物理 schema 与读写规则，`common/state-contract.md` 拥有 queue state + shared.md compaction 规则；entry 拥有任务拆分与路由，step/quality/action 各自拥有执行、判据与副作用。其他文件只引用，不复述完整规则。
 
 ## 写 prompt 的人最容易犯的错（本 preset 的事故记录）
 

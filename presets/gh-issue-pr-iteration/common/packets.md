@@ -165,6 +165,92 @@ Thread scanning does not scale: every consumer needs either **the latest of each
   - **Full-history readers** (need cross-round accumulation): iteration retry → every URL in `reviewVerdictUrls`, `diffAuditReportUrls`, `verificationAuditReportUrls`; review → every URL in the same three arrays (its cross-round regression judgment reads the full history, not just the latest).
 - **Bootstrap and repair.** Index absent (legacy PR), unparsable, missing an array key (older shape), or any revision join failing against what an array element points at → do **one** full-thread scan to locate every historical packet of every kind (all durable packet comments are recognizable by their fenced ` ```json ` labels: `coder-loop:iteration-evidence` — the delta comment marker if present, otherwise fall back to timestamp order over the writer's own comments — `coder-loop:verification-packet`, `coder-loop:diff-audit-report`, `coder-loop:verification-audit-report`, `coder-loop:review-verdict`). Sort each by comment `createdAt` ascending to reconstruct round order, write/repair the index, then proceed. The index is never trusted blindly: revision joins still verify live identities — the index replaces discovery, not verification.
 
+## Shared handoff block — the per-round scratchpad
+
+Every GitHub packet above is the durable, cross-round record. The **per-round** context passing that lets same-round downstream phases skip re-fetching upstream comments lives in `{{SHARED_CONTEXT_FILE}}` — the local `shared.md` — with a structured schema so consumers can locate exactly the block they need with grep.
+
+Physical layout (one file per chain, sections per issue, sub-sections per round, notes per phase):
+
+```markdown
+# Shared durable context
+
+<!-- coder-loop:shared:issue issue=730 -->
+## Issue #730
+
+<!-- coder-loop:shared:round round=2 opened_by=review status=changes_requested run=run-XXX -->
+### Round 2 — opened by review as changes_requested
+
+<!-- coder-loop:shared:verdict source=review status=changes_requested run=run-XXX -->
+- ReviewVerdict URL: https://.../issues/730#issuecomment-...
+- Failing judgments: PR protocol, Cross-round regression
+- Retry findings (each anchored):
+  - anchor: PR body — first line not `Closes #730`
+  - anchor: Check `fixture-scope` — expected exit 0 with `path only`, observed exit 0 with `path + trailing`
+- Consumed audit reports: DiffAuditReport <url>, VerificationAuditReport <url>
+- Cross-round history pointer: see PR body `coder-loop:current-state` (`reviewVerdictUrls`, `diffAuditReportUrls`, `verificationAuditReportUrls`) for prior rounds
+
+<!-- coder-loop:shared:phase-note phase=iteration run=run-YYY -->
+#### Phase: iteration
+- Spawn classification: Retry (round 2, prior verdict changes_requested)
+- CandidateRef: kind=implementation-pr, pr=731, headSha=<sha>
+- Task list outcomes: [x] implement / [x] verify / [x] e2e / [x] submit
+- Deliverable: PR #731 <url>; delta comment <url>
+
+<!-- coder-loop:shared:phase-note phase=verification run=run-ZZZ -->
+#### Phase: verification
+- Packet URL: <url>
+- Checks: 4/4 passed
+- Conclusion: verified
+
+… (subsequent phase notes appended in phase order)
+
+### Round 1 — closed by review as changes_requested at run-PPP
+```
+
+Marker conventions (readers grep by these — they are the schema):
+
+- `<!-- coder-loop:shared:issue issue=<n> -->` immediately before each `## Issue #<n>` heading. Missing marker for the current issue = fresh (no round yet exists for this issue in this chain).
+- `<!-- coder-loop:shared:round round=<n> opened_by=<phase> status=<status> run=<runId> -->` immediately before each `### Round <n>` heading. Round number is grep-max over `round=\d+` in the current issue section, +0 for continue-current-round writes and +1 for compaction writes.
+- `<!-- coder-loop:shared:verdict source=<phase> status=<status|drift> run=<runId> -->` immediately before the round-opening verdict block. Present iff the round was opened by a retry / drift (Round 1 has no verdict block).
+- `<!-- coder-loop:shared:phase-note phase=<name> run=<runId> -->` immediately before each `#### Phase: <name>` note. One note per (round, phase); a retry that re-enters the same round overwrites its own prior note in place.
+
+Writer table (which phase writes what, and when compaction fires):
+
+| Writer | On clean forward exit | On retry / drift exit |
+|---|---|---|
+| iteration | append `#### Phase: iteration` note under current round; if `## Issue #<n>` section is absent, create it and open `### Round 1` | `contract_invalid` — compact + open new round + emit verdict block (source=iteration) |
+| verification | append `#### Phase: verification` note | `changes_requested` / `contract_invalid` — compact + open new round + emit verdict block (source=verification) |
+| publish | append `#### Phase: publish` note | `changes_requested` / `contract_invalid` — compact + open new round + emit verdict block (source=publish) |
+| diff-audit | append `#### Phase: diff-audit` note | `changes_requested` / `contract_invalid` — compact + open new round + emit verdict block (source=diff-audit) |
+| verification-audit | append `#### Phase: verification-audit` note | `verification_drift` / `changes_requested` / `contract_invalid` — compact + open new round + emit verdict block (source=verification-audit) |
+| review | append `#### Phase: review` note (accepted / moot verdicts) | `changes_requested` / `contract_invalid` / `blocked` / expand-parent — compact + open new round + emit verdict block (source=review) |
+| closure | on `done` / `moot`: **replace the entire `## Issue #<n>` section with a one-line closure summary** (see below) | any `*_drift` / `contract_invalid` — compact + open new round + emit verdict block (source=closure) |
+
+Reader table (who reads which same-round upstream note as a same-round shortcut for expensive GitHub reads):
+
+| Reader | What to grep | If present, what to skip | Fallback if absent / unparsable |
+|---|---|---|---|
+| iteration (retry) | `<!-- coder-loop:shared:verdict source=review/diff-audit/verification-audit/verification/publish -->` at the top of the latest round in `## Issue #{{ISSUE}}` | full enumeration of `reviewVerdictUrls`, `diffAuditReportUrls`, `verificationAuditReportUrls` — the round-opening verdict block already carries the anchored findings; cross-round regressed-finding chases follow the specific URLs the block names, not a full array scan | bootstrap: scan the arrays as `common/packets.md` currently prescribes |
+| verification | `#### Phase: iteration` note under the current round (for CandidateRef fingerprint) | re-parsing the PR body CandidateRef block once the note is present and the SHAs match live head — but **you still perform the live revision join** (this note is context, not a substitute for identity binding) | fetch PR body per current packets.md |
+| publish | `#### Phase: verification` note under the current round (for VerificationPacket URL + conclusion) | re-fetching `verificationPacketUrls[length-1]` when the note names the URL AND `verified` — but the identity join against live head is still mandatory | fetch the packet comment per current packets.md |
+| diff-audit | `#### Phase: iteration` note (CandidateRef fingerprint) + `#### Phase: publish` note (published head SHA) | re-parsing the CandidateRef block; still runs the diff between the SHAs the notes cite (or falls back to fetching them) | fetch PR body per current packets.md |
+| verification-audit | `#### Phase: verification` note (packet URL) + `#### Phase: diff-audit` note (only as context signal — the audit target is the packet, not the diff-audit report) | re-fetching the packet comment when the note names the URL | fetch per current packets.md |
+| review | `#### Phase: diff-audit` note (report URL + verdict) + `#### Phase: verification-audit` note (report URL + verdict) — both under the current round | re-fetching the two report comment bodies IF the notes carry the verdict verbatim AND the audits' verdict is `clean` (cheap-path: two `clean` shorthands + spot-read one report on suspicion); on any non-clean audit verdict, fetch the full report body for the anchored findings | fetch both reports per current packets.md |
+| closure | `#### Phase: review` note (ReviewVerdict URL + kind) under the current round | re-fetching `reviewVerdictUrls[length-1]` when the note names the URL and kind — but the live identity re-join is still mandatory | fetch per current packets.md |
+
+**closure `done` / `moot` compaction** replaces `## Issue #{{ISSUE}}` with a single-line record:
+
+```markdown
+<!-- coder-loop:shared:issue issue=730 closed=done run=run-QQQ -->
+## Issue #730 — closed done at run-QQQ, see https://.../issues/730 (PR https://.../pull/731 merged 54042bf)
+```
+
+The full history stays in GitHub. shared.md never re-reads a closed issue's notes; a subsequent iteration on the same issue (recurring queue item, or unblock-triggered re-entry) opens a new `## Issue #{{ISSUE}}` section from scratch — the previous single-line record is preserved above it as chronological evidence.
+
+**Every compaction is a single-file structural rewrite** (one `apply_patch` call): the outgoing round becomes a summary line, the incoming round opens with its verdict block, and only then does the writer append its own phase note (for the phase that ran this transition). Partial compaction (e.g. opening a new round while leaving the outgoing round's phase notes in place) is a protocol violation.
+
+**Trust invariant** unchanged: shared.md is a scratchpad. It does not authorize a phase to skip its live GitHub identity join. It replaces the expensive discovery reads (thread enumeration, cross-round array scans) that a strict interpretation of "0 trust" would otherwise force every round. The two `clean` audit shorthands are the archetypal saving: review consumes the audit note pointers instead of re-parsing the full report bodies, without giving up any judgment — the audit's verdict is what its independent session produced, and shared.md is just a well-typed pointer to it.
+
 ## Revision join — how consumers trust input
 
 A phase does not trust its input because "the previous phase ran". It re-joins identities and routes backwards on mismatch:

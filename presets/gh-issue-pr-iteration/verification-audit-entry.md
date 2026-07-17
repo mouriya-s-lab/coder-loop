@@ -40,6 +40,8 @@ Read now, yourself:
 
 ### Step 1 — Parse the packet chain
 
+Shortcut input (per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`): under `## Issue #{{ISSUE}}` → latest `### Round <n>`, the `#### Phase: verification` note carries the packet comment URL and conclusion. Use it to skip re-discovering the packet through the PR body index when the note is present and its URL resolves. The note is a pointer, not evidence — the audit target is the packet's content, which you fetch and audit fresh below.
+
 Resolve the PR body's `coder-loop:current-state` index and fetch **only** what it names:
 
 - `contractMarkerUrl` — the unique current executable-contract marker;
@@ -155,7 +157,12 @@ Verify the status write landed (`coder-loop item update ... --json`); a failed w
 
 ### Step 10 — Handoff and cleanup
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: report URL, verdict, coverage counts (`n/n covered`), findings count, refs audited (candidate SHA + packet URL). Sweep per `{{PRESET_ROOT}}/quality/cleanup.md`.
+Write your run note into `{{SHARED_CONTEXT_FILE}}` per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`, in one `apply_patch` call:
+
+- **`clean` verdict**: append a `#### Phase: verification-audit` note under the current round with its `<!-- coder-loop:shared:phase-note phase=verification-audit run={{RUN_ID}} -->` marker; content: report URL, verdict `clean`, coverage counts (`n/n covered`), findings count 0, refs audited (candidate SHA + packet URL). Review's cheap-path uses this note to skip re-parsing the full report body.
+- **`verification-drift`, `changes-requested`, or `contract-invalid` verdict (retry-writer branch)**: compact per the state-contract rule — replace `### Round <n>` with a `### Round <n> — closed by verification-audit as <status> at {{RUN_ID}}` summary, open `### Round <n+1> — opened by verification-audit as <status>` with a `<!-- coder-loop:shared:verdict source=verification-audit status=<status> run={{RUN_ID}} -->` block naming the report URL + the anchored findings verbatim (identity mismatch, coverage gap, artifact contradiction, internal contradiction, live-CI failure, malformed check) + the target phase for the retry (`verification` for `verification-drift`, `iteration` for `changes-requested`, `contract-enrichment` for `contract-invalid`); append a `#### Phase: verification-audit` note under the new round pointing at the same report.
+
+Sweep per `{{PRESET_ROOT}}/quality/cleanup.md`.
 
 ## Boundaries
 

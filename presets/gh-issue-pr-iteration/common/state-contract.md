@@ -19,7 +19,7 @@ The scheduler selects the next actionable item itself (queue order and priority 
 
 - Chain scheduling is daemon-owned; there is no on-switch file. The only agent-side channel to stop a chain is review's **stop** chain-action exit (`coder-loop item exit-action --action stop`, per `review/actions/stop.md`), reserved for broken review infrastructure or a failed irreversible side effect; chain completion itself is engine-detected (all items terminal → umbrella-finalizer trigger → `completed`). `chain stop` / `chain resume` / `queue unblock` are operator-only commands.
 - run stdout log is per-run trace output for review. It is not durable task history.
-- `loop-data/chains/<chain>/shared.md` is the daemon-owned append-only local handoff. It is not durable executable-contract authority; that authority is the unique current GitHub marker comment selected by `common/executable-contract.md`. Cross-phase business facts travel as GitHub packets per `common/packets.md`, never as handoff-only state.
+- `loop-data/chains/<chain>/shared.md` is the daemon-owned **per-round scratchpad** for structured phase-to-phase context passing within one round. It is not executable-contract authority (that stays with the unique current GitHub marker comment selected by `common/executable-contract.md`) and it is not the cross-round historical record (that stays in the GitHub packet arrays per `common/packets.md`). Its ownership passes to whichever phase is currently writing; rebound phases (packet retry, drift, review-issued retry / reenrich) are responsible for compacting it before exiting. Structure is `## Issue #<n>` → `### Round <n>` → `#### Phase: <name>` notes and a leading `<!-- coder-loop:shared:verdict … -->` block when the round was opened by a retry / drift. Full schema, writer / reader rules, and compaction protocol are specified in `common/packets.md` (Shared handoff block).
 - `loop-data/chains/<chain>/issues/<issue>.md` is an optional issue-local attachment. Its absence must not block any phase's startup.
 - Per-target policy / project commands / PR conventions live in the repo's own `CLAUDE.md` / `AGENTS.md`, not in `.coder-loop/`. Loop-internal policy (PR evidence layers, verdict semantics) lives inside the preset fragments.
 - `loop-data runtime artifacts` and run stdout log must not be staged into feature commits.
@@ -57,4 +57,15 @@ If a required external effect fails, do not write the corresponding local state.
 
 ## Handoff discipline
 
-Handoff notes should be concise and source-cited: run ID, what happened, files changed, commands and outcomes, evidence artifacts, packet/PR URLs, blockers, and proposed child issue specs when relevant.
+Handoff notes are structured per the Shared handoff block schema in `common/packets.md`. Each phase writes its own `#### Phase: <name>` note under the current `### Round <n>` of its `## Issue #<n>` section — concise, source-cited (run ID, what happened, files/artifacts touched, commands and outcomes, packet/PR URLs, blockers, proposed child issue specs when relevant). Notes are consumed by same-round downstream phases per each entry's Step 1 / Step 2 read list; they never substitute for the durable GitHub packet a phase must post.
+
+## Shared handoff compaction (round boundaries)
+
+Every retry-writing phase MUST rewrite the affected shared.md region **before** it exits (in one apply_patch, so the compaction and the new content land atomically). The rule is uniform across writers:
+
+- **Any retry / drift exit** = close the current round in `## Issue #{{ISSUE}}` and open a new round. Physically: replace the entire `### Round <n>` block with a one-line summary `### Round <n> — closed by <phase> as <status> at <run-id>`, then append a fresh `### Round <n+1> — opened by <phase> as <status>` with the required `<!-- coder-loop:shared:verdict … -->` block as the round's first content. The full ReviewVerdict / DiffAuditReport / VerificationAuditReport / VerificationPacket comment on GitHub is the durable historical record — shared.md carries the pointer, not the copy.
+- **Any clean forward exit** = leave the current round intact; append a new `#### Phase: <name>` note. No compaction.
+- **`closure` writing `done` or `moot`** = the round is over and its content will not be read again (subsequent iteration on this issue never re-enters the loop). Replace the entire `## Issue #{{ISSUE}}` section with a one-line summary `## Issue #{{ISSUE}} — closed <done|moot> at <run-id>, see <PR/issue URL>`. This is the only sanctioned deletion of accumulated notes.
+- **`closure` drift** = same as any other retry exit (close round `<n>`, open `<n+1>` with the drift verdict block).
+
+The rule is not "clean up when it feels cluttered"; it is "the writer of the transition owns the compaction". A retry exit that appends without closing the round leaves stale phase notes downstream will read as live — that is a protocol violation caught by review.

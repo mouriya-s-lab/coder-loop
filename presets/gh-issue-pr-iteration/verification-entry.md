@@ -40,7 +40,7 @@ Read these yourself:
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,comments,state,url` → the current executable-contract marker (validate uniqueness and supersession per `common/executable-contract.md`) and any operator corrections posted after it.
 2. The CandidateRef: resolve the issue's linked PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage via the GraphQL query in `common/github-routing.md` — never text search), then read the PR **body only** (`gh pr view <PR> -R {{REPO}} --json body,headRefOid`): the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `common/packets.md`. Fetch only the objects the index names — do not enumerate the PR comments. Index absent or unparsable → one bootstrap scan per `common/packets.md`, write the index, proceed. On no-PR routes read the issue comments. Missing or unparsable CandidateRef → this is an iteration defect: publish the exact gap as a PR/issue comment and take the retry status exit (Step 5).
 3. Target repo `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` → project commands, required suites, canonical runtime/E2E driver.
-4. `{{SHARED_CONTEXT_FILE}}` → what iteration recorded for this run generation (context only — its claims are not evidence).
+4. `{{SHARED_CONTEXT_FILE}}` → per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`, locate `## Issue #{{ISSUE}}` → latest `### Round <n>` → `#### Phase: iteration` note. Use it as a CandidateRef fingerprint hint (SHA, PR number) so the Step 2 revision join can start from the right pointer without re-parsing the PR body. This is context, not evidence: identity binding in Step 2 is still against live GitHub, and every check row in Step 3 runs fresh. Round opened by a `<!-- coder-loop:shared:verdict source=verification-audit status=verification_drift -->` block means you are re-executing the same candidate against the same checks the previous verification round emitted — read that block for the audit's exact finding so your re-execution addresses it.
 
 ### Step 2 — Revision join
 
@@ -77,7 +77,12 @@ The packet must be durable (comment URL resolves) before any exit. Publication f
 
 ### Step 5 — Exit
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}` (run ID, candidate identity verified, checks run/passed/failed, packet comment URL). Then take exactly one exit:
+Write your run note into `{{SHARED_CONTEXT_FILE}}` per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`, in one `apply_patch` call:
+
+- **`verified` clean exit**: append a `#### Phase: verification` note under the current round with its `<!-- coder-loop:shared:phase-note phase=verification run={{RUN_ID}} -->` marker; content: run ID, candidate identity verified, checks run/passed/failed, packet comment URL, conclusion `verified`.
+- **`changes-requested` or `contract-invalid` exit (retry-writer branch)**: compact per the state-contract rule — replace the current `### Round <n>` block with a `### Round <n> — closed by verification as <status> at {{RUN_ID}}` summary, open `### Round <n+1> — opened by verification as <status>` with a `<!-- coder-loop:shared:verdict source=verification status=<status> run={{RUN_ID}} -->` block naming the packet comment URL + the failing/defective rows verbatim + the anchors iteration must address; then append your `#### Phase: verification` note under the new round (or fold it into the verdict block if there is nothing else to record).
+
+Then take exactly one exit:
 
 - **All required checks passed** and conclusion is `verified` → clean exit (exit 0, no status write). The scheduler advances to publish.
 - **Candidate behavior/check failure** → conclusion `changes-requested`; the packet is the executable failure feedback (every failing row: id, command, expected vs observed). Write the declared retry status via `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status <retry status from your exits>` (query `coder-loop item exits` first; the engine binds your run credential automatically).

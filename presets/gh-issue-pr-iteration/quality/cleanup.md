@@ -16,3 +16,13 @@ Side-effect discipline — each phase declares every side effect as it works, th
 - Verify each kill took (`ps -p <pid>` empty / port no longer listening) rather than assuming.
 - Clean means: no processes left running that this run started; no stray files outside the evidence directory and the committed deliverable; evidence artifacts preserved in place; pre-existing dirty state untouched.
 - If something cannot be cleaned (a process owned by another run, a file the environment will not remove), record exactly what remains and why in the handoff — an honest residue line beats a silent leak.
+
+## Shared handoff compaction — writer-owned
+
+Cleanup of `{{SHARED_CONTEXT_FILE}}` is not a broom pass; it is a structural rewrite the exiting phase performs as part of its handoff step (before the process exit, in the same `apply_patch` call that emits the phase's outgoing note). The rule table lives in `{{PRESET_ROOT}}/common/state-contract.md` (Shared handoff compaction section) and the physical layout / marker schema lives in `{{PRESET_ROOT}}/common/packets.md` (Shared handoff block section). One-line reminder per exit shape:
+
+- **Clean forward exit**: append your `#### Phase: <name>` note under the current round. No compaction. Do NOT touch prior phase notes in the same round.
+- **Retry / drift exit (any phase)**: replace the current `### Round <n>` block with a one-line summary `### Round <n> — closed by <phase> as <status> at <run-id>`, open a fresh `### Round <n+1> — opened by <phase> as <status>` with your `<!-- coder-loop:shared:verdict … -->` block as the first content, then append your phase note. Prior rounds' summary lines are preserved (chronological evidence); prior rounds' phase notes are gone.
+- **`closure` writing `done` / `moot`**: replace the entire `## Issue #{{ISSUE}}` section with a one-line closure summary carrying the `closed=<done|moot>` marker; do not append a phase note first. The full history stays in GitHub.
+
+Partial compaction (opening a new round while leaving the outgoing round's phase notes in place, or appending a new phase note without closing a round that a retry/drift requires closed) is a protocol violation caught by the next phase's read and by review.

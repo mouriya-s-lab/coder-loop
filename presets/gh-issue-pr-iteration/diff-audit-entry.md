@@ -44,6 +44,8 @@ Route selection is read-only here: the marker `Deliverable` variant tells you wh
 
 ### Step 2 — Materialize the diff
 
+Shortcut input (per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`): under `## Issue #{{ISSUE}}` → latest `### Round <n>`, the `#### Phase: iteration` note carries the CandidateRef fingerprint and the `#### Phase: publish` note carries the published head SHA. Use them to identify the two SHAs to diff without re-parsing the PR body. Both notes absent (fresh round with no upstream phase notes yet) or SHAs disagreeing → fall back to the full PR body read below.
+
 Resolve the CandidateRef through the PR body's `coder-loop:current-state` index (`iterationEvidenceUrls[length-1]` gives you this round's iteration comment; the PR body has `coder-loop:candidate-ref`). No CandidateRef on an implementation route → hard packet failure, do not audit — take the `changes_requested` exit citing the missing CandidateRef.
 
 In `AGENT_CWD`:
@@ -205,7 +207,12 @@ Verify the status write landed (`coder-loop item update ... --json`); a failed w
 
 ### Step 10 — Handoff and cleanup
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: report URL, verdict, findings count, refs audited (both SHAs). Sweep per `{{PRESET_ROOT}}/quality/cleanup.md` — no processes to stop on a read-only audit, but declared temp files and scratch downloads must go.
+Write your run note into `{{SHARED_CONTEXT_FILE}}` per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`, in one `apply_patch` call:
+
+- **`clean` verdict**: append a `#### Phase: diff-audit` note under the current round with its `<!-- coder-loop:shared:phase-note phase=diff-audit run={{RUN_ID}} -->` marker; content: report URL, verdict `clean`, findings count 0, refs audited (both SHAs). Review's cheap-path uses this note to skip re-parsing the full report body.
+- **`changes-requested` or `contract-invalid` verdict (retry-writer branch)**: compact per the state-contract rule — replace `### Round <n>` with a `### Round <n> — closed by diff-audit as <status> at {{RUN_ID}}` summary, open `### Round <n+1> — opened by diff-audit as <status>` with a `<!-- coder-loop:shared:verdict source=diff-audit status=<status> run={{RUN_ID}} -->` block naming the report URL + the anchored findings verbatim (scope / hygiene / test-integrity / code / mechanism rows iteration must address); append a `#### Phase: diff-audit` note under the new round pointing at the same report.
+
+Sweep per `{{PRESET_ROOT}}/quality/cleanup.md` — no processes to stop on a read-only audit, but declared temp files and scratch downloads must go.
 
 ## Boundaries
 

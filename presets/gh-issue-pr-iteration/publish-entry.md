@@ -40,7 +40,7 @@ Read these yourself:
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,comments,state,url` → the current executable-contract marker (delivery route, closing relation) and any late operator corrections.
 2. The candidate's PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage per `common/github-routing.md`): read the **body only** — the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `common/packets.md`, then fetch the comment at `verificationPacketUrls[length-1]` (the latest packet — earlier entries are prior rounds' history, not this run's input). Do not enumerate the PR comments; index absent/unparsable or a join failure → one bootstrap scan per `common/packets.md`, repair the index, proceed. On no-PR routes read the issue thread for both.
 3. Target repo `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` → PR title/body conventions and required sections.
-4. `{{SHARED_CONTEXT_FILE}}` → run history context (not evidence).
+4. `{{SHARED_CONTEXT_FILE}}` → per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`, locate `## Issue #{{ISSUE}}` → latest `### Round <n>` → `#### Phase: verification` note. Use it to shortcut to the packet comment URL when the note names it and marks conclusion `verified`; you still perform the Step 2 identity join against live head (this note is a pointer, not evidence). If the round's `#### Phase: verification` note is absent or its conclusion is not `verified`, you were scheduled against an unverified candidate — do not fabricate one from the packet URL; take the retry status exit in Step 4.
 
 Missing VerificationPacket, or its conclusion is not `verified` → you were scheduled against an unverified candidate; publish the gap as a PR/issue comment and take the retry status exit (Step 4).
 
@@ -73,7 +73,12 @@ coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --field-json '{"branch":
 
 ### Step 4 — Exit
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}` (run ID, publication object URL + revision, what was assembled/flipped). Then take exactly one exit:
+Write your run note into `{{SHARED_CONTEXT_FILE}}` per the Shared handoff block schema in `{{PRESET_ROOT}}/common/packets.md`, in one `apply_patch` call:
+
+- **Ready / clean exit**: append a `#### Phase: publish` note under the current round with its `<!-- coder-loop:shared:phase-note phase=publish run={{RUN_ID}} -->` marker; content: run ID, published PR URL + revision, what was assembled/flipped, companion comment URL.
+- **`changes_requested` or `contract_invalid` exit (retry-writer branch)**: compact per the state-contract rule — replace `### Round <n>` with a `### Round <n> — closed by publish as <status> at {{RUN_ID}}` summary, open `### Round <n+1> — opened by publish as <status>` with a `<!-- coder-loop:shared:verdict source=publish status=<status> run={{RUN_ID}} -->` block naming the gap comment URL + the specific mismatch (candidate drift SHAs, required code change, contract route defect); append the `#### Phase: publish` note under the new round with the same content shape as the clean-exit form.
+
+Then take exactly one exit:
 
 - **Verified identity unchanged and the deliverable is ready/live** → clean exit (exit 0, no status write). The scheduler advances to review.
 - **Candidate changed / delivery needs code fixes** → write the declared retry status via `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status <retry status from your exits>` (query `coder-loop item exits` first; the engine binds your run credential automatically) — only after the gap is durably posted.
