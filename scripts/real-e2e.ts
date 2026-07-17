@@ -27,6 +27,11 @@ import { completionVerdict } from "./real-e2e-watch"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
+// e2e 运行强制的 codex 模型与 reasoning effort（operator 要求）：不管 preset 声明什么，
+// harness 都把 codex 钉到这两个值。model 走 chain 级覆盖（set-runner-model），effort 走
+// PATH shim 注入（引擎没有 effort 概念，也不该有）。改 e2e 用模/档只改这两处。
+const E2E_CODEX_MODEL = "gpt-5.6-terra"
+const E2E_CODEX_REASONING_EFFORT = "low"
 const SEED_LABEL = "e2e-seed"
 const FIXTURE_INITIAL_CONTENT = "status: pending\n"
 const TERMINAL_FAILURE = ["blocked", "moot", "exhausted"] as const
@@ -286,6 +291,22 @@ exec bun ${LOOP_ENTRY} "$@"
 `
 	writeFileSync(shimPath, script)
 	chmodSync(shimPath, 0o755)
+	// e2e 层强制 codex reasoning effort：包一层 codex shim，在引擎固定的
+	// `--ask-for-approval never exec` argv 前缀后插入 `-c model_reasoning_effort=…`。
+	// 真实 codex 在此刻（PATH 尚未前置 shimDir）解析为绝对路径写死进脚本，避免自递归；
+	// argv 形状不符合该前缀时原样透传，引擎 argv 变化不会静默弄坏 spawn。
+	const realCodex = Bun.which("codex")
+	if (realCodex === null) fail("codex CLI 不在 PATH 上，无法生成 effort shim")
+	const codexShimPath = resolve(shimDir, "codex")
+	const codexShim = `#!/bin/sh
+if [ "$3" = "exec" ]; then
+  a1=$1; a2=$2; a3=$3; shift 3
+  exec ${realCodex} "$a1" "$a2" "$a3" -c model_reasoning_effort=${E2E_CODEX_REASONING_EFFORT} "$@"
+fi
+exec ${realCodex} "$@"
+`
+	writeFileSync(codexShimPath, codexShim)
+	chmodSync(codexShimPath, 0o755)
 	return shimDir
 }
 
@@ -576,6 +597,18 @@ async function runScenario(
 		"--loop-data-root", daemon.loopDataRoot], { allowFail: true })
 	if (chainCreate.exitCode !== 0) {
 		dumpDiagnosis(fixture, daemon, chainName, `chain create 失败:\n${chainCreate.stdout}\n${chainCreate.stderr}`)
+		return { kind: "failure", issueNumber }
+	}
+
+	// e2e 一律用 gpt-5.6-terra 跑 codex phase：chain 级 metadata 覆盖（chain.metadata.codex.model
+	// 优先于 preset phase 的 defaultModel），不改生产 preset 的默认声明。
+	log(`chain model: codex → ${E2E_CODEX_MODEL}（e2e 层 chain 覆盖）`)
+	const setModel = sh(["bun", LOOP_ENTRY, "chain", "set-runner-model", chainName,
+		"--kind", "codex",
+		"--model", E2E_CODEX_MODEL,
+		"--loop-data-root", daemon.loopDataRoot], { allowFail: true })
+	if (setModel.exitCode !== 0) {
+		dumpDiagnosis(fixture, daemon, chainName, `chain set-runner-model 失败:\n${setModel.stdout}\n${setModel.stderr}`)
 		return { kind: "failure", issueNumber }
 	}
 
