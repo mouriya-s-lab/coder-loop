@@ -114,6 +114,7 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 | Title-intent | review 亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
 | Caveat honesty | review 亲自 | handoff `Intent/Result (run …)` blocks + PR body/comments（scope-reduction 触发相关段落原文引用）+ DiffAuditReport 的 change footprint（intent↔action 比对） | `quality/honesty.md` 七类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 current marker Test delta 或可追溯 intent source，stale-baseline 例外见同文件 | retry action |
 | Evidence form | review 亲自 | PR body（publish 从 VerificationPacket 组装的 packet）/ 最新 run 的 delta comment | `quality/evidence.md`：claim 映射到 VerificationPacket 的 observation、**真实路径 E2E 证据**（按 marker Canonical runtime 的 target-mandated real driver；仓库脚本只要驱动真实消费路径即可）、**runtime manifest** 在场且可凭其重跑（auth 只写解析位置，secret 值入包即硬拒）；artifact 解析与 packet 真值归 VerificationAuditReport，review 不重开 artifact；unblock-deliverable 路由额外要求 blocked-path 复测 | retry / blocked action |
+| Cross-round regression | review 亲自 | 三个 feedback 数组的**全量历史**（每个 reviewVerdictUrls / diffAuditReportUrls / verificationAuditReportUrls entry）+ 本轮 iteration delta comment 的 cross-round finding ledger | review 自建历史 findings ledger（排除本轮最新报告的发现）；行数必须与 submit ledger 相等；每行 status 为 addressed / regressed-and-refixed / deferred #issue 且证据指针抽查通过；deferred 引用的 issue 必须 live 存在且真覆盖该发现；prior-round 标 addressed 的修复在当前 head 抽查仍在——回退即 regression 硬拒；历史发现不在 submit ledger 中即 silent drop 硬拒；round 1 无历史时明示空表通过而非静默跳过 | retry action |
 | Spike follow-up（comment-spike-deliverable） | review 亲自（`review/spike-followup.md`） | iter comment + issue `## 结果分支` | 选恰好一条分支 + 提议数 ≥ 分支动词词表要求 | retry action |
 | Source-spike audit（source-writing-spike-deliverable） | review 亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Completeness | review 亲自 | 上面验收点综合 + child closure table | 决定 verdict action（accept-pr / accept-no-pr / retry / expand-parent / moot / blocked / stop）；accepted/moot 发布 durable ReviewVerdict 后 clean exit，merge/close 由 closure phase 复读 live state 后执行 | 选 action 文件 |
@@ -148,12 +149,13 @@ A defect in the current executable packet—broken Check, wrong Pattern scope, s
 
 | 规则 | 本 preset 的权威位置 |
 |---|---|
-| 标题单主语、中文、禁用多 topic 连接 | §1.1 / §1.6 / §7.2 |
-| issue 必备段 | §1.2 |
-| `## 验收标准` 表形态 | §1.3 |
-| 继承验证义务 | §1.4 |
+| 标题单主语、中文、禁用多 topic 连接 | §1.1 / §7.2 |
+| issue 段结构（撰写侧推荐段 + enrichment 读取口径） | §7.2 / §1.2 |
+| `## 验收标准` 表形态（可执行 checks 表） | §1.3 / §7.2 |
+| 继承验证义务（legacy 表作为 enrichment 输入） | §1.3 |
 | Spike `## 结果分支` | §1.5 |
-| 标题与 body 形态匹配 | §1.6 |
+| 标题与 body 禁止形态 | §7.2 |
+| 标题/body 与 marker 的权威分工 | §1.6 |
 | 原子性、citation、parent/child、retroactive umbrella、re-parenting | §7.2 |
 | PR body、证据、retry 位置 | §2 |
 | 禁止 subagent、audit 独立 phase 化 | §3 |

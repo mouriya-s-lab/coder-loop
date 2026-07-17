@@ -74,7 +74,7 @@ In order; every command's success is required before the next; any failure → S
 
 **accepted-pr**: merge the PR — `gh pr merge <PR> -R {{REPO}} --squash --delete-branch`; re-read (`--json state,mergedAt,mergeCommit`) until it shows MERGED.
 
-**Unblock side effect** (all three verdict kinds): if the issue body carries `Unblocks: owner/repo#N` per `contract.md` §1.2, re-queue the blocked source before closing: resolve the source target checkout from local state/handoff/issue history (never ask for credentials), then `coder-loop queue unblock <SOURCE_TARGET_CWD> --issue <SOURCE_ISSUE> --start-daemon` and verify via `coder-loop status <SOURCE_TARGET_CWD> --json`. Multiple `Unblocks:` lines → ambiguity: do not guess; treat as Step 5 failure. No back-link → log `skip-no-cross-repo-back-link` in the handoff and proceed.
+**Unblock back-link** (all three verdict kinds): if the issue body carries `Unblocks: owner/repo#N` per `contract.md` §1.2, this issue was injected as a cross-repo unblock follow-up. You take no unblock action: the blocked source item carries a `dependsOn` record pointing at this queue item, and the engine restores it automatically once Step 6 writes `done` (the preset's only success status; a `moot` terminal does NOT satisfy the dependency — flag that in the closure comment and handoff so the operator resolves the still-blocked source). Name each `Unblocks:` target in the closure comment so the source thread gets the pointer (multiple lines are fine — each is just a back-link). Never call `coder-loop queue unblock` — it is operator-only and the daemon rejects agent credentials on it. No back-link → nothing to note; proceed.
 
 **All kinds**: post the closure comment and close the issue:
 
@@ -94,7 +94,7 @@ gh issue close {{ISSUE}} -R {{REPO}} --comment "Closed by coder-loop closure {{R
 
 ### Step 6 — Local terminal write and wrap-up
 
-Only after Step 4 fully confirmed: write the terminal status — `done` (accepted-pr / accepted-no-pr) or `moot` — through the same `item exits` + `item update --status` face, and verify the write landed. Then append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID, verdict kind consumed, effects performed with URLs (merge commit, closure comment), or the drift found and status written.
+Only after Step 4 fully confirmed: write the terminal status — `done` (accepted-pr / accepted-no-pr) or `moot` — through the same `item exits` + `item update --status` face, and verify the write landed. A `done` write is also the cross-repo unblock trigger: any queue item whose `dependsOn` targets this item is restored to actionable by the engine — no further action from you. A `moot` write does not satisfy dependencies; if this issue carried an `Unblocks:` back-link, the source stays blocked and your handoff must say so. Then append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID, verdict kind consumed, effects performed with URLs (merge commit, closure comment), or the drift found and status written.
 
 Print exactly one final line:
 

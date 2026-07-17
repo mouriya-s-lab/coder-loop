@@ -8,13 +8,14 @@ This fragment defines the boundary between the deterministic program state machi
 
 The orchestrator may decide only facts that are fully programmable:
 
-- which state/config files exist and are readable;
-- whether `state.current` exists;
-- which declared phase owns `state.current` (any of the preset's declared phases, from `contract-enrichment` through `closure`);
+- which state/config surfaces exist and are readable;
+- whether a queue item is currently selected (`queue.selected` in `coder-loop status --json`);
+- which declared phase owns the selected item (any of the preset's declared phases, from `contract-enrichment` through `closure`);
 - whether a queue item status is actionable (membership in the preset's `[statuses].continuable` set);
 - which issue/run/prompt path to bind into an agent invocation;
 - whether an agent process exited with code `0`;
-- whether central daemon scheduling state still exists.
+- whether a chain is active, stopped, or complete (all items terminal);
+- whether every queue item a terminal item's `dependsOn` record targets has reached a success terminal status (the automatic dependency restore).
 
 The program must not judge semantic completion, evidence quality, issue validity, PR correctness, parent closure, or blocker legitimacy.
 

@@ -532,7 +532,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(entry).toContain("Exit successfully without writing an item status")
 		expect(schema).toContain("<!-- coder-loop:executable-contract schema=1 source-issue={{ISSUE}} -->")
 		expect(schema).toContain("`Kind` is exactly `shell` or `browser`")
-		expect(schema).toContain("typed scope `changed` or `whole-tree`")
+		// Pattern scope must be the table form diff-audit consumes (a bullet-form
+		// marker reproduces the contract-invalid round observed in real-e2e 2/2).
+		expect(schema).toContain("a table with columns `Pattern | Scope | Criterion`")
+		expect(schema).toContain("`Scope` is exactly `changed` or `whole-tree`")
+		expect(schema).toContain("| none | - | - |")
 		expect(schema).toContain("`Supersedes`: prior marker URL or `none`")
 		expect(authority).toContain("Exactly one marker may be current")
 		expect(authority).toContain("only by linking it in `Supersedes`")
@@ -664,10 +668,17 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// not by any `kind:*` label — the responder must not declare the retired label.
 		expect(/kind/i.test(prompt)).toBe(false)
 		expect(prompt).toContain("Unblocks: {{REPO}}#{{ISSUE}}")
-		expect(prompt).toContain("central state DB")
-		expect(prompt).toContain("coder-loop daemon up --detach --loop-data-root <targetLoopDataRoot>")
-		expect(prompt).toContain("Do not change the current repository's blocked item")
-		expect(prompt).toContain("ITERATION SUMMARY: blocked_responder=")
+		// The responder mutates queue state only through the daemon-serialized CLI:
+		// item add into the blocker chain, then a dependsOn declaration on its own
+		// item; the engine's dependency auto-restore replaces manual unblock and
+		// there is no daemon to start (the central daemon spawned this run).
+		expect(prompt).toContain("central SQLite state DB")
+		expect(prompt).toContain("coder-loop item add <blockerChain>")
+		expect(prompt).toContain('{"dependsOn":[<full id array>]}')
+		expect(prompt).not.toContain("coder-loop daemon up")
+		expect(prompt).not.toContain("coder-loop queue unblock <")
+		expect(prompt).toContain("Do NOT change the current blocked item's `status` or `phase`")
+		expect(prompt).toContain("RESPONDER SUMMARY: blocked_responder=")
 	})
 
 	test("umbrella finalizer prompt carries the required chain-complete assessment contract", async () => {

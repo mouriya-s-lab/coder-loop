@@ -512,7 +512,9 @@ roles  = ["common", "quality", "review"]
   phase  = "contract-enrichment"
   status = "contract_invalid"
 
-  # #407 / #409 / #410 per-phase rights segment. Review is the only phase that legitimately:
+  # #407 / #409 / #410 per-phase rights segment. Review is the only NORMAL phase with grants
+  # beyond the branch/pr mirror (the blocked-responder / umbrella-finalizer trigger phases
+  # carry their own narrow grants — see their segments below). Review legitimately:
   #   - creates queue items (expanded-incomplete-parent flow inserts child items before flipping
   #     the parent back to changes_requested — see review/actions/state-write.md);
   #   - holds a privileged-op grant: after inserting expanded children, review reorders them to
@@ -525,9 +527,11 @@ roles  = ["common", "quality", "review"]
   # `changes_requested` identity sync moved to iteration/publish).
   #
   # #410 control-plane fields (`runner` / `repoCwd` / `dependsOn` / `priority`) cannot be granted
-  # on any phase — the preset parser rejects them in `writableFields` with the engine's
+  # via `writableFields` on any phase — the preset parser rejects them with the engine's
   # control-plane vocabulary in the error. Default-deny + no preset surface (mirrors #409
-  # acceptance #1 for the privileged-op axis).
+  # acceptance #1 for the privileged-op axis). The one typed escape is the `item.dependsOn`
+  # privileged op (blocked-responder's segment below), which admits top-level `dependsOn`
+  # writes on the credential's own item through graph validation — never via writableFields.
   [phases.rights]
   createItems    = true
   privilegedOps  = ["item.reorder"]
@@ -699,6 +703,19 @@ runner  = "codex"
 model   = "gpt-5.6-sol"
 roles   = ["common"]
 
+  # Rights for the cross-repo unblock wiring (see blocked-responder-entry.md):
+  #   - createItems: injects the follow-up issue as a queue item into the BLOCKING repo's
+  #     chain (`coder-loop item add` — the #407 gate checks the caller phase's grant in the
+  #     new item's preset, so the cross-chain injection is admitted).
+  #   - item.dependsOn privileged op: declares `dependsOn` (blocker item row id) on its OWN
+  #     blocked item — the record the scheduler's cross-chain auto-unblock
+  #     (`unblockDependencySatisfiedItems`) consumes when the blocker reaches a success
+  #     terminal. `dependsOn` is otherwise control-plane (ungrantable via writableFields);
+  #     this is the one typed grant escape, scoped to the credential's own item.
+  [phases.rights]
+  createItems   = true
+  privilegedOps = ["item.dependsOn"]
+
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
   AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory" }
@@ -747,6 +764,13 @@ trigger = { on = "chain-complete" }
 runner  = "codex"
 model   = "gpt-5.6-sol"
 roles   = ["common"]
+
+  # createItems: when remaining umbrella scope is clear and executable, the finalizer creates
+  # follow-up issues and injects them into the current chain queue (`coder-loop item add` /
+  # `batch-add`) — the chain is still active while the chain-complete trigger runs, so the
+  # injection keeps it from completing with unrepresented scope.
+  [phases.rights]
+  createItems = true
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
