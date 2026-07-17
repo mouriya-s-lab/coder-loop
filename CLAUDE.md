@@ -8,7 +8,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 
 内置 preset：
 
-- `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，六个普通 phase（`contract-enrichment` → `iteration` → `verification` → `publish` → `review` → `closure`）加两个 trigger phase（`blocked-responder` / `umbrella-finalizer`）。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
+- `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，八个普通 phase（`contract-enrichment` → `iteration` → `verification` → `publish` → `diff-audit` → `verification-audit` → `review` → `closure`）加两个 trigger phase（`blocked-responder` / `umbrella-finalizer`）。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
 - `engine-integration` — 两 phase 的本地引擎集成验收 preset，`scripts/engine-integration.ts` 专用（确定性 stub runner，无 GitHub / LLM）。
 - `real-e2e-minimal` — 两 phase 的最小真实 GitHub loop，`scripts/real-e2e.ts` 默认走这个。
 - `single-phase-example` — 一 phase / 字符串 id / 双状态的最小示例。
@@ -86,7 +86,7 @@ model  = "claude-opus-4-7"
 ```
 
 - Phase runner 未声明时走 engine-builtin fallback（当前 `codex`）。
-- Item 上的 `--runner` 只覆盖非 trigger phase（`gh-issue-pr-iteration` 中是 `contract-enrichment` / `iteration` / `verification` / `publish` / `review` / `closure` 六个普通 phase；`blocked-responder` / `umbrella-finalizer` 是 trigger phase，不受 item override 影响）。
+- Item 上的 `--runner` 只覆盖非 trigger phase（`gh-issue-pr-iteration` 中是 `contract-enrichment` / `iteration` / `verification` / `publish` / `diff-audit` / `verification-audit` / `review` / `closure` 八个普通 phase；`blocked-responder` / `umbrella-finalizer` 是 trigger phase，不受 item override 影响）。
 - Runner binary 是 PATH 上的 `claude` / `codex` / `opencode`；模型来自 phase 的 `model`。
 - Chain 级 model 覆盖走 `coder-loop chain set-runner-model <chain> --kind <k> --model <m>`（patch `chain.metadata.<kind>.model`）。
 - `coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`queue.selected.phaseRunners.<phase>`、`current.runner`、`current.phaseStatus.value.runner/model` — 这是 runner/model 的唯一稳定读面。agent 每个 phase 的 `status.json` 位于 `<logDir>/<runId>/<phase>/status.json`，只作 fallback debug。

@@ -31,7 +31,7 @@ preset 声明八个普通 phase：`contract-enrichment` → `iteration` → `ver
 - **publish**（单 session）：revision join 后按 VerificationPacket 组装 ready deliverable（PR title / body / Closes / 四层 evidence），把 draft 翻 ready，同步 branch/pr 镜像字段。只发布已验证的 SHA。
 - **diff-audit**（单 session，纯读）= scope / 卫生 / 代码真值 / 测试完整性。锚定 issue intent 与 marker 明确化的设计、Pattern scope 和 Test delta；每条发现必须带可追溯锚点，不自行扩大范围。出 **DiffAuditReport** durable comment（fenced `coder-loop:diff-audit-report` json + markdown body），verdict ∈ {`clean` / `changes-requested` / `contract-invalid`}。不动 code / evidence / PR body。
 - **verification-audit**（单 session，纯读 + 有界抽查）= packet 链 / identity / 覆盖真值。解析 CandidateRef → VerificationPacket，三方 SHA identity binding，check 覆盖表核对 marker Checks 是否逐项执行且绑定同一 SHA，runtime 记录与 conclusion 一致性，有界 spot 复跑抽查个别 check——不复跑 canonical suite、完整 check 表或 E2E。出 **VerificationAuditReport** durable comment，verdict ∈ {`clean` / `verification-drift` / `changes-requested` / `contract-invalid`}。`verification-drift` 回 verification 让它对同一 candidate 重跑；其余走 iteration / enrichment 路径。
-- **review**（单 session）：读两份 durable 审计报告 + 亲自做 6 项 self-judgment（trace / PR protocol / title-intent / caveat / evidence form / checks-mergeability），落 verdict：accepted / moot 写 durable ReviewVerdict 后干净收尾进 closure；retry / reenrich / blocked 写 status；stop 走 exit-action。不再自己派 subagent 也不再自己 audit——PR-backed 路由缺任一份 audit 报告 verdict 一律无效。不 merge、不 close、不写 done/moot。
+- **review**（单 session）：读两份 durable 审计报告 + 亲自做 7 项 self-judgment（trace / PR protocol / title-intent / caveat / evidence form / checks-mergeability / cross-round regression；后两者消费 VerificationPacket 与 VerificationAuditReport 的记录，不重开 artifact、不重复 live 读取），落 verdict：accepted / moot 写 durable ReviewVerdict 后干净收尾进 closure；retry / reenrich / blocked 写 status；stop 走 exit-action。不再自己派 subagent 也不再自己 audit——PR-backed 路由缺任一份 audit 报告 verdict 一律无效。不 merge、不 close、不写 done/moot。
 - **closure**（单 session）：重读 live state 做 drift 检查（sameness 路由回产出该 artifact 的 phase），按序执行 merge / unblock / close effect，确认 live terminal state 后最后写 `done` / `moot`。终局状态只由它写。
 - **blocked-responder**：跨仓 unblock 副作用的最小化 responder。
 - **umbrella-finalizer**：chain-complete 时的 umbrella 收官。
@@ -51,7 +51,7 @@ review 一侧不再有"审阅任务清单"——它只按行为读两份 durable
 
 ## 前提四：review 的信任来自 phase 独立性，不来自派 subagent
 
-完整的独立执行（contract checks 逐项、canonical suite、真实 E2E）由 verification phase 在 fresh session 承担；两轮独立复核（diff-audit + verification-audit）也是各自的 fresh-session phase。review 不派 subagent、不再自己重跑 audit，它读两份 durable 报告 packet + 亲做诚实 / 协议 / caveat / evidence-form / checks-mergeability 判断。
+完整的独立执行（contract checks 逐项、canonical suite、真实 E2E）由 verification phase 在 fresh session 承担；两轮独立复核（diff-audit + verification-audit）也是各自的 fresh-session phase。review 不派 subagent、不再自己重跑 audit，它读两份 durable 报告 packet + 亲做诚实 / 协议 / caveat / evidence-form / checks-mergeability / cross-round regression 判断。
 
 这一层信任边界的关键是 **session 边界，不是主 session 内的 subagent 隔离**：
 

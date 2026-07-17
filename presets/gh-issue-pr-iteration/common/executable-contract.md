@@ -1,6 +1,6 @@
 # Executable contract authority
 
-Before dispatching or judging work, fetch every issue comment and locate comments whose first line is `<!-- coder-loop:executable-contract schema=1 source-issue=<current issue> -->`.
+Before implementing or judging work, fetch every issue comment and locate comments whose first line is `<!-- coder-loop:executable-contract schema=1 source-issue=<current issue> -->`.
 
 Exactly one marker may be current: a later marker may supersede an earlier one only by linking it in `Supersedes`. Reject a missing marker, two unsuperseded markers, an unknown schema/variant, a source revision older than a later operator correction, or any missing required section. Do not silently fall back to treating the issue body as an executable checklist.
 

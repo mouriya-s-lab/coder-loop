@@ -9,7 +9,7 @@ From the iteration's runtime bindings and your Step focus: `ISSUE`, `REPO`, `RUN
 **Claim gate.** No e2e claim without observing the end-to-end effect itself, fresh, this run: "started successfully" or a healthy port probe is startup evidence, not behavior evidence — every claim must point to the observed result (transcript, persisted state, screenshot) that backs it.
 
 1. **Identify the surface and collect the deferred rows.** Decide what the deliverable actually is: a program / CLI / daemon, a web app, or a library (then its real consuming surface — "it is a library" is not an exemption). When `Step focus` names deferred browser rows, read the current executable-contract marker and quote each named browser check's action, observation, and expected result — those rows are yours to satisfy through the real UI walk.
-2. **Start the environment.** First take your own worktree — the parallel verify step owns `AGENT_CWD`, and two agents installing/building in one checkout corrupt each other:
+2. **Start the environment.** First take your own worktree — the verify step already installed and built in `AGENT_CWD`, and the e2e run must drive a clean checkout of the exact committed SHA, not a working tree those runs may have dirtied:
 
    ```bash
    E2E_WT="$(mktemp -d)/e2e"
