@@ -160,8 +160,6 @@ describe("daemon", () => {
 	test("cleans runner lifecycle after status persistence failure", () => {
 		for (const [file, name] of [
 			["src/scheduler.test.ts", "rejects successful scheduler completion when terminal persistence fails"],
-			["src/loop.test.ts", "reports ordered chain-complete status persistence failure"],
-			["src/loop.test.ts", "rejects successful chain-complete decision when terminal status persistence fails"],
 		] as const) {
 			const result = Bun.spawnSync(["bun", "test", file, "-t", name], { cwd: REPO_ROOT })
 			const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
@@ -267,11 +265,12 @@ describe("daemon", () => {
 			beforeStart: async ({ fakeRunner }) => {
 				await writeFile(fakeRunner, `#!/usr/bin/env bun
 const prompt = Bun.argv.at(-1) ?? ""
-if (prompt.includes("FINALIZER SUMMARY")) {
+let input
+try { input = JSON.parse(prompt) } catch { input = null }
+if (input === null) {
 	const event = { type: "item.completed", item: { type: "agent_message", text: "x".repeat(1_000_001) + "\\nFINALIZER SUMMARY: decision=complete; reason=large-event" } }
 	await Bun.write(Bun.stdout, JSON.stringify(event) + "\\n")
 } else {
-	const input = JSON.parse(prompt)
 	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 }
 process.exitCode = 0

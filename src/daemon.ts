@@ -10,7 +10,6 @@ import {
 	loadPreset,
 	phaseChainActions,
 	phaseWritableStatuses,
-	runPresetChainCompleteTriggerPhases,
 	substitutePresetRootToken,
 	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
@@ -31,6 +30,7 @@ import {
 	listPendingCloseHandlers,
 	markRunPendingRecycle,
 	maxItemAttemptsFromChainMetadata,
+	runSchedulerChainCompleteTriggerPhases,
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerEvent,
@@ -3615,18 +3615,7 @@ export class CoderLoopDaemon {
 		if (scheduler.recycleKillGraceMs !== undefined) options.recycleKillGraceMs = scheduler.recycleKillGraceMs
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
-		else {
-			const explicitRunnerOverride = scheduler.runner !== undefined ? fallbackRunner : null
-			options.chainCompleteTriggerForChain = async (context) =>
-				await runPresetChainCompleteTriggerPhases({
-					...context,
-					loopDataRoot: this.paths.root,
-					terminalStatusNames: context.terminalStatusNames,
-					...(await presetForChain(context.chain)),
-					...(explicitRunnerOverride === null ? {} : { phaseRunner: () => explicitRunnerOverride }),
-					onStatusPersistenceFailure: (failure) => this.recordRunnerStatusPersistenceFailure(failure, context.chain.id),
-				})
-		}
+		else options.chainCompleteTriggerForChain = async (context) => await runSchedulerChainCompleteTriggerPhases(options, context)
 		return options
 	}
 

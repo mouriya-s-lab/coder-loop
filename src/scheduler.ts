@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
 import { AgentActivityRecorder } from "./agent-activity"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
@@ -13,6 +13,7 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	resolvePresetBusinessKeyValues,
+	runnerAgentTextFromJsonLine,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -282,6 +283,37 @@ export type SchedulerChainCompleteDecision =
 
 export type SchedulerChainCompleteTrigger = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision> | SchedulerChainCompleteDecision
 export type SchedulerChainCompleteTriggerForChain = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision | null> | SchedulerChainCompleteDecision | null
+
+export async function runSchedulerChainCompleteTriggerPhases(options: SchedulerOptions, context: SchedulerChainCompleteTriggerContext): Promise<SchedulerChainCompleteDecision | null> {
+	const anchor = context.items.find((item) => item.lastRunId === context.runId) ?? context.items[0]
+	if (anchor === undefined) throw new Error("chain-complete trigger requires at least one chain item")
+	const loadedPreset = await schedulerLoadedPresetForItem(options, context.chain, anchor)
+	const phases = loadedPreset.preset.phases.filter((phase) => phase.trigger !== null && "on" in phase.trigger && phase.trigger.on === "chain-complete")
+	if (phases.length === 0) return null
+	const slot = getOrCreateSlot(options.state, context.chain, anchor.repoCwd)
+	const original = { status: engineLifecycleAdmittedItemStatus(anchor.status, "scheduler.chain-complete-trigger-restore"), statusUpdatedAt: anchor.statusUpdatedAt, phase: anchor.phase, attempts: anchor.attempts, lastRunId: anchor.lastRunId, agentCwd: anchor.agentCwd, extra: anchor.extra, updatedAt: anchor.updatedAt }
+	const triggerPlan: SchedulerPhasePlan = { entryPhase: phases[0]!.name, startsAttemptPhases: new Set(), nonTriggerPhases: [], nextByPhase: new Map(), itemTriggerPhases: [] }
+	let finalDecision: SchedulerChainCompleteDecision = { decision: "complete" }
+	for (const phase of phases) {
+		const previous = options.store.listRuns(context.chain.id).filter((run) => run.itemId === anchor.id && run.phase === phase.name).sort((left, right) => right.startedAt - left.startedAt)[0]
+		const entryKind: SchedulerEntryKind = previous !== undefined && previous.exitCode !== 0 ? { kind: "recover-run", predecessorRunId: previous.runId } : { kind: "graph-entry" }
+		const active = await spawnSchedulerRun(options, context.chain, anchor, slot, phase.name, triggerPlan, entryKind)
+		if (active === null) throw new Error(`chain-complete trigger phase ${phase.name} failed to spawn`)
+		const closed = await active.closed
+		options.store.updateItem(anchor.id, original)
+		if (closed.exitCode !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${closed.exitCode}`)
+		const output = await readFile(resolveChainRuntimePaths(context.chain.name, options.loopDataRootOptions).runPhaseStdoutFile(closed.runId, phase.name), "utf-8")
+		const runner = await resolvePhaseRunner(options, { chain: context.chain, item: anchor, phase: phase.name })
+		const texts = output.split(/\r?\n/).map((line) => runnerAgentTextFromJsonLine(line, runner.kind).text).filter((text): text is string => text !== null)
+		const summary = (texts.length === 0 ? output : texts.join("\n")).match(/FINALIZER SUMMARY:\s*decision=(complete|keep-active)\s*;([^\r\n]*)/)
+		if (summary === null) throw new Error(`chain-complete trigger phase ${phase.name} did not print a valid FINALIZER SUMMARY`)
+		const reason = summary[2]?.match(/(?:^|;)\s*reason=([^;]*)/)?.[1]?.trim()
+		const decision: SchedulerChainCompleteDecision = reason === undefined || reason === "" ? { decision: summary[1] as "complete" | "keep-active" } : { decision: summary[1] as "complete" | "keep-active", reason }
+		if (decision.decision === "keep-active") return decision
+		finalDecision = decision
+	}
+	return finalDecision
+}
 
 export type SchedulerPhaseRunnerInput = {
 	chain: ChainRecord

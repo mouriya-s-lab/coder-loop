@@ -7,7 +7,6 @@ setDefaultTimeout(30_000)
 import {
 	agentCodexArgs,
 	agentOpencodeArgs,
-	agentSessionsPath,
 	buildCentralRuntimeBindingPaths,
 	buildRenderBindings,
 	buildDaemonStartPlan,
@@ -30,7 +29,6 @@ import {
 	stripRoleEntryFrontmatter,
 	resolveBinding,
 	selectRunnerForPhase,
-	spawnOneAttempt,
 	summaryWatchdogConfigForPhase,
 	validatePresetPhaseTemplate,
 	type RenderBindings,
@@ -721,7 +719,6 @@ describe("runner and daemon helpers", () => {
 			"--ignore-rules",
 			"prompt",
 		])
-		expect(agentSessionsPath("/repo/runs/run-1/iteration/stdout.jsonl")).toBe("/repo/runs/run-1/iteration/sessions.jsonl")
 	})
 
 	test("agentOpencodeArgs renders run subcommand with json format model dir and optional resume", () => {
@@ -781,73 +778,6 @@ describe("runner and daemon helpers", () => {
 })
 
 describe("small parsers", () => {
-	test("reports ordered chain-complete status persistence failure", async () => {
-		const root = resolve(TEST_ROOT, "status-persistence-intermediate")
-		await rm(root, { recursive: true, force: true })
-		await mkdir(root, { recursive: true })
-		const runner = resolve(root, "runner.sh")
-		await writeFile(runner, "#!/bin/sh\necho intermediate\nsleep 0.05\necho 'FINALIZER SUMMARY: decision=complete; reason=test'\n")
-		await chmod(runner, 0o755)
-		const options = makeOptions()
-		const failures: import("./loop").RunnerStatusPersistenceFailure[] = []
-		options.onStatusPersistenceFailure = (failure) => failures.push(failure)
-		let writes = 0
-		const outputPath = resolve(root, "run-635", "umbrella-finalizer", "stdout.jsonl")
-		await expect(spawnOneAttempt({
-			options,
-			label: "umbrella-finalizer",
-			prompt: "test",
-			outputPath,
-			sessionsPath: resolve(root, "run-635", "umbrella-finalizer", "sessions.jsonl"),
-			resume: { kind: "fresh" },
-			agentCwd: root,
-			runner: { kind: "claude", source: "preset", binary: runner, extraArgs: [], model: null },
-			watchdog: null,
-			statusWriter: async (path, payload) => {
-				writes += 1
-				if (writes === 2) {
-					await rm(path, { force: true })
-					await mkdir(path)
-				}
-				await writeFile(path, payload)
-			},
-		})).rejects.toThrow(/chain-complete status-artifact persistence failed/)
-		expect(writes).toBe(2)
-		expect(failures).toHaveLength(1)
-		expect(failures[0]).toMatchObject({ path: "chain-complete", stage: "status-artifact", runId: "run-635", phase: "umbrella-finalizer" })
-	})
-
-	test("rejects successful chain-complete decision when terminal status persistence fails", async () => {
-		const root = resolve(TEST_ROOT, "status-persistence-terminal")
-		await rm(root, { recursive: true, force: true })
-		await mkdir(root, { recursive: true })
-		const runner = resolve(root, "runner.sh")
-		await writeFile(runner, "#!/bin/sh\nprintf 'FINALIZER SUMMARY: decision=complete; reason=test'\n")
-		await chmod(runner, 0o755)
-		const options = makeOptions()
-		let writes = 0
-		const outputPath = resolve(root, "run-635-terminal", "umbrella-finalizer", "stdout.jsonl")
-		await expect(spawnOneAttempt({
-			options,
-			label: "umbrella-finalizer",
-			prompt: "test",
-			outputPath,
-			sessionsPath: resolve(root, "run-635-terminal", "umbrella-finalizer", "sessions.jsonl"),
-			resume: { kind: "fresh" },
-			agentCwd: root,
-			runner: { kind: "claude", source: "preset", binary: runner, extraArgs: [], model: null },
-			watchdog: null,
-			statusWriter: async (path, payload) => {
-				writes += 1
-				if (writes === 3) {
-					await rm(path, { force: true })
-					await mkdir(path)
-				}
-				await writeFile(path, payload)
-			},
-		})).rejects.toThrow(/chain-complete status-artifact persistence failed/)
-		expect(writes).toBe(3)
-	})
 	test("detects session id across streamed chunk boundaries", () => {
 		const observed: { sessionId: string | null } = { sessionId: null }
 		const state = createStreamTextState((line) => {

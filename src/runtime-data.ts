@@ -36,6 +36,7 @@ export type EngineLifecycleAdmissionReason =
 	| "scheduler.run-status-forwarded"
 	| "scheduler.dependency-unblock-restore"
 	| "scheduler.recovery-entry-restore"
+	| "scheduler.chain-complete-trigger-restore"
 	| "queue.unblock-entry-restore"
 	| "item.created-default-from-preset"
 	| "test"
