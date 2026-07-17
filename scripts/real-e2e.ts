@@ -23,12 +23,12 @@ import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, rm
 import { resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { operatorSubprocessEnvironment } from "./real-e2e-environment"
+import { completionVerdict } from "./real-e2e-watch"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const SEED_LABEL = "e2e-seed"
 const FIXTURE_INITIAL_CONTENT = "status: pending\n"
-const TERMINAL_SUCCESS = "done"
 const TERMINAL_FAILURE = ["blocked", "moot", "exhausted"] as const
 
 type HarnessOptions = {
@@ -398,6 +398,18 @@ function readStatus(fixture: FixtureRun, loopDataRoot: string, chainName: string
 	}
 }
 
+function readChainStatus(loopDataRoot: string, chainName: string): string | null {
+	const result = sh(["bun", LOOP_ENTRY, "chain", "status", chainName,
+		"--json", "--loop-data-root", loopDataRoot], { allowFail: true })
+	if (result.exitCode !== 0) return null
+	try {
+		const payload = JSON.parse(result.stdout) as { chain?: { status?: unknown } }
+		return typeof payload.chain?.status === "string" ? payload.chain.status : null
+	} catch {
+		return null
+	}
+}
+
 function countRuns(loopDataRoot: string): number {
 	const dbPath = resolve(loopDataRoot, "db.sqlite")
 	if (!existsSync(dbPath)) return 0
@@ -432,20 +444,19 @@ async function watch(
 			return { kind: "tripwire", reason: `runs 数 ${runs} 超过上界 ${options.maxRuns}（#309 式 spin 信号）` }
 		}
 		const snapshot = readStatus(fixture, loopDataRoot, chainName)
+		const chainStatus = readChainStatus(loopDataRoot, chainName)
 		const byStatus = snapshot.queue?.byStatus ?? {}
 		const attempts = snapshot.queue?.selected?.attempts ?? null
 		if (attempts !== null && attempts > options.maxAttempts) {
 			return { kind: "tripwire", reason: `attempts ${attempts} 超过上界 ${options.maxAttempts}` }
 		}
-		const summary = `byStatus=${JSON.stringify(byStatus)} attempts=${attempts ?? "-"} runs=${runs}`
+		const summary = `chainStatus=${chainStatus ?? "-"} byStatus=${JSON.stringify(byStatus)} attempts=${attempts ?? "-"} runs=${runs}`
 		if (summary !== lastSummary) {
 			log(`watch: ${summary} elapsed=${elapsedSeconds}s`)
 			lastSummary = summary
 		}
-		if ((byStatus[TERMINAL_SUCCESS] ?? 0) >= 1) return { kind: "success" }
-		for (const status of TERMINAL_FAILURE) {
-			if ((byStatus[status] ?? 0) >= 1) return { kind: "terminal-failure", status }
-		}
+		const completion = completionVerdict(chainStatus, byStatus, TERMINAL_FAILURE)
+		if (completion !== null) return completion
 		await Bun.sleep(options.pollSeconds * 1000)
 	}
 }
@@ -546,6 +557,7 @@ async function runScenario(
 	startedAt: number,
 ): Promise<ScenarioResult> {
 	await waitForDaemonSocket(daemon, 15)
+	const issueNumber = createSeedIssue(fixture)
 
 	// #436: install/uninstall subcommands retired. The five-layer bootstrap reduced to a single
 	// `chain create` on the central daemon socket. Target directory needs no bootstrap files —
@@ -553,16 +565,19 @@ async function runScenario(
 	// GitHub label assets on first issue creation.
 	log(`chain create: ${chainName} → ${fixture.repository}@${fixture.baseBranch} (preset=${options.preset})`)
 	const chainCreate = sh(["bun", LOOP_ENTRY, "chain", "create", chainName,
-		"--config-json", JSON.stringify({ repository: fixture.repository, baseBranch: fixture.baseBranch }),
+		"--config-json", JSON.stringify({
+			repository: fixture.repository,
+			baseBranch: fixture.baseBranch,
+			umbrellaRepo: fixture.repository,
+			umbrellaIssue: issueNumber,
+		}),
 		"--preset", options.preset,
 		"--force",
 		"--loop-data-root", daemon.loopDataRoot], { allowFail: true })
 	if (chainCreate.exitCode !== 0) {
 		dumpDiagnosis(fixture, daemon, chainName, `chain create 失败:\n${chainCreate.stdout}\n${chainCreate.stderr}`)
-		return { kind: "failure" }
+		return { kind: "failure", issueNumber }
 	}
-
-	const issueNumber = createSeedIssue(fixture)
 
 	log(`item: 入队 issue #${issueNumber} → chain ${chainName} (preset=${options.preset})`)
 	// #412: preset is required per-item; pass the same bundled preset the harness installed with so the
