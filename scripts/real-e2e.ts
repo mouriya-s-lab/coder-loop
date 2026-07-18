@@ -11,24 +11,86 @@
  * （#90 约束）。隔离靠 --loop-data-root，绝不触碰 ~/.coder-loop 生产 daemon。
  *
  * 用法：
- *   bun scripts/real-e2e.ts [--fixture-cwd <path>] [--fixture-repo <owner/repo>]
+ *   bun scripts/real-e2e.ts --log-file <path> [--foreground]
+ *     [--fixture-cwd <path>] [--fixture-repo <owner/repo>] [--preset <name>]
  *     [--max-wall-seconds N] [--max-attempts N] [--max-runs N] [--poll-seconds N]
  *
- * 退出码：0 = 全流程成功且断言通过；1 = 终态失败 / tripwire 触发 / 断言失败。
+ * 默认 detached 后台执行；--foreground 阻塞到结束。退出码：0 = 全流程成功且断言通过；
+ * 1 = 终态失败 / tripwire 触发 / 断言失败；2 = 缺少启动器必填参数。
  */
 
 import { Database } from "bun:sqlite"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs"
+import { dirname, relative, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { operatorSubprocessEnvironment } from "./real-e2e-environment"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+const REAL_E2E_ENTRY = resolve(import.meta.dir, "real-e2e.ts")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const SEED_LABEL = "e2e-seed"
 const TERMINAL_SUCCESS = "done"
 const TERMINAL_FAILURE = ["blocked", "moot", "exhausted"] as const
+const BACKGROUND_CHILD_ENV = "CODER_LOOP_REAL_E2E_BACKGROUND_CHILD"
+const LOG_PREPARED_ENV = "CODER_LOOP_REAL_E2E_LOG_PREPARED"
+const USAGE = "Usage: bun scripts/real-e2e.ts --log-file <path> [--foreground] [--fixture-cwd <path>] [--fixture-repo <owner/repo>] [--preset <name>] [--max-wall-seconds N] [--max-attempts N] [--max-runs N] [--poll-seconds N] [--keep-stale-worktrees]"
+
+type LauncherOptions = {
+	foreground: boolean
+	logFile: string
+	harnessArgv: string[]
+}
+
+type LauncherParseResult =
+	| { kind: "ok"; options: LauncherOptions }
+	| { kind: "error"; message: string }
+
+let activeLogFd: number | null = null
+let activeLogFile: string | null = null
+
+function parseLauncherArgs(argv: readonly string[]): LauncherParseResult {
+	let foreground = false
+	let logFile: string | null = null
+	const harnessArgv: string[] = []
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i]!
+		if (arg === "--foreground") {
+			foreground = true
+			continue
+		}
+		if (arg === "--log-file") {
+			if (logFile !== null) return { kind: "error", message: "--log-file 只能指定一次" }
+			const value = argv[i + 1]
+			if (value === undefined) return { kind: "error", message: "--log-file 缺少路径" }
+			logFile = resolve(process.cwd(), value)
+			i += 1
+			continue
+		}
+		harnessArgv.push(arg)
+	}
+	if (logFile === null) return { kind: "error", message: "缺少必填参数 --log-file <path>，未执行 real e2e" }
+	return { kind: "ok", options: { foreground, logFile, harnessArgv } }
+}
+
+function prepareLogFile(logFile: string): void {
+	mkdirSync(dirname(logFile), { recursive: true })
+	writeFileSync(logFile, "")
+}
+
+function requireLogFd(): number {
+	if (activeLogFd === null) throw new Error("real-e2e log fd 尚未初始化")
+	return activeLogFd
+}
+
+function requireLogFile(): string {
+	if (activeLogFile === null) throw new Error("real-e2e log path 尚未初始化")
+	return activeLogFile
+}
+
+function writeLog(message: string): void {
+	writeSync(requireLogFd(), message)
+}
 
 type HarnessOptions = {
 	fixtureCwd: string
@@ -121,7 +183,7 @@ function fail(message: string): never {
 
 function log(message: string): void {
 	const stamp = new Date().toISOString().slice(11, 19)
-	process.stdout.write(`[${stamp}] ${message}\n`)
+	writeLog(`[${stamp}] ${message}\n`)
 }
 
 type ShResult = { stdout: string; stderr: string; exitCode: number }
@@ -134,6 +196,8 @@ function sh(cmd: readonly string[], opts?: { cwd?: string; allowFail?: boolean }
 		env: operatorSubprocessEnvironment(process.env),
 	})
 	const result = { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? 1 }
+	if (result.stdout !== "") writeLog(result.stdout)
+	if (result.stderr !== "") writeLog(result.stderr)
 	if (result.exitCode !== 0 && opts?.allowFail !== true) {
 		fail(`命令失败 (exit ${result.exitCode}): ${cmd.join(" ")}\n${result.stderr}`)
 	}
@@ -289,21 +353,17 @@ exec bun ${LOOP_ENTRY} "$@"
 function startDaemon(workDir: string): DaemonHandle {
 	const loopDataRoot = resolve(workDir, "loop-data")
 	mkdirSync(loopDataRoot, { recursive: true })
-	const stdoutPath = resolve(workDir, "daemon.stdout.log")
-	const stderrPath = resolve(workDir, "daemon.stderr.log")
+	const stdoutPath = requireLogFile()
+	const stderrPath = requireLogFile()
 	const shimDir = writeCoderLoopCliShim(workDir)
 	const shimmedPath = `${shimDir}:${process.env.PATH ?? ""}`
 	log(`daemon: 隔离 loop-data-root 起中央 daemon: ${loopDataRoot}`)
 	log(`daemon: PATH 前置 coder-loop CLI shim: ${shimDir} → ${LOOP_ENTRY}`)
-	const stdoutFd = openSync(stdoutPath, "a")
-	const stderrFd = openSync(stderrPath, "a")
 	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], {
 		cwd: REPO_ROOT,
-		stdio: ["ignore", stdoutFd, stderrFd],
+		stdio: ["ignore", requireLogFd(), requireLogFd()],
 		env: { ...operatorSubprocessEnvironment(process.env), PATH: shimmedPath },
 	})
-	closeSync(stdoutFd)
-	closeSync(stderrFd)
 	return { child, loopDataRoot, stdoutPath, stderrPath, shimDir }
 }
 
@@ -499,20 +559,20 @@ function assertGitHubOutcome(fixture: FixtureRun, issueNumber: number, durationS
 // ----------------------------------------------------------------- diagnose
 
 function dumpDiagnosis(fixture: FixtureRun, daemon: DaemonHandle, chainName: string, reason: string): void {
-	process.stderr.write(`\nreal-e2e: 失败/止血: ${reason}\n`)
-	process.stderr.write(`诊断材料:\n`)
-	process.stderr.write(`  loop-data root: ${daemon.loopDataRoot}\n`)
-	process.stderr.write(`  daemon stdout : ${daemon.stdoutPath}\n`)
-	process.stderr.write(`  daemon stderr : ${daemon.stderrPath}\n`)
+	writeLog(`\nreal-e2e: 失败/止血: ${reason}\n`)
+	writeLog("诊断材料:\n")
+	writeLog(`  loop-data root: ${daemon.loopDataRoot}\n`)
+	writeLog(`  daemon stdout : ${daemon.stdoutPath}\n`)
+	writeLog(`  daemon stderr : ${daemon.stderrPath}\n`)
 	const snapshot = sh(["bun", LOOP_ENTRY, "status", fixture.cwd,
 		"--json", "--loop-data-root", daemon.loopDataRoot, "--chain", chainName], { allowFail: true })
-	process.stderr.write(`  status --json :\n${snapshot.stdout}\n`)
+	writeLog(`  status --json :\n${snapshot.stdout}\n`)
 }
 
 // -------------------------------------------------------------------- main
 
-async function main(): Promise<number> {
-	const options = parseArgs(process.argv.slice(2))
+async function main(argv: readonly string[]): Promise<number> {
+	const options = parseArgs(argv)
 	const startedAt = Date.now()
 	const runKey = randomUUID()
 	preflight(options)
@@ -529,10 +589,36 @@ async function main(): Promise<number> {
 		exitCode = result.kind === "success" ? 0 : 1
 	} finally {
 		await stopDaemon(daemon)
+		appendRunnerOutputs(daemon.loopDataRoot)
 		if (exitCode !== 0 && issueNumber !== undefined) cleanupOwnedGitHubResources(fixture, issueNumber)
 		await deleteRunFixture(fixture)
 	}
 	return exitCode
+}
+
+function appendRunnerOutputs(loopDataRoot: string): void {
+	const outputFiles: string[] = []
+	const visit = (directory: string): void => {
+		if (!existsSync(directory)) return
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const path = resolve(directory, entry.name)
+			if (entry.isDirectory()) {
+				visit(path)
+				continue
+			}
+			if (entry.isFile() && (entry.name === "stdout.jsonl" || entry.name === "stderr.txt")) {
+				outputFiles.push(path)
+			}
+		}
+	}
+	visit(loopDataRoot)
+	for (const path of outputFiles.sort()) {
+		const output = readFileSync(path, "utf-8")
+		if (output === "") continue
+		writeLog(`\n===== runner output: ${relative(loopDataRoot, path)} =====\n`)
+		writeLog(output)
+		if (!output.endsWith("\n")) writeLog("\n")
+	}
 }
 
 async function runScenario(
@@ -618,10 +704,68 @@ async function deleteRunFixture(fixture: FixtureRun): Promise<void> {
 	})
 }
 
-try {
-	process.exit(await main())
-} catch (error) {
-	const message = error instanceof Error ? error.message : String(error)
-	process.stderr.write(`real-e2e: ${message}\n`)
-	process.exit(1)
+function launchBackground(options: LauncherOptions, argv: readonly string[]): number {
+	prepareLogFile(options.logFile)
+	const logFd = openSync(options.logFile, "a")
+	try {
+		const child = spawn(process.execPath, [REAL_E2E_ENTRY, ...argv, "--foreground"], {
+			cwd: process.cwd(),
+			detached: true,
+			stdio: ["ignore", logFd, logFd],
+			env: {
+				...process.env,
+				[BACKGROUND_CHILD_ENV]: "1",
+				[LOG_PREPARED_ENV]: "1",
+			},
+		})
+		if (child.pid === undefined) throw new Error("后台 real-e2e 进程未返回 pid")
+		child.unref()
+		process.stdout.write(`pid=${child.pid} log=${options.logFile}\n`)
+		return 0
+	} finally {
+		closeSync(logFd)
+	}
 }
+
+async function runForeground(options: LauncherOptions): Promise<number> {
+	const backgroundChild = process.env[BACKGROUND_CHILD_ENV] === "1"
+	const logPrepared = process.env[LOG_PREPARED_ENV] === "1"
+	delete process.env[BACKGROUND_CHILD_ENV]
+	delete process.env[LOG_PREPARED_ENV]
+	if (!logPrepared) prepareLogFile(options.logFile)
+	activeLogFd = openSync(options.logFile, "a")
+	activeLogFile = options.logFile
+	let exitCode = 1
+	try {
+		exitCode = await main(options.harnessArgv)
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error)
+		writeLog(`real-e2e: ${message}\n`)
+	} finally {
+		writeLog(`FINAL exit=${exitCode}\n`)
+		closeSync(activeLogFd)
+		activeLogFd = null
+		activeLogFile = null
+	}
+	if (!backgroundChild) process.stdout.write(`real-e2e exit=${exitCode} log=${options.logFile}\n`)
+	return exitCode
+}
+
+async function entry(argv: readonly string[]): Promise<number> {
+	const parsed = parseLauncherArgs(argv)
+	if (parsed.kind === "error") {
+		process.stderr.write(`real-e2e: ${parsed.message}. ${USAGE}\n`)
+		return 2
+	}
+	try {
+		return parsed.options.foreground
+			? await runForeground(parsed.options)
+			: launchBackground(parsed.options, argv)
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error)
+		process.stderr.write(`real-e2e launcher: ${message}\n`)
+		return 1
+	}
+}
+
+process.exitCode = await entry(process.argv.slice(2))
