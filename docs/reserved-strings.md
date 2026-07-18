@@ -34,5 +34,5 @@ it, and no such literal is a reserved string.
   marker/sentinel or preset-declared marker that may appear in agent stdout.
 - Update `presets/gh-issue-pr-iteration/contract.md` when preset issue-writing
   rules change.
-- Run `bun test src/loop.test.ts` after changing this file or the marker
+- Run `bun test tests/unit/loop/runtime-bindings.test.ts` after changing this file or the marker
   declaration mechanism.

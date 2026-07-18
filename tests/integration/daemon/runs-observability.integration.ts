@@ -1048,7 +1048,7 @@ process.exitCode = 0
 			expect(fatal.payload.fatalKind).toBe("unhandledRejection")
 			// the durable record must carry the stack, not the message
 			expect(String(fatal.payload.error)).toContain("Error: BOOM-observability")
-			expect(String(fatal.payload.error)).toContain("daemon.integration")
+			expect(String(fatal.payload.error)).toContain("runs-observability.integration")
 		} finally {
 			await fixture.daemon.stop()
 		}
