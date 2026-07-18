@@ -145,6 +145,16 @@ describe("central chain/item CLI", () => {
 			const status = expectJsonOk(statusResult)
 			expect(status.chain).toMatchObject({ name: "crud-chain", status: "active" })
 			expect(status.summary).toMatchObject({ completion: { state: "active", completedAt: null }, items: { total: 0, byStatus: {} } })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("chain stop/resume CLI", async () => {
+		const fixture = await startFixture("chain-stop-resume")
+		try {
+			const created = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(created.chain).toMatchObject({ name: "crud-chain", status: "active" })
 
 			const stopped = expectJsonOk(await runCli(["chain", "stop", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(stopped.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
