@@ -538,8 +538,19 @@ attemptTimeoutSeconds = 3600
 	test("batch item add matches daemon", async () => {
 		const fixture = await startFixture("batch-item-add-matches-daemon")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "batch-cli-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["chain", "create", "batch-daemon-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const socketPath = fixture.daemon.snapshot().socketPath
+			const cliChain = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+				name: "batch-cli-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				preset: "gh-issue-pr-iteration",
+			}))
+			if (!cliChain.ok) throw new Error(`chain.create setup failed: ${cliChain.error.code}: ${cliChain.error.message}`)
+			const daemonChain = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+				name: "batch-daemon-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				preset: "gh-issue-pr-iteration",
+			}))
+			if (!daemonChain.ok) throw new Error(`chain.create setup failed: ${daemonChain.error.code}: ${daemonChain.error.message}`)
 			// #412: per-item preset required.
 			const batch = [
 				// #419: wire input retires `issueNumber: int`; daemon accepts only `itemId: string`.
@@ -547,7 +558,11 @@ attemptTimeoutSeconds = 3600
 				{ itemId: "25902", repoCwd: REPO_ROOT, title: "same second", runner: "codex", preset: "gh-issue-pr-iteration" },
 			]
 			const cli = expectJsonOk(await runCli(["item", "batch-add", "batch-cli-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			const daemon = expectJsonOk(await runCli(["item", "batch-add", "batch-daemon-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const daemonResponse = await sendDaemonRequest(socketPath, daemonRequest("item.batchAdd", { chainName: "batch-daemon-chain", items: batch }))
+			if (!daemonResponse.ok) throw new Error(`item.batchAdd setup failed: ${daemonResponse.error.code}: ${daemonResponse.error.message}`)
+			const daemon = boundaryRecord(daemonResponse.result)
+			if (!Array.isArray(daemon.items)) throw new Error("item.batchAdd setup returned no items array")
+			const daemonItems = daemon.items.map(boundaryRecord)
 
 			const comparable = (items: BoundaryRecord[]) => items.map((item) => ({
 				itemId: item.itemId,
@@ -557,11 +572,14 @@ attemptTimeoutSeconds = 3600
 				priority: item.priority,
 				runner: item.runner,
 			}))
-			expect(comparable(cli.items)).toEqual(comparable(daemon.items))
+			expect(comparable(cli.items)).toEqual(comparable(daemonItems))
 
 			const cliListed = expectJsonOk(await runCli(["item", "list", "batch-cli-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			const daemonListed = expectJsonOk(await runCli(["item", "list", "batch-daemon-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(comparable(cliListed.items)).toEqual(comparable(daemonListed.items))
+			const daemonListedResponse = await sendDaemonRequest(socketPath, daemonRequest("item.list", { chainName: "batch-daemon-chain" }))
+			if (!daemonListedResponse.ok) throw new Error(`item.list setup failed: ${daemonListedResponse.error.code}: ${daemonListedResponse.error.message}`)
+			const daemonListed = boundaryRecord(daemonListedResponse.result)
+			if (!Array.isArray(daemonListed.items)) throw new Error("item.list setup returned no items array")
+			expect(comparable(cliListed.items)).toEqual(comparable(daemonListed.items.map(boundaryRecord)))
 		} finally {
 			await fixture.daemon.stop()
 		}
