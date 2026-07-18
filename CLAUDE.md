@@ -11,6 +11,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 - `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，八个普通 phase（`contract-enrichment` → `iteration` → `verification` → `publish` → `diff-audit` → `verification-audit` → `review` → `closure`）加两个 trigger phase（`blocked-responder` / `umbrella-finalizer`）。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
 - `engine-integration` — 两 phase 的本地引擎集成验收 preset，`scripts/engine-integration.ts` 专用（确定性 stub runner，无 GitHub / LLM）。
 - `real-e2e-minimal` — 两 phase 的最小真实 GitHub loop，`scripts/real-e2e.ts` 默认走这个。
+- `moat-experiment-loop` — 实验闭环 preset：contract enrichment 后按 prepare → deploy → experiment → export → restore → writeback 分工执行，由独立 review 裁决，并带 blocked responder / umbrella finalizer trigger。
 - `single-phase-example` — 一 phase / 字符串 id / 双状态的最小示例。
 - `business-key-example` — 演示 `[runtime].businessKeys` 声明位。
 

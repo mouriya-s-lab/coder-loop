@@ -215,7 +215,52 @@ async function prepareFixture(options: HarnessOptions, workDir: string, runKey: 
 
 // -------------------------------------------------------------------- seed
 
-function seedIssueBody(fixture: FixtureRun): string {
+function seedIssueBody(fixture: FixtureRun, preset: string): string {
+	if (preset === "moat-experiment-loop") {
+		return `## 目标
+
+用 coder-loop 自有隔离 fixture 验证 moat experiment preset 的完整八阶段路径：把本轮独占文件 \`${fixture.fixturePath}\` 从 \`status: pending\` 变为 \`status: complete\`。
+
+## 强制边界
+
+- 这是 coder-loop app 自有 synthetic experiment fixture，不是 moat 业务实验。
+- 只允许读写本 checkout、\`${fixture.fixturePath}\`、本 issue 和本 issue 的 run PR。
+- 禁止访问其他本地仓库、其他 GitHub repository、SSH、VM、IaC、外部设计仓或任何部署系统。
+- prepare/deploy/experiment/export/restore 是对本轮独占文件与 GitHub durable handoff 的真实操作；restore 的目标是确认没有本 run 自己之外的残留。
+
+## Serial experiment window authority
+
+- 本 harness 的 \`${FIXTURE_MUTATION_LOCK}\` 是该 fixture repo 的串行准备/清理 authority；创建本 issue 前已在锁内完成独占文件初始化。
+- 本轮运行窗口由 UUID 路径 \`${fixture.fixturePath}\` 隔离。prepare 只需确认该路径仅属于本 issue、当前 chain 只有这一个 item、且没有其他 open PR 修改同一路径，即视为已经取得窗口。
+- 不存在也不允许寻找仓库外的 lock、host、VM 或人工 session；上述三项检查就是本 synthetic fixture 的完整 serial-window preflight。
+
+## ExperimentPacket
+
+<!-- moat-experiment:current -->
+
+- **Hypothesis**: 八个普通 phase 能按声明顺序运行，并最终由 review 完成真实 PR merge 和 issue closure。
+- **Environment**: \`${fixture.repository}\` 的本轮独占 checkout；不使用任何外部 runtime。
+- **Prepare**: 读取文件并确认精确内容为 \`status: pending\`，不修改它。
+- **Deploy**: 在 run PR durable handoff 中记录候选变更计划，不访问外部系统。
+- **Experiment**: 把该文件改为 \`status: complete\`，运行验收命令并提交到 run branch。
+- **Export**: 将命令、exit status、git diff 与文件内容写入 run PR comment；不新增 repository evidence 文件。
+- **Restore**: 确认 worktree 只修改本轮 fixture、没有进程或外部资源残留，并写 \`phase = "export"\`、\`path = "happy"\` handoff。
+- **Writeback**: 让 run PR body/result 如实记录 passed/failed；本 synthetic fixture 的 owning design location 就是本 issue，不创建第二个 PR。
+- **Passed**: 八个普通 phase 均真实产生 run ledger，PR merged，issue closed，default branch 文件精确为 \`status: complete\`。
+- **Failed**: 任一 phase 未运行、发生范围外访问、PR 未 merge、issue 未关闭或文件内容不符。
+- **Inconclusive**: runner/GitHub 基础设施不可用且无法观察阶段行为。
+- **Cleanup obligation**: 只清理由 harness 创建的 issue、PR、branch 和独占 fixture；不得触碰其他资源。
+
+## 验收标准
+
+| # | Check | Command | Expect |
+|---|---|---|---|
+| 1 | 最终内容 | \`cat ${fixture.fixturePath}\` | \`status: complete\` |
+| 2 | diff 范围 | \`git diff --name-only ${fixture.baseBranch}...HEAD\` | 只含 \`${fixture.fixturePath}\` |
+| 3 | 外部边界 | 审计 run PR 与 trace | 无其他 repo、SSH、VM、IaC 或外部设计仓访问 |
+| 4 | lifecycle | 查询 coder-loop run ledger 与 GitHub live state | 八个普通 phase 均运行，PR merged，issue closed |
+`
+	}
 	return `## 目标
 
 把本轮独占文件 \`${fixture.fixturePath}\` 的内容从 \`status: pending\` 改为 \`status: complete\`。
@@ -249,12 +294,12 @@ function seedIssueBody(fixture: FixtureRun): string {
 `
 }
 
-function createSeedIssue(fixture: FixtureRun): number {
+function createSeedIssue(fixture: FixtureRun, preset: string): number {
 	log("seed: 创建 seed issue")
 	const result = sh(["gh", "issue", "create", "-R", fixture.repository,
 		"--title", `把本轮 fixture 标记为 complete (${fixture.runKey})`,
 		"--label", "kind:code", "--label", SEED_LABEL,
-		"--body", seedIssueBody(fixture)])
+		"--body", seedIssueBody(fixture, preset)])
 	const url = result.stdout.trim()
 	const match = url.match(/\/issues\/(\d+)\s*$/)
 	if (match === null) fail(`无法从 gh issue create 输出解析 issue 号: ${url}`)
@@ -447,6 +492,20 @@ function countRuns(loopDataRoot: string): number {
 	}
 }
 
+function assertMoatExperimentPhaseCoverage(loopDataRoot: string): void {
+	const expected = ["contract-enrichment", "prepare", "deploy", "experiment", "export", "restore", "writeback", "review"]
+	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
+	try {
+		const rows = db.query("SELECT DISTINCT phase FROM runs ORDER BY phase").all() as Array<{ phase: string }>
+		const observed = new Set(rows.map((row) => row.phase))
+		const missing = expected.filter((phase) => !observed.has(phase))
+		if (missing.length > 0) fail(`moat experiment E2E 缺少 phase run: ${missing.join(", ")}`)
+		log(`assert: moat experiment 八个普通 phase 均有真实 run ledger (${expected.join(" → ")})`)
+	} finally {
+		db.close()
+	}
+}
+
 async function watch(
 	options: HarnessOptions,
 	fixture: FixtureRun,
@@ -578,7 +637,7 @@ async function runScenario(
 	startedAt: number,
 ): Promise<ScenarioResult> {
 	await waitForDaemonSocket(daemon, 15)
-	const issueNumber = createSeedIssue(fixture)
+	const issueNumber = createSeedIssue(fixture, options.preset)
 
 	// #436: install/uninstall subcommands retired. The five-layer bootstrap reduced to a single
 	// `chain create` on the central daemon socket. Target directory needs no bootstrap files —
@@ -632,6 +691,7 @@ async function runScenario(
 
 	const durationSeconds = Math.floor((Date.now() - startedAt) / 1000)
 	const evidence = assertGitHubOutcome(fixture, issueNumber, durationSeconds)
+	if (options.preset === "moat-experiment-loop") assertMoatExperimentPhaseCoverage(daemon.loopDataRoot)
 	log("")
 	log("===== real-e2e evidence =====")
 	log(`seed issue : ${evidence.issueUrl} (CLOSED)`)

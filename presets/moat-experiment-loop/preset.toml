@@ -1,0 +1,677 @@
+# coder-loop preset: moat-experiment-loop
+name = "moat-experiment-loop"
+
+[item]
+idField = "issue"
+
+[item.fields]
+issue = "number"
+branch = "string"
+pr = "number"
+lastRunId = "string"
+
+[statuses]
+continuable = ["queued", "retry_contract", "retry_prepare", "retry_deploy", "retry_experiment", "redeploy_required", "retry_export", "retry_restore", "retry_writeback", "cleanup_required", "review_required"]
+terminal = ["done", "blocked", "moot", "exhausted"]
+success = ["done"]
+entry = "queued"
+unblockable = ["blocked"]
+exhausted = "exhausted"
+
+
+[[phases]]
+name = "contract-enrichment"
+prompt = "contract-enrichment-entry.md"
+entry = true
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "contract"]
+
+  [[phases.next]]
+  phase = "prepare"
+  on = "completed"
+
+  [[phases.next]]
+  phase = "review"
+  status = "review_required"
+
+  [[phases.exits]]
+  status = "review_required"
+  when = "The phase cannot proceed and has published a durable handoff for review; deploy may use this only before any mutation and restore uses it only after exceptional cleanup is verified."
+
+  [phases.rights]
+  writableFields = ["branch", "pr", "lastRunId"]
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[phases]]
+name = "prepare"
+prompt = "prepare-entry.md"
+startsAttempt = true
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "stage"]
+
+  [[phases.next]]
+  phase = "deploy"
+  on = "completed"
+
+  [[phases.next]]
+  phase = "prepare"
+  status = "retry_prepare"
+
+  [[phases.next]]
+  phase = "review"
+  status = "review_required"
+
+  [[phases.exits]]
+  status = "retry_prepare"
+  when = "Preparation can be repeated without an unrecorded mutation, or review proved that the live site must be rebuilt."
+
+  [[phases.exits]]
+  status = "review_required"
+  when = "The phase cannot proceed and has published a durable handoff for review; deploy may use this only before any mutation and restore uses it only after exceptional cleanup is verified."
+
+  [phases.rights]
+  writableFields = ["branch", "pr", "lastRunId"]
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[phases]]
+name = "deploy"
+prompt = "deploy-entry.md"
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "stage"]
+
+  [[phases.next]]
+  phase = "experiment"
+  on = "completed"
+
+  [[phases.next]]
+  phase = "deploy"
+  status = "retry_deploy"
+
+  [[phases.next]]
+  phase = "review"
+  status = "review_required"
+
+  [[phases.next]]
+  phase = "restore"
+  status = "cleanup_required"
+
+  [[phases.exits]]
+  status = "retry_deploy"
+  when = "Deployment can be repaired in place within the phase retry budget."
+
+  [[phases.exits]]
+  status = "review_required"
+  when = "The phase cannot proceed and has published a durable handoff for review; deploy may use this only before any mutation and restore uses it only after exceptional cleanup is verified."
+
+  [[phases.exits]]
+  status = "cleanup_required"
+  when = "The run cannot continue and the durable handoff proves that restore is required before adjudication."
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[phases]]
+name = "experiment"
+prompt = "experiment-entry.md"
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "stage"]
+
+  [[phases.next]]
+  phase = "export"
+  on = "completed"
+
+  [[phases.next]]
+  phase = "experiment"
+  status = "retry_experiment"
+
+  [[phases.next]]
+  phase = "deploy"
+  status = "redeploy_required"
+
+  [[phases.next]]
+  phase = "restore"
+  status = "cleanup_required"
+
+  [[phases.exits]]
+  status = "retry_experiment"
+  when = "The measurement must be repeated while the deployed precondition remains valid."
+
+  [[phases.exits]]
+  status = "redeploy_required"
+  when = "The measurement invalidated the deployed precondition and deploy must reconstruct it."
+
+  [[phases.exits]]
+  status = "cleanup_required"
+  when = "The run cannot continue and the durable handoff proves that restore is required before adjudication."
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[phases]]
+name = "export"
+prompt = "export-entry.md"
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "stage"]
+
+  [[phases.next]]
+  phase = "restore"
+  on = "completed"
+
+  [[phases.next]]
+  phase = "export"
+  status = "retry_export"
+
+  [[phases.next]]
+  phase = "restore"
+  status = "cleanup_required"
+
+  [[phases.exits]]
+  status = "retry_export"
+  when = "Evidence export or its committed manifest can be regenerated without repeating the measurement."
+
+  [[phases.exits]]
+  status = "cleanup_required"
+  when = "The run cannot continue and the durable handoff proves that restore is required before adjudication."
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[phases]]
+name = "restore"
+prompt = "restore-entry.md"
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "stage"]
+
+  [[phases.next]]
+  phase = "writeback"
+  on = "completed"
+
+  [[phases.next]]
+  phase = "restore"
+  status = "retry_restore"
+
+  [[phases.next]]
+  phase = "review"
+  status = "review_required"
+
+  [[phases.exits]]
+  status = "retry_restore"
+  when = "The restore handoff is invalid, cleanup remains, or the no-residual proof must be repeated."
+
+  [[phases.exits]]
+  status = "review_required"
+  when = "The phase cannot proceed and has published a durable handoff for review; deploy may use this only before any mutation and restore uses it only after exceptional cleanup is verified."
+
+  [[phases.exits]]
+  chainAction = "stop"
+  when = "Restore cannot complete automatically; publish exact recovery instructions and stop the chain without claiming cleanup."
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[phases]]
+name = "writeback"
+prompt = "writeback-entry.md"
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "stage"]
+
+  [[phases.next]]
+  phase = "review"
+  on = "completed"
+
+  [[phases.next]]
+  phase = "writeback"
+  status = "retry_writeback"
+
+  [[phases.exits]]
+  status = "retry_writeback"
+  when = "Findings or the owning design writeback is incomplete or inconsistent with committed evidence."
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[phases]]
+name = "review"
+prompt = "review-entry.md"
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common", "quality", "review"]
+
+  [[phases.next]]
+  phase = "contract-enrichment"
+  status = "retry_contract"
+
+  [[phases.next]]
+  phase = "prepare"
+  status = "retry_prepare"
+
+  [[phases.next]]
+  phase = "export"
+  status = "retry_export"
+
+  [[phases.next]]
+  phase = "restore"
+  status = "retry_restore"
+
+  [[phases.next]]
+  phase = "writeback"
+  status = "retry_writeback"
+
+  [[phases.exits]]
+  status = "retry_contract"
+  when = "The current experiment packet is missing, stale, malformed, or contradicted by live facts."
+
+  [[phases.exits]]
+  status = "retry_prepare"
+  when = "Preparation can be repeated without an unrecorded mutation, or review proved that the live site must be rebuilt."
+
+  [[phases.exits]]
+  status = "retry_export"
+  when = "Evidence export or its committed manifest can be regenerated without repeating the measurement."
+
+  [[phases.exits]]
+  status = "retry_restore"
+  when = "The restore handoff is invalid, cleanup remains, or the no-residual proof must be repeated."
+
+  [[phases.exits]]
+  status = "retry_writeback"
+  when = "Findings or the owning design writeback is incomplete or inconsistent with committed evidence."
+
+  [[phases.exits]]
+  status = "done"
+  when = "The run PR and required design writeback are merged, restore is proven, and the experiment issue is closed; a failed hypothesis may still be a completed experiment."
+
+  [[phases.exits]]
+  status = "blocked"
+  when = "A named external fact must change; the blocker and recovery condition are durable on GitHub."
+
+  [[phases.exits]]
+  status = "moot"
+  when = "The experiment is duplicate, superseded, or no longer applicable and the issue is closed with evidence."
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+
+[[phases]]
+name = "blocked-responder"
+prompt = "blocked-responder-entry.md"
+runner = "codex"
+model = "gpt-5.6-sol"
+roles = ["common"]
+trigger = { afterPhase = "review", whenStatus = "blocked" }
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+
+[[phases]]
+name = "umbrella-finalizer"
+prompt = "umbrella-finalizer-entry.md"
+runner = "claude"
+model = "claude-opus-4-7"
+roles = ["common"]
+trigger = { on = "chain-complete" }
+
+  [phases.variables]
+  REPO                  = { source = "chain.repository", label = "Experiment repository" }
+  BASE_BRANCH           = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                 = { source = "item.issue", label = "Experiment issue", prefix = "#" }
+  ISSUE_BRANCH          = { source = "item.branch", label = "Run branch" }
+  ISSUE_PR              = { source = "item.pr", label = "Run PR" }
+  ISSUE_STATUS          = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID     = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID                = { source = "runtime.runId", label = "Engine run ID" }
+  AGENT_CWD             = { source = "runtime.agentCwd", label = "Agent worktree" }
+  TARGET_CWD            = { source = "runtime.targetCwd", label = "Target checkout" }
+  REPO_CWD              = "runtime.repoCwd"
+  CHAIN_NAME            = "runtime.chainName"
+  SHARED_CONTEXT_FILE   = "runtime.sharedContextPath"
+  TRACE_FILE            = "runtime.traceFile"
+  PROMPT_ROOT           = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC    = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC       = "runtime.phaseExitsDoc"
+  STATUS_VOCABULARY_DOC = "runtime.statusVocabularyDoc"
+  TRIGGER_STATUS_DOC    = "runtime.triggerStatusDoc"
+
+[[fragments]]
+id = "common/runtime-contract"
+role = "common"
+path = "common/runtime-contract.md"
+
+
+[[fragments]]
+id = "common/github-routing"
+role = "common"
+path = "common/github-routing.md"
+
+
+[[fragments]]
+id = "common/state-contract"
+role = "common"
+path = "common/state-contract.md"
+
+
+[[fragments]]
+id = "common/dispatch-contract"
+role = "common"
+path = "common/dispatch-contract.md"
+
+
+[[fragments]]
+id = "common/experiment-contract"
+role = "common"
+path = "common/experiment-contract.md"
+
+
+[[fragments]]
+id = "quality/evidence"
+role = "quality"
+path = "quality/evidence.md"
+
+
+[[fragments]]
+id = "quality/honesty"
+role = "quality"
+path = "quality/honesty.md"
+
+
+[[fragments]]
+id = "quality/cleanup"
+role = "quality"
+path = "quality/cleanup.md"
+
+
+[[fragments]]
+id = "contract/orient"
+role = "contract"
+path = "contract/orient.md"
+
+
+[[fragments]]
+id = "contract/contract-schema"
+role = "contract"
+path = "contract/contract-schema.md"
+
+
+[[fragments]]
+id = "stages/prepare"
+role = "stage"
+path = "stages/prepare.md"
+
+
+[[fragments]]
+id = "stages/deploy"
+role = "stage"
+path = "stages/deploy.md"
+
+
+[[fragments]]
+id = "stages/experiment"
+role = "stage"
+path = "stages/experiment.md"
+
+
+[[fragments]]
+id = "stages/export"
+role = "stage"
+path = "stages/export.md"
+
+
+[[fragments]]
+id = "stages/restore"
+role = "stage"
+path = "stages/restore.md"
+
+
+[[fragments]]
+id = "stages/writeback"
+role = "stage"
+path = "stages/writeback.md"
+
+
+[[fragments]]
+id = "review/investigate"
+role = "review"
+path = "review/investigate.md"
+
+
+[[fragments]]
+id = "review/run-diff-audit"
+role = "review"
+path = "review/run-diff-audit.md"
+
+
+[[fragments]]
+id = "review/design-diff-audit"
+role = "review"
+path = "review/design-diff-audit.md"
+
+
+[[fragments]]
+id = "review/experiment-replay"
+role = "review"
+path = "review/experiment-replay.md"
+
+
+[[fragments]]
+id = "review/actions/retry"
+role = "review"
+path = "review/actions/retry.md"
+
+
+[[fragments]]
+id = "review/actions/blocked"
+role = "review"
+path = "review/actions/blocked.md"
+
+
+[[fragments]]
+id = "review/actions/accept"
+role = "review"
+path = "review/actions/accept.md"
+
+
+[[fragments]]
+id = "review/actions/moot"
+role = "review"
+path = "review/actions/moot.md"
+
+
+[[fragments]]
+id = "review/actions/stop"
+role = "review"
+path = "review/actions/stop.md"
+
+
+[[fragments]]
+id = "review/actions/state-write"
+role = "review"
+path = "review/actions/state-write.md"
+
+
+[agent]
+attemptTimeoutSeconds = 7200
