@@ -16,9 +16,9 @@ import {
 	parseObservabilityEvent,
 	parseObservabilityEventSegmentName,
 	queryObservabilityEvents,
-} from "./observability"
+} from "../../../src/observability"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/observability-tests", String(process.pid))
 
 afterAll(async () => {

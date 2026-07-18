@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 
-import { assertAgentsMdCurrent, renderAgentsMd } from "./sync-agents-md"
+import { assertAgentsMdCurrent, renderAgentsMd } from "../../../scripts/sync-agents-md"
 
 test("AGENTS.md is a regular, current merge of CLAUDE.md and enabled Claude rules", async () => {
 	await expect(assertAgentsMdCurrent()).resolves.toBeUndefined()

@@ -5,7 +5,7 @@ import {
 	itemExtraToJsonObject,
 	storedChainMetadata,
 	storedItemExtra,
-} from "./runtime-data"
+} from "../../../src/runtime-data"
 
 const hooks = [
 	{ kind: "observer", point: "agent.spawn", script: "/bin/observe", timeoutMs: 1000 },

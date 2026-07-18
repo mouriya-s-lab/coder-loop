@@ -3,7 +3,7 @@ import { spawn } from "node:child_process"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/internal-status-type-tests", String(process.pid))
 const RUNTIME_DATA_PATH = resolve(REPO_ROOT, "src/runtime-data.ts")
 const TSC_BIN = resolve(REPO_ROOT, "node_modules/.bin/tsc")

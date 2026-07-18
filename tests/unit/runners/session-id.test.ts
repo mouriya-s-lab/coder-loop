@@ -5,7 +5,7 @@ import {
 	codexSessionIdInvalidDetector,
 	detectsSessionIdInvalid,
 	opencodeSessionIdInvalidDetector,
-} from "./session-id"
+} from "../../../src/runners/session-id"
 
 describe("runner session id invalid detection", () => {
 	test("codex detects resume thread ids that no longer exist", () => {

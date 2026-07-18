@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { assertTaskTreeSnapshot } from "./task-runtime"
+import { assertTaskTreeSnapshot } from "../../../src/task-runtime"
 
 const identity = {
 	runtimeNodeId: "root",

@@ -1,12 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { buildLiveRuntimeHealthLines } from "./install-commands"
-import { buildCoderLoopStatusSnapshot } from "./loop"
-import { openSqliteStateStore } from "./sqlite-state"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
+import { buildLiveRuntimeHealthLines } from "../../../src/install-commands"
+import { buildCoderLoopStatusSnapshot } from "../../../src/loop"
+import { openSqliteStateStore } from "../../../src/sqlite-state"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "../../../src/runtime-data"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/install-command-tests", String(process.pid))
 
 // #397 test brand helper: tests that bypass the daemon and write status directly to SQLite

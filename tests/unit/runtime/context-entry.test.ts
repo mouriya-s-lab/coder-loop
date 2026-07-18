@@ -10,10 +10,10 @@ import {
 	parseContextScope,
 	parsePersistedContextEntryRow,
 	persistedContextScope,
-} from "./context-entry"
-import { openSqliteStateStore } from "./sqlite-state"
-import { daemonRequest, sendDaemonRequest } from "./daemon"
-import { resolveLoopDataPaths } from "./runtime-paths"
+} from "../../../src/context-entry"
+import { openSqliteStateStore } from "../../../src/sqlite-state"
+import { daemonRequest, sendDaemonRequest } from "../../../src/daemon"
+import { resolveLoopDataPaths } from "../../../src/runtime-paths"
 
 describe("context entry foundation", () => {
 	test("closed scope and author boundaries reject malformed variants", () => {

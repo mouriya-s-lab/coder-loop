@@ -1,4 +1,4 @@
-import type { InternalStatus } from "./runtime-data"
+import type { InternalStatus } from "../../../src/runtime-data"
 
 type StatusLiteralComparable<T> =
 	T extends InternalStatus ? string | InternalStatus

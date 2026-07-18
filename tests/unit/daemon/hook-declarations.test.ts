@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
-import { buildEffectiveHookView, hookDeclarationsToJsonValue, isObserverHookPoint, parseGlobalHookDocument, parseHookDeclarations } from "./hook-declarations"
-import type { GateHookDeclaration } from "./hook-declarations"
-import { chainMetadataToJsonObject, itemExtraToJsonObject, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { buildEffectiveHookView, hookDeclarationsToJsonValue, isObserverHookPoint, parseGlobalHookDocument, parseHookDeclarations } from "../../../src/hook-declarations"
+import type { GateHookDeclaration } from "../../../src/hook-declarations"
+import { chainMetadataToJsonObject, itemExtraToJsonObject, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
 
 const observer = { kind: "observer", point: "agent.spawn", script: "/bin/observe", timeoutMs: 1000 }
 const gate = { kind: "gate", point: "run.pre-spawn", script: "/bin/gate", timeoutMs: 2000, onFailure: "hold" }

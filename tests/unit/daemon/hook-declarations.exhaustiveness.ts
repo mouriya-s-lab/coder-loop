@@ -1,5 +1,5 @@
-import type { HookDeclaration, HookInput, ObserverHookPointOf } from "./hook-declarations"
-import type { ObservabilityEventType } from "./observability"
+import type { HookDeclaration, HookInput, ObserverHookPointOf } from "../../../src/hook-declarations"
+import type { ObservabilityEventType } from "../../../src/observability"
 
 export const HOOK_DECLARATION_KIND_EXHAUSTIVENESS_FIXTURE = {
 	observer: true,

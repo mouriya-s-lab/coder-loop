@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { extractPromptArg, parseStubPrompt } from "./engine-integration-stub-runner"
-import { sanitizedSubprocessEnvironment } from "./engine-integration"
+import { extractPromptArg, parseStubPrompt } from "../../../scripts/engine-integration-stub-runner"
+import { sanitizedSubprocessEnvironment } from "../../../scripts/engine-integration"
 
 describe("engine-integration stub runner prompt contract", () => {
 	test("parses PHASE/CHAIN/ITEM/RUN lines from a rendered entry prompt", () => {

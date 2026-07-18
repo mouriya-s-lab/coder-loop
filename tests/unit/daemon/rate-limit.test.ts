@@ -6,7 +6,7 @@ import {
 	extractRateLimitReset,
 	isRateLimitErrorCode,
 	RATE_LIMIT_ERROR_CODE,
-} from "./rate-limit"
+} from "../../../src/rate-limit"
 
 describe("rate-limit detection (#478)", () => {
 	// W3 fixture line shape (chain 35/37/38 incident, 2026-06-17 22:56 JST).

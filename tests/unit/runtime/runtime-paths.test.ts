@@ -9,9 +9,9 @@ import {
 	resolveLoopDataPaths,
 	resolveLoopDataRoot,
 	sanitizeChainName,
-} from "./runtime-paths"
+} from "../../../src/runtime-paths"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 
 describe("runtime path model", () => {
 	test("loop-data root default resolves under user-level coder-loop data", () => {

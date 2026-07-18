@@ -10,10 +10,10 @@ import {
 	loadPreset,
 	projectCompiledPreset,
 	projectPresetCompileResult,
-} from "./loop"
-import type { CompileResult } from "./loop"
+} from "../../../src/loop"
+import type { CompileResult } from "../../../src/loop"
 
-const ROOT = resolve(import.meta.dir, "..")
+const ROOT = resolve(import.meta.dir, "../../..")
 
 describe("preset compiler", () => {
 	test("returns closed compiled and rejected variants", async () => {

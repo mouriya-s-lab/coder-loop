@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { operatorSubprocessEnvironment } from "./real-e2e-environment"
+import { operatorSubprocessEnvironment } from "../../../scripts/real-e2e-environment"
 
 describe("real-e2e operator subprocess environment", () => {
 	test("removes an inherited run credential without mutating the parent environment", () => {
