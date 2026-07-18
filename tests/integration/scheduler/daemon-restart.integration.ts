@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test"
 import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
-import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
+import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "../../../src/daemon"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
@@ -11,14 +11,14 @@ import {
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
-} from "./scheduler"
-import { resolveChainRuntimePaths } from "./runtime-paths"
-import { openSqliteStateStore } from "./sqlite-state"
-import { loadPreset } from "./loop"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import type { BoundaryRecord } from "./boundary-types"
+} from "../../../src/scheduler"
+import { resolveChainRuntimePaths } from "../../../src/runtime-paths"
+import { openSqliteStateStore } from "../../../src/sqlite-state"
+import { loadPreset } from "../../../src/loop"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
+import type { BoundaryRecord } from "../../../src/boundary-types"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")

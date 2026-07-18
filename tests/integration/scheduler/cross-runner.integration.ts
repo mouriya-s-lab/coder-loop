@@ -10,16 +10,16 @@ import {
 	type SchedulerOptions,
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
-} from "./scheduler"
-import { loadPreset, type JsonObject } from "./loop"
-import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
-import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+} from "../../../src/scheduler"
+import { loadPreset, type JsonObject } from "../../../src/loop"
+import { startCoderLoopDaemon, type CoderLoopDaemon } from "../../../src/daemon"
+import { type ChainRecord, openSqliteStateStore } from "../../../src/sqlite-state"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
-const FAKE_RUNNER = resolve(import.meta.dir, "scheduler.cross-runner.integration.fake.ts")
+const FAKE_RUNNER = resolve(import.meta.dir, "cross-runner.integration.fake.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-cross-runner-integration-tests", String(process.pid))
 
 let nextFixtureId = 0
