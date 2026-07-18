@@ -1053,9 +1053,22 @@ attemptTimeoutSeconds = 3600
 		try {
 			const target = await makeTarget("logs-non-active-chain-target")
 			await mkdir(resolve(target, ".coder-loop/runtime"), { recursive: true })
-			expectJsonOk(await runCli(["chain", "create", "logs-stopped-history-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["chain", "stop", "logs-stopped-history-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["chain", "create", "logs-completed-history-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const socketPath = fixture.daemon.snapshot().socketPath
+			const stoppedCreated = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+				name: "logs-stopped-history-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				preset: "gh-issue-pr-iteration",
+			}))
+			if (!stoppedCreated.ok) throw new Error(`chain.create setup failed: ${stoppedCreated.error.code}: ${stoppedCreated.error.message}`)
+			const stopped = await sendDaemonRequest(socketPath, daemonRequest("chain.stop", { chainName: "logs-stopped-history-chain" }))
+			if (!stopped.ok) throw new Error(`chain.stop setup failed: ${stopped.error.code}: ${stopped.error.message}`)
+
+			const completedCreated = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+				name: "logs-completed-history-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				preset: "single-phase-example",
+			}))
+			if (!completedCreated.ok) throw new Error(`chain.create setup failed: ${completedCreated.error.code}: ${completedCreated.error.message}`)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
 				const completedChain = store.getChainByName("logs-completed-history-chain")
@@ -1064,7 +1077,13 @@ attemptTimeoutSeconds = 3600
 			} finally {
 				store.close()
 			}
-			await waitForJson(() => runCli(["chain", "status", "logs-completed-history-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]), (value) => value.chain?.status === "completed")
+			await waitFor(async () => {
+				const response = await sendDaemonRequest(socketPath, daemonRequest("chain.status", { chainName: "logs-completed-history-chain" }))
+				if (!response.ok) throw new Error(`chain.status setup failed: ${response.error.code}: ${response.error.message}`)
+				const result = boundaryRecord(response.result)
+				const chain = boundaryRecord(result.chain)
+				return chain.status === "completed" ? chain : null
+			}, 2_000)
 
 			const stoppedLogs = expectJsonOk(await runCli([
 				"logs",
