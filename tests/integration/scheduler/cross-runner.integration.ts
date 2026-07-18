@@ -168,6 +168,13 @@ test("invalid review session id clears only review/claude and the next review sp
 			runner: "claude",
 			phase: "review",
 			exitCode: 1,
+			sessionId: staleReviewSessionId,
+			stderr: ["transient review failure"],
+		},
+		{
+			runner: "claude",
+			phase: "review",
+			exitCode: 1,
 			stderr: [`No conversation found with session ID: ${staleReviewSessionId}`],
 		},
 		{
@@ -188,13 +195,10 @@ test("invalid review session id clears only review/claude and the next review sp
 		})
 
 		await closeOnlySpawn(await schedulerTick(options))
-		fixture.store.setItemSessionId(item.id, {
-			phase: "review",
-			runner: "claude",
-			sessionId: staleReviewSessionId,
-			updatedAt: now,
-		})
+		await closeOnlySpawn(await schedulerTick(options))
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe(staleReviewSessionId)
 
+		now += 1
 		const invalidReviewTick = await schedulerTick(options)
 		expect(invalidReviewTick.spawnedRuns).toHaveLength(1)
 		const invalidReviewClosed = await invalidReviewTick.spawnedRuns[0]!.closed
@@ -212,7 +216,7 @@ test("invalid review session id clears only review/claude and the next review sp
 			previousSessionId: staleReviewSessionId,
 		}))
 
-		now += 1
+		now += 2
 		const freshReviewTick = await schedulerTick(options)
 		expect(freshReviewTick.spawnedRuns).toHaveLength(1)
 		const freshReviewClosed = await freshReviewTick.spawnedRuns[0]!.closed
@@ -222,10 +226,11 @@ test("invalid review session id clears only review/claude and the next review sp
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
 			"codex:iteration:fresh",
+			"claude:review:fresh",
 			`claude:review:${staleReviewSessionId}`,
 			"claude:review:fresh",
 		])
-		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
+		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review", "review"])
 	} finally {
 		await stopCrossRunnerFixture(fixture)
 	}
@@ -260,6 +265,13 @@ test("invalid review session id on opencode clears only review/opencode and the 
 			runner: "opencode",
 			phase: "review",
 			exitCode: 1,
+			sessionId: staleReviewSessionId,
+			stderr: ["transient review failure"],
+		},
+		{
+			runner: "opencode",
+			phase: "review",
+			exitCode: 1,
 			stderr: [opencodeInvalidStderr],
 		},
 		{
@@ -284,13 +296,10 @@ test("invalid review session id on opencode clears only review/opencode and the 
 		})
 
 		await closeOnlySpawn(await schedulerTick(options))
-		fixture.store.setItemSessionId(item.id, {
-			phase: "review",
-			runner: "opencode",
-			sessionId: staleReviewSessionId,
-			updatedAt: now,
-		})
+		await closeOnlySpawn(await schedulerTick(options))
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBe(staleReviewSessionId)
 
+		now += 1
 		const invalidReviewTick = await schedulerTick(options)
 		expect(invalidReviewTick.spawnedRuns).toHaveLength(1)
 		const invalidReviewClosed = await invalidReviewTick.spawnedRuns[0]!.closed
@@ -310,7 +319,7 @@ test("invalid review session id on opencode clears only review/opencode and the 
 			reason: "runner_session_id_invalid",
 		}))
 
-		now += 1
+		now += 2
 		const freshReviewTick = await schedulerTick(options)
 		expect(freshReviewTick.spawnedRuns).toHaveLength(1)
 		const freshReviewClosed = await freshReviewTick.spawnedRuns[0]!.closed
@@ -320,10 +329,11 @@ test("invalid review session id on opencode clears only review/opencode and the 
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
 			"codex:iteration:fresh",
+			"opencode:review:fresh",
 			`opencode:review:${staleReviewSessionId}`,
 			"opencode:review:fresh",
 		])
-		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
+		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review", "review"])
 	} finally {
 		await stopCrossRunnerFixture(fixture)
 	}
