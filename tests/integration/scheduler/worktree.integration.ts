@@ -313,12 +313,12 @@ test("startup reconciliation reports failed orphan branch and worktree repairs w
 		expect(findings).toContainEqual({
 			closureId: null,
 			repoCwd,
-			mismatch: expect.objectContaining({ kind: "orphan-directory", path: orphanPath, repaired: false, error: expect.any(String) }),
+			mismatch: expect.objectContaining({ kind: "orphan-directory", path: orphanPath, repaired: false, error: expect.stringContaining("worktree remove failed (exit") }),
 		})
 		expect(findings).toContainEqual({
 			closureId: null,
 			repoCwd,
-			mismatch: expect.objectContaining({ kind: "orphan-branch", branchName: `refs/heads/${lockedBranch}`, repaired: false, error: expect.any(String) }),
+			mismatch: expect.objectContaining({ kind: "orphan-branch", branchName: `refs/heads/${lockedBranch}`, repaired: false, error: expect.stringContaining("update-ref -d failed (exit") }),
 		})
 		expect(existsSync(orphanPath)).toBe(true)
 		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${lockedBranch}`]).exitCode).toBe(0)
