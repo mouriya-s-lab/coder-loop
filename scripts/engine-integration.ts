@@ -14,17 +14,18 @@
  * （#681 并发前提）。预算：单次 60 秒内。
  *
  * 用法：
- *   bun scripts/engine-integration.ts [--max-wall-seconds N] [--max-runs N]
- *     [--poll-seconds N] [--keep-work-dir]
+ *   bun scripts/engine-integration.ts --log-file <path> [--foreground]
+ *     [--max-wall-seconds N] [--max-runs N] [--poll-seconds N] [--keep-work-dir]
  *
- * 退出码：0 = 全链路成功且断言通过；1 = 失败 / tripwire / 断言失败。
+ * 默认 detached 后台运行；--foreground 阻塞等待。退出码：0 = 全链路成功且断言通过；
+ * 1 = 失败 / tripwire / 断言失败；2 = 缺少必填的 --log-file。
  */
 
 import { Database } from "bun:sqlite"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs"
 import { readdir } from "node:fs/promises"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -34,12 +35,16 @@ const PRESET_NAME = "engine-integration"
 const ITEM_KEY = "itg-item-1"
 const TERMINAL_SUCCESS = "done"
 const TERMINAL_FAILURE = ["exhausted"] as const
+const BACKGROUND_CHILD_ENV = "CODER_LOOP_ENGINE_INTEGRATION_BACKGROUND_CHILD"
+const USAGE = "bun scripts/engine-integration.ts --log-file <path> [--foreground] [--max-wall-seconds N] [--max-runs N] [--poll-seconds N] [--keep-work-dir]"
 
 type HarnessOptions = {
 	maxWallSeconds: number
 	maxRuns: number
 	pollSeconds: number
 	keepWorkDir: boolean
+	logFile: string
+	foreground: boolean
 }
 
 function parseArgs(argv: readonly string[]): HarnessOptions {
@@ -48,18 +53,26 @@ function parseArgs(argv: readonly string[]): HarnessOptions {
 		maxRuns: 6,
 		pollSeconds: 1,
 		keepWorkDir: false,
+		logFile: "",
+		foreground: false,
 	}
-	for (let i = 0; i < argv.length; i += 2) {
+	for (let i = 0; i < argv.length; i += 1) {
 		const flag = argv[i]
 		if (flag === undefined) break
 		if (flag === "--keep-work-dir") {
 			options.keepWorkDir = true
-			i -= 1
+			continue
+		}
+		if (flag === "--foreground") {
+			options.foreground = true
 			continue
 		}
 		const value = argv[i + 1]
-		if (value === undefined) fail(`flag ${flag} 缺少值`)
+		if (value === undefined || value.startsWith("--")) fail(`flag ${flag} 缺少值`)
 		switch (flag) {
+			case "--log-file":
+				options.logFile = resolve(process.cwd(), value)
+				break
 			case "--max-wall-seconds":
 				options.maxWallSeconds = parsePositiveInt(flag, value)
 				break
@@ -72,7 +85,9 @@ function parseArgs(argv: readonly string[]): HarnessOptions {
 			default:
 				fail(`未知 flag: ${flag}`)
 		}
+		i += 1
 	}
+	if (options.logFile === "") fail("--log-file <path> 必填")
 	return options
 }
 
@@ -86,9 +101,18 @@ function fail(message: string): never {
 	throw new Error(message)
 }
 
+type LogSink = { fd: number; path: string }
+
+let activeLogSink: LogSink | null = null
+
+function writeLog(text: string): void {
+	if (activeLogSink === null) throw new Error("engine-integration log sink 尚未初始化")
+	writeSync(activeLogSink.fd, text)
+}
+
 function log(message: string): void {
 	// 完整 ISO 时间戳：并发验收（issue #681 row 3）用它比对两个 run 的有效窗口重叠。
-	process.stdout.write(`[${new Date().toISOString()}] ${message}\n`)
+	writeLog(`[${new Date().toISOString()}] ${message}\n`)
 }
 
 // dogfood 场景下 harness 可能由 coder-loop agent 启动：外层 run 的凭据与 loop-data
@@ -97,6 +121,7 @@ export function sanitizedSubprocessEnvironment(parentEnvironment: NodeJS.Process
 	const environment = { ...parentEnvironment }
 	delete environment.CODER_LOOP_RUN_CRED
 	delete environment.CODER_LOOP_DATA_DIR
+	delete environment[BACKGROUND_CHILD_ENV]
 	return environment
 }
 
@@ -135,8 +160,6 @@ function prepareLocalFixture(workDir: string): string {
 type DaemonHandle = {
 	child: ChildProcess
 	loopDataRoot: string
-	stdoutPath: string
-	stderrPath: string
 	shimDir: string
 	shimmedEnv: NodeJS.ProcessEnv
 }
@@ -161,10 +184,9 @@ function writeShims(workDir: string): string {
 }
 
 function startDaemon(workDir: string): DaemonHandle {
+	if (activeLogSink === null) fail("daemon 启动前日志未初始化")
 	const loopDataRoot = resolve(workDir, "loop-data")
 	mkdirSync(loopDataRoot, { recursive: true })
-	const stdoutPath = resolve(workDir, "daemon.stdout.log")
-	const stderrPath = resolve(workDir, "daemon.stderr.log")
 	const shimDir = writeShims(workDir)
 	const shimmedEnv: NodeJS.ProcessEnv = {
 		...sanitizedSubprocessEnvironment(process.env),
@@ -172,16 +194,12 @@ function startDaemon(workDir: string): DaemonHandle {
 	}
 	log(`daemon: 隔离 loop-data-root 起中央 daemon: ${loopDataRoot}`)
 	log(`daemon: PATH 前置 shim: ${shimDir} (coder-loop → src/loop.ts, claude → stub runner)`)
-	const stdoutFd = openSync(stdoutPath, "a")
-	const stderrFd = openSync(stderrPath, "a")
 	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], {
 		cwd: REPO_ROOT,
-		stdio: ["ignore", stdoutFd, stderrFd],
+		stdio: ["ignore", activeLogSink.fd, activeLogSink.fd],
 		env: shimmedEnv,
 	})
-	closeSync(stdoutFd)
-	closeSync(stderrFd)
-	return { child, loopDataRoot, stdoutPath, stderrPath, shimDir, shimmedEnv }
+	return { child, loopDataRoot, shimDir, shimmedEnv }
 }
 
 async function waitForDaemonSocket(daemon: DaemonHandle, timeoutSeconds: number): Promise<void> {
@@ -193,11 +211,11 @@ async function waitForDaemonSocket(daemon: DaemonHandle, timeoutSeconds: number)
 			return
 		}
 		if (daemon.child.exitCode !== null) {
-			fail(`daemon 进程提前退出 (exit ${daemon.child.exitCode})，stderr 见 ${daemon.stderrPath}`)
+			fail(`daemon 进程提前退出 (exit ${daemon.child.exitCode})，输出见 ${activeLogSink?.path ?? "run log"}`)
 		}
 		await Bun.sleep(100)
 	}
-	fail(`daemon socket ${timeoutSeconds}s 内未就绪，stderr 见 ${daemon.stderrPath}`)
+	fail(`daemon socket ${timeoutSeconds}s 内未就绪，输出见 ${activeLogSink?.path ?? "run log"}`)
 }
 
 async function stopDaemon(daemon: DaemonHandle): Promise<void> {
@@ -307,14 +325,27 @@ async function watch(options: HarnessOptions, fixtureCwd: string, loopDataRoot: 
 
 // ------------------------------------------------------------------ assert
 
-type RunRow = { phase: string; status: string }
+type RunRow = { runId: string; phase: string; status: string }
 
 function readRunRows(loopDataRoot: string): RunRow[] {
 	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
 	try {
-		return db.query("SELECT phase, status FROM runs ORDER BY started_at").all() as RunRow[]
+		return db.query("SELECT run_id AS runId, phase, status FROM runs ORDER BY started_at").all() as RunRow[]
 	} finally {
 		db.close()
+	}
+}
+
+function logCapturedRunnerOutput(loopDataRoot: string, chainName: string, runRows: readonly RunRow[]): void {
+	for (const row of runRows) {
+		const phaseDir = resolve(loopDataRoot, "chains", chainName, "runs", row.runId, row.phase)
+		for (const [stream, filename] of [["stdout", "stdout.jsonl"], ["stderr", "stderr.txt"]] as const) {
+			const path = resolve(phaseDir, filename)
+			if (!existsSync(path)) continue
+			const output = readFileSync(path, "utf-8")
+			log(`runner ${row.phase} ${stream}: ${path}`)
+			if (output !== "") writeLog(output.endsWith("\n") ? output : `${output}\n`)
+		}
 	}
 }
 
@@ -390,20 +421,18 @@ function assertNoOrphans(loopDataRoot: string): void {
 // ----------------------------------------------------------------- diagnose
 
 function dumpDiagnosis(fixtureCwd: string, daemon: DaemonHandle, chainName: string, reason: string): void {
-	process.stderr.write(`\nengine-integration: 失败/止血: ${reason}\n`)
-	process.stderr.write(`诊断材料:\n`)
-	process.stderr.write(`  loop-data root: ${daemon.loopDataRoot}\n`)
-	process.stderr.write(`  daemon stdout : ${daemon.stdoutPath}\n`)
-	process.stderr.write(`  daemon stderr : ${daemon.stderrPath}\n`)
+	writeLog(`\nengine-integration: 失败/止血: ${reason}\n`)
+	writeLog("诊断材料:\n")
+	writeLog(`  loop-data root: ${daemon.loopDataRoot}\n`)
+	writeLog(`  run log       : ${activeLogSink?.path ?? "unknown"}\n`)
 	const snapshot = sh(["bun", LOOP_ENTRY, "status", fixtureCwd,
 		"--json", "--loop-data-root", daemon.loopDataRoot, "--chain", chainName], { allowFail: true })
-	process.stderr.write(`  status --json :\n${snapshot.stdout}\n`)
+	writeLog(`  status --json :\n${snapshot.stdout}\n`)
 }
 
 // -------------------------------------------------------------------- main
 
-async function main(): Promise<number> {
-	const options = parseArgs(process.argv.slice(2))
+async function runHarness(options: HarnessOptions): Promise<number> {
 	const startedAt = Date.now()
 	const runKey = randomUUID()
 	const workDir = resolve(REPO_ROOT, ".coder-loop/runtime/engine-integration", runKey)
@@ -455,12 +484,89 @@ async function main(): Promise<number> {
 		return 0
 	} finally {
 		if (daemon.child.exitCode === null) await stopDaemon(daemon)
+		try {
+			logCapturedRunnerOutput(daemon.loopDataRoot, chainName, readRunRows(daemon.loopDataRoot))
+		} catch (error) {
+			log(`runner output 读取失败: ${error instanceof Error ? error.message : String(error)}`)
+		}
 		if (exitCode === 0 && !options.keepWorkDir) {
 			rmSync(workDir, { recursive: true, force: true })
 		} else if (exitCode !== 0) {
 			log(`诊断保留: ${workDir}`)
 		}
 	}
+}
+
+function requiredLogFileArgument(argv: readonly string[]): string | null {
+	const flagIndex = argv.indexOf("--log-file")
+	if (flagIndex === -1) return null
+	const value = argv[flagIndex + 1]
+	return value === undefined || value.startsWith("--") ? null : value
+}
+
+function prepareBackgroundLog(logFile: string): number {
+	mkdirSync(dirname(logFile), { recursive: true })
+	writeFileSync(logFile, "")
+	return openSync(logFile, "a")
+}
+
+function startBackground(argv: readonly string[], logFile: string): number {
+	const logFd = prepareBackgroundLog(logFile)
+	try {
+		const scriptPath = process.argv[1] ?? resolve(REPO_ROOT, "scripts/engine-integration.ts")
+		const child = spawn(process.execPath, [scriptPath, ...argv, "--foreground"], {
+			cwd: process.cwd(),
+			detached: true,
+			stdio: ["ignore", logFd, logFd],
+			env: { ...process.env, [BACKGROUND_CHILD_ENV]: "1" },
+		})
+		if (child.pid === undefined) fail("后台子进程未返回 pid")
+		child.unref()
+		process.stdout.write(`engine-integration: pid=${child.pid} log=${logFile}\n`)
+		return 0
+	} finally {
+		closeSync(logFd)
+	}
+}
+
+async function runForeground(argv: readonly string[], logFile: string): Promise<number> {
+	const backgroundChild = process.env[BACKGROUND_CHILD_ENV] === "1"
+	mkdirSync(dirname(logFile), { recursive: true })
+	const logFd = openSync(logFile, backgroundChild ? "a" : "w")
+	activeLogSink = { fd: logFd, path: logFile }
+	let exitCode = 1
+	try {
+		try {
+			const options = parseArgs(argv)
+			if (options.logFile !== logFile) fail(`--log-file 解析不一致: ${options.logFile}`)
+			exitCode = await runHarness(options)
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error)
+			log(`engine-integration: ${message}`)
+			exitCode = 1
+		}
+		const summary = `engine-integration: exit=${exitCode} log=${logFile}`
+		log(summary)
+		if (!backgroundChild) process.stdout.write(`${summary}\n`)
+		writeLog(`FINAL exit=${exitCode}\n`)
+		return exitCode
+	} finally {
+		activeLogSink = null
+		closeSync(logFd)
+	}
+}
+
+async function main(): Promise<number> {
+	const argv = process.argv.slice(2)
+	const rawLogFile = requiredLogFileArgument(argv)
+	if (rawLogFile === null) {
+		process.stderr.write(`engine-integration: --log-file <path> 必填；用法: ${USAGE}\n`)
+		return 2
+	}
+	const logFile = resolve(process.cwd(), rawLogFile)
+	return argv.includes("--foreground")
+		? runForeground(argv, logFile)
+		: startBackground(argv, logFile)
 }
 
 if (import.meta.main) {
