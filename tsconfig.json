@@ -12,7 +12,11 @@
 		"noEmit": true,
 		"outDir": "dist",
 		"rootDir": "src",
-		"skipLibCheck": true
+		"skipLibCheck": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true
 	},
-	"include": ["src"]
+	"include": [
+		"src"
+	]
 }

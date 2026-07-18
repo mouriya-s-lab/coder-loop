@@ -47,7 +47,6 @@ import {
 	parseObservabilityEventType,
 	parseObservabilityKind,
 	queryObservabilityEvents,
-	type ObservabilityEventQuery,
 	type PresetPlaceholderDirection,
 	type PresetPlaceholderVerdict,
 } from "./observability"
@@ -57,13 +56,11 @@ import {
 	type ItemRecord,
 	openSqliteStateStore,
 	type RunRecord,
-	type SqliteStateStore,
 } from "./sqlite-state"
 import {
 	chainBindings as metadataBindings,
 	chainBindingsPresetPath,
 	itemExtraJsonValue,
-	itemExtraToJsonObject,
 	itemExtraToTransparentJsonObject,
 	metadataBoolean,
 	metadataNestedString,
@@ -71,9 +68,7 @@ import {
 	metadataString,
 	parseInternalStatus,
 	RuntimeDataError,
-	type AdmittedItemStatus,
 	type InternalStatus,
-	type ItemExtra,
 } from "./runtime-data"
 import { TaskTreeSnapshotBoundary, type TaskTreeSnapshot } from "./task-runtime"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
@@ -410,7 +405,6 @@ const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
 	{ kind: arkType.unit("signal"), name: "string" },
 	{ kind: arkType.unit("error"), code: "string" },
-	{ kind: arkType.unit("watchdog"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), afterSummarySeconds: "number" },
 	{ kind: arkType.unit("timeout"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), attemptSeconds: "number" },
 )
 
@@ -1086,7 +1080,6 @@ export type Terminated =
 	| { kind: "clean" }
 	| { kind: "signal"; name: string }
 	| { kind: "error"; code: string }
-	| { kind: "watchdog"; phase: "term" | "kill"; afterSummarySeconds: number }
 	| { kind: "timeout"; phase: "term" | "kill"; attemptSeconds: number }
 
 export type SessionEntry = {
@@ -1133,12 +1126,6 @@ export type LoopEvent =
 			sessionId: string | null
 		})
 	| (LoopEventBase & {
-			type: "watchdog.fire"
-			phase: string
-			attemptStartedAt: string
-			signal: "SIGTERM" | "SIGKILL"
-		})
-	| (LoopEventBase & {
 			type: "attempt.timeout"
 			phase: string
 			attemptStartedAt: string
@@ -1156,7 +1143,6 @@ export const LOOP_EVENT_TYPES = [
 	"attempt.start",
 	"attempt.timeout",
 	"attempt.close",
-	"watchdog.fire",
 	"queue.terminal",
 ] as const satisfies readonly LoopEventType[]
 
@@ -1340,10 +1326,6 @@ type CliCommand =
 // #433: the per-target runner / model CLI is retired; runner / model resolution is read from
 // `coder-loop status <target> --json`'s runner view, set in preset.toml's per-phase `runner` /
 // `model`, and the enum-renderer / [1m] suffix that lived here is gone with it.
-
-function includesStringLiteral<const Values extends readonly string[]>(values: Values, value: string): value is Values[number] {
-	return values.some((entry) => entry === value)
-}
 
 const statusCliCommand = command({
 	name: "status",
@@ -2062,12 +2044,6 @@ function parseOptionalPositiveInteger(value: string | null, flagName: string): n
 	if (value === null) return null
 	const parsed = Number(value)
 	if (!Number.isInteger(parsed) || parsed <= 0) fail(`${flagName} must be a positive integer, got: ${value}`)
-	return parsed
-}
-
-function parseRequiredPositiveInteger(value: string, flagName: string): number {
-	const parsed = parseOptionalPositiveInteger(value, flagName)
-	if (parsed === null) fail(`${flagName} is required`)
 	return parsed
 }
 
@@ -3652,16 +3628,6 @@ function jsonValueFromSerializable(value: BoundaryValue): JsonValue {
 	return parsed
 }
 
-function parseRecentJsonLines(raw: string, limit: number): JsonValue[] {
-	const lines = raw.split("\n").filter((line) => line.trim() !== "")
-	const recent = lines.slice(-limit)
-	return recent.map((line) => {
-		const parsed: BoundaryValue = JSON.parse(line)
-		if (!isJsonValue(parsed)) throw new Error("event line is not JSON data")
-		return parsed
-	})
-}
-
 async function buildCentralStatusProcessSnapshot(options: Pick<LoopOptions, "targetCwd" | "loopDataRoot">): Promise<StatusProcessSnapshot> {
 	const scan = scanLoopProcesses(options.targetCwd)
 	const live = scan.kind === "ok" ? [...scan.value] : []
@@ -4207,23 +4173,6 @@ async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTar
 	return { options, chain }
 }
 
-async function loadLoopOptionsForTarget(
-	targetCwdInput: string,
-	repository: string | null,
-	extra: Partial<TargetChainLookupArgs> = {},
-): Promise<LoopOptions> {
-	const loaded = await loadTargetRuntime({
-		targetCwd: targetCwdInput,
-		loopDataRoot: extra.loopDataRoot ?? null,
-		chainName: extra.chainName ?? null,
-		repository,
-		baseBranch: extra.baseBranch ?? null,
-		dryRun: extra.dryRun ?? false,
-		worktree: extra.worktree ?? false,
-	})
-	return loaded.options
-}
-
 async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<ChainRecord> {
 	const loopDataRoot = args.loopDataRoot
 	const statusScope = args.chainStatusScope ?? "active-only"
@@ -4430,21 +4379,8 @@ export function normalizeQueueIssueId(raw: string): string {
 	return normalized
 }
 
-function hasOwnJsonKey(value: JsonObject, key: string): boolean {
-	return Object.prototype.hasOwnProperty.call(value, key)
-}
-
 function findOwnedLiveProcess(snapshot: CoderLoopStatusSnapshot): StatusProcessInfo | null {
 	return snapshot.processes.live.find((entry) => entry.alive && entry.matchesTarget) ?? null
-}
-
-async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
-	const deadline = Date.now() + timeoutMs
-	while (Date.now() < deadline) {
-		if (!isPidAlive(pid)) return true
-		await sleep(50)
-	}
-	return !isPidAlive(pid)
 }
 
 // --- preset materialization ---
@@ -4885,9 +4821,6 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
 			const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
 			const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
-		if (Object.hasOwn(entry, "statusWrites")) {
-			presetError(`preset.phases[${index}].statusWrites: use [[phases.exits]] with status and when`)
-		}
 		const roles = parsePresetPhaseRoles(
 			entry.roles ?? null,
 			fragments.length > 0,
@@ -5556,7 +5489,6 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 			outputPath,
 			targetCwd,
 			resolvedRunner,
-			summaryWatchdogConfigForPhase(phase),
 			{ currentIssueFile: runtimeBindingPaths.currentIssueFile, evidenceDir: runtimeBindingPaths.evidenceDir },
 		)
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${stdoutBytes} bytes)`)
@@ -5716,10 +5648,6 @@ async function collectStatusRuntimeErrors(
 
 function loopDataRootOption(loopDataRoot: string | null): { loopDataRoot?: string } {
 	return loopDataRoot === null ? {} : { loopDataRoot }
-}
-
-function unixSeconds(): number {
-	return Date.now() / 1000
 }
 
 function samePath(left: string, right: string): boolean {
@@ -6266,7 +6194,6 @@ async function runAgent(
 	outputPath: string,
 	agentCwd: string,
 	runner: AgentRunnerSelection,
-	watchdog: SummaryWatchdogConfig | null,
 	authorizationPaths: RunnerAuthorizationRuntimePaths,
 	eventContext?: LoopEventContext,
 ): Promise<{ output: string; stdoutBytes: number; code: number }> {
@@ -6281,7 +6208,7 @@ async function runAgent(
 
 	const result = await runAgentWithBackoff({
 		spawnAttempt: ({ resume }) => {
-			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, watchdog, authorizationPaths, authorizationPhase: phase }
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, authorizationPaths, authorizationPhase: phase }
 			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
 		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
@@ -6333,7 +6260,6 @@ export type SpawnOneAttemptInput = {
 	resume: ResumeDecision
 	agentCwd: string
 	runner?: AgentRunnerSelection
-	watchdog: SummaryWatchdogConfig | null
 	attemptTimeout?: AttemptTimeoutConfig | null
 	eventContext?: LoopEventContext
 	statusWriter?: (path: string, payload: string) => Promise<void>
@@ -6342,12 +6268,6 @@ export type SpawnOneAttemptInput = {
 }
 
 export type RunnerAuthorizationRuntimePaths = Pick<RuntimeBindingPaths, "currentIssueFile" | "evidenceDir">
-
-export type SummaryWatchdogConfig = {
-	marker: string
-	termMs: number
-	killMs: number
-}
 
 export type AttemptTimeoutConfig = {
 	termMs: number
@@ -6360,62 +6280,6 @@ export function attemptTimeoutConfigForPreset(preset: Preset): AttemptTimeoutCon
 		termMs: preset.agent.attemptTimeoutSeconds * 1000,
 		killMs: ATTEMPT_TIMEOUT_KILL_MS,
 		attemptSeconds: preset.agent.attemptTimeoutSeconds,
-	}
-}
-
-// #456: `PresetPhase.summaryMarker` is retired with the role taxonomy. The watchdog hook is
-// preserved as a no-op call site (`#452` boundary owns the redesign of summary injection); every
-// caller still passes a phase but the function now reports "no marker configured" unconditionally
-// until #452 lands a DSL-declared injection point. Signature kept so callers don't churn.
-export function summaryWatchdogConfigForPhase(_phase: PresetPhase): SummaryWatchdogConfig | null {
-	return null
-}
-
-export type SummaryWatchdogTimerHandle = ReturnType<typeof setTimeout> | null
-
-export type SummaryWatchdogDeps = {
-	config: SummaryWatchdogConfig
-	setTimer: (cb: () => void, ms: number) => SummaryWatchdogTimerHandle
-	clearTimer: (handle: SummaryWatchdogTimerHandle) => void
-	onTerm: () => void
-	onKill: () => void
-	log: (message: string) => void
-}
-
-export type SummaryWatchdogState =
-	| { kind: "idle" }
-	| { kind: "armed" }
-	| { kind: "term-sent" }
-	| { kind: "kill-sent" }
-	| { kind: "cancelled" }
-
-export type SummaryWatchdog = {
-	observeStdout: (chunk: string) => void
-	cancel: () => void
-	state: () => SummaryWatchdogState
-}
-
-type SummaryWatchdogStdoutObserver = {
-	observeStdout: (chunk: Buffer) => void
-	finish: () => void
-	error: () => SummaryWatchdogFrameError | null
-}
-
-export type SummaryWatchdogFrameError = {
-	kind: "invalid-runner-event"
-	runner: "codex"
-	frameChars: number
-	message: string
-}
-
-function createDisabledSummaryWatchdog(): SummaryWatchdog {
-	let state: SummaryWatchdogState = { kind: "idle" }
-	return {
-		observeStdout: () => {},
-		cancel: () => {
-			state = { kind: "cancelled" }
-		},
-		state: () => state,
 	}
 }
 
@@ -6487,93 +6351,6 @@ function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { p
 // fixtures used to reconstruct fake-runner status writes — is gone; tests now
 // route through `extra.writeStatus` directly (mirror of the real agent calling
 // `coder-loop item update --status`).
-
-export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
-	if (runner !== "codex") {
-		return {
-			observeStdout: (chunk) => watchdog.observeStdout(chunk.toString("utf8")),
-			finish: () => {},
-			error: () => null,
-		}
-	}
-
-	let frameError: SummaryWatchdogFrameError | null = null
-	const stream = createStreamTextState((line) => {
-		if (frameError !== null) return
-		const trimmed = line.trim()
-		if (trimmed === "" || !trimmed.startsWith("{")) return
-		try {
-			const text = codexAgentMessageText(JSON.parse(trimmed))
-			if (text !== null && containsSummaryMarkerLine(text, marker)) watchdog.observeStdout(text)
-		} catch (error) {
-			frameError = {
-				kind: "invalid-runner-event",
-				runner: "codex",
-				frameChars: line.length,
-				message: `invalid codex JSONL runner event (${line.length} chars): ${error instanceof Error ? error.message : String(error)}`,
-			}
-		}
-	})
-	return {
-		observeStdout: stream.observe,
-		finish: stream.finish,
-		error: () => frameError,
-	}
-}
-
-export function createSummaryWatchdog(deps: SummaryWatchdogDeps): SummaryWatchdog {
-	let state: SummaryWatchdogState = { kind: "idle" }
-	let tail = ""
-	let termTimer: SummaryWatchdogTimerHandle = null
-	let killTimer: SummaryWatchdogTimerHandle = null
-	const tailLimit = Math.max(deps.config.marker.length - 1, 0)
-
-	const arm = (): void => {
-		if (state.kind !== "idle") return
-		if (!Number.isFinite(deps.config.termMs) || deps.config.termMs <= 0) return
-		state = { kind: "armed" }
-		deps.log(`summary watchdog armed: SIGTERM scheduled in ${Math.round(deps.config.termMs / 1000)}s after observing "${deps.config.marker}"`)
-		termTimer = deps.setTimer(() => {
-			termTimer = null
-			if (state.kind !== "armed") return
-			state = { kind: "term-sent" }
-			deps.log(`summary watchdog firing SIGTERM`)
-			deps.onTerm()
-			killTimer = deps.setTimer(() => {
-				killTimer = null
-				if (state.kind !== "term-sent") return
-				state = { kind: "kill-sent" }
-				deps.log(`summary watchdog firing SIGKILL`)
-				deps.onKill()
-			}, deps.config.killMs)
-		}, deps.config.termMs)
-	}
-
-	return {
-		observeStdout: (chunk: string) => {
-			if (state.kind !== "idle") return
-			const search = tail + chunk
-			if (search.includes(deps.config.marker)) {
-				tail = ""
-				arm()
-				return
-			}
-			tail = tailLimit === 0 ? "" : search.slice(-tailLimit)
-		},
-		cancel: () => {
-			if (termTimer !== null) {
-				deps.clearTimer(termTimer)
-				termTimer = null
-			}
-			if (killTimer !== null) {
-				deps.clearTimer(killTimer)
-				killTimer = null
-			}
-			state = { kind: "cancelled" }
-		},
-		state: () => state,
-	}
-}
 
 export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutcome> {
 	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
@@ -6667,7 +6444,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			})
 			return statusWriteChain
 		}
-		const watchdogConfig = input.watchdog
 		const attemptTimeoutConfig = input.attemptTimeout ?? attemptTimeoutConfigForPreset(options.preset)
 		const child = spawn(runnerPlan.binary, runnerPlan.args, {
 			cwd: input.agentCwd,
@@ -6715,22 +6491,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			if (attemptTimeoutState === "idle") attemptTimeoutState = "cancelled"
 		}
 
-		const emitWatchdogFire = (sig: "SIGTERM" | "SIGKILL"): void => {
-			const ec = input.eventContext
-			if (!ec) return
-			void ec.emit({
-				type: "watchdog.fire",
-				ts: new Date().toISOString(),
-				runId: ec.runId,
-				issueId: ec.issueId,
-				pr: ec.pr,
-				branch: ec.branch,
-				phase: ec.phase,
-				attemptStartedAt: startedAt,
-				signal: sig,
-			})
-		}
-
 		const emitAttemptTimeoutFire = (sig: "SIGTERM" | "SIGKILL"): void => {
 			const ec = input.eventContext
 			if (!ec) return
@@ -6748,15 +6508,10 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			})
 		}
 
-		let watchdog: SummaryWatchdog
 		const armAttemptTimeout = (): void => {
 			attemptTermTimer = setTimeout(() => {
 				attemptTermTimer = null
 				if (settled || attemptTimeoutState !== "idle") return
-				if (watchdog.state().kind !== "idle") {
-					attemptTimeoutState = "cancelled"
-					return
-				}
 				attemptTimeoutState = "term-sent"
 				log(`Agent [${label}] absolute attempt timeout after ${attemptTimeoutConfig.attemptSeconds}s before summary; sending SIGTERM (pid=${child.pid ?? "?"})`)
 				emitAttemptTimeoutFire("SIGTERM")
@@ -6772,29 +6527,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			}, attemptTimeoutConfig.termMs)
 		}
 
-		watchdog = watchdogConfig === null
-			? createDisabledSummaryWatchdog()
-			: createSummaryWatchdog({
-					config: watchdogConfig,
-					setTimer: (cb, ms) => setTimeout(cb, ms),
-					clearTimer: (handle) => {
-						if (handle !== null) clearTimeout(handle)
-					},
-					onTerm: () => {
-						log(`Agent [${label}] forced-terminate after "${watchdogConfig.marker}" + ${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
-						emitWatchdogFire("SIGTERM")
-						sendSignalToGroup("SIGTERM")
-					},
-					onKill: () => {
-						log(`Agent [${label}] forced-terminate SIGTERM+${Math.round(watchdogConfig.killMs / 1000)}s elapsed; sending SIGKILL (pid=${child.pid ?? "?"})`)
-						emitWatchdogFire("SIGKILL")
-						sendSignalToGroup("SIGKILL")
-					},
-					log,
-				})
-		const watchdogStdout = watchdogConfig === null
-			? { observeStdout: (_chunk: Buffer) => {}, finish: () => {}, error: () => null }
-			: createSummaryWatchdogStdoutObserver(selectedRunner.kind, watchdogConfig.marker, watchdog)
 		armAttemptTimeout()
 
 		const recordChunk = (stream: "stdout" | "stderr", chunk: Buffer): void => {
@@ -6808,11 +6540,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 					streamOutFile.once("drain", () => child.stdout.resume())
 				}
 				status.sessionId = streamedSessionId
-				const watchdogStateBefore = watchdog.state().kind
-				watchdogStdout.observeStdout(chunk)
-				if (watchdogStateBefore === "idle" && watchdog.state().kind !== "idle") {
-					cancelAttemptTimeout()
-				}
 			} else {
 				stderrState.observe(chunk)
 				if (!stderrOutFile.write(chunk)) {
@@ -6893,7 +6620,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		child.on("error", (error) => {
 			if (settled) return
 			settled = true
-			watchdog.cancel()
 			cancelAttemptTimeout()
 			status.error = error.message
 			status.lastEventAt = new Date().toISOString()
@@ -6910,20 +6636,12 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		child.on("close", (code, signal) => {
 			if (settled) return
 			settled = true
-			const watchdogStateAtClose = watchdog.state()
 			const attemptTimeoutStateAtClose = attemptTimeoutState
-			watchdog.cancel()
 			cancelAttemptTimeout()
 			stdoutState.finish()
 			stderrState.finish()
-			watchdogStdout.finish()
 			status.sessionId = streamedSessionId
-			const summaryFrameError = watchdogStdout.error()
-			if (summaryFrameError !== null) {
-				status.error = summaryFrameError.message
-				log(`Agent [${label}] summary frame error: ${summaryFrameError.message}`)
-			}
-			const exitCode = summaryFrameError === null ? code ?? 1 : 1
+			const exitCode = code ?? 1
 			const signalName = signal ?? null
 			const terminated: Terminated =
 				attemptTimeoutStateAtClose === "term-sent" || attemptTimeoutStateAtClose === "kill-sent"
@@ -6932,14 +6650,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 							phase: attemptTimeoutStateAtClose === "kill-sent" ? "kill" : "term",
 							attemptSeconds: attemptTimeoutConfig.attemptSeconds,
 						}
-					: watchdogConfig !== null && (watchdogStateAtClose.kind === "term-sent" || watchdogStateAtClose.kind === "kill-sent")
-					? {
-							kind: "watchdog",
-							phase: watchdogStateAtClose.kind === "kill-sent" ? "kill" : "term",
-							afterSummarySeconds: Math.round(watchdogConfig.termMs / 1000),
-						}
-					: summaryFrameError !== null
-						? { kind: "error", code: "invalid_summary_runner_event" }
 					: signalName !== null
 						? { kind: "signal", name: signalName }
 						: exitCode === 0
@@ -6954,9 +6664,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 					? `(${terminated.code})`
 					: terminated.kind === "signal"
 						? `(${terminated.name})`
-						: terminated.kind === "watchdog"
-							? `(forced-terminate after declared phase summary marker + ${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
-							: terminated.kind === "timeout"
+						: terminated.kind === "timeout"
 								? `(absolute attempt timeout after ${terminated.attemptSeconds}s, phase=${terminated.phase})`
 							: ""
 			void (async () => {
@@ -7478,8 +7186,6 @@ export function decideResume(entry: SessionEntry | null): ResumeDecision {
 			return { kind: "resume", sessionId: entry.sessionId }
 		case "error":
 			return isTransient5xx(entry.terminated.code) ? { kind: "resume", sessionId: entry.sessionId } : { kind: "fresh" }
-		case "watchdog":
-			return { kind: "fresh" }
 		case "timeout":
 			return { kind: "fresh" }
 	}
@@ -7546,10 +7252,6 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 	while (true) {
 		attempts++
 		const outcome = await deps.spawnAttempt({ resume })
-		if (outcome.terminated.kind === "watchdog") {
-			deps.log(`post-summary watchdog terminated attempt (phase=${outcome.terminated.phase}); treating as success because the phase printed its mandatory summary`)
-			return { output: outcome.output, stdoutBytes: outcome.stdoutBytes, code: 0, attempts }
-		}
 		if (outcome.terminated.kind === "error" && isTransient5xx(outcome.terminated.code)) {
 			if (outcome.sessionId === null) {
 				deps.log(`backoff abort: transient-5xx without sessionId; returning to outer loop`)
@@ -7610,17 +7312,6 @@ function checkChainItemPath(
 	}
 }
 
-function resolveRuntimePath(options: LoopOptions, path: string, label: string, root: string, errors: RuntimeCheckError[]): string | null {
-	if (path.trim() === "") {
-		pushCheckError(errors, label, "must not be empty")
-		return null
-	}
-	const resolved = resolveFrom(options.targetCwd, path)
-	checkInside(options.targetCwd, resolved, label, errors)
-	checkInside(root, resolved, label, errors)
-	return resolved
-}
-
 function checkInside(root: string, path: string, label: string, errors: RuntimeCheckError[]): void {
 	if (!isWithin(root, path)) pushCheckError(errors, label, `must resolve inside ${root}: ${path}`)
 }
@@ -7654,10 +7345,6 @@ function pushCheckError(errors: RuntimeCheckError[], path: string, message: stri
 	errors.push({ path, message })
 }
 
-function isIsoDateTime(value: string): boolean {
-	return !Number.isNaN(Date.parse(value))
-}
-
 function makeRunId(id: string | null): string {
 	const timestamp = new Date().toISOString().slice(0, 23).replace(/[T:.]/g, "-")
 	return id === null ? `run-${timestamp}-no-issue` : `run-${timestamp}-issue-${id}`
@@ -7668,18 +7355,10 @@ async function sleep(ms: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function exists(path: string): Promise<boolean> {
-	return Bun.file(path).exists()
-}
-
 function log(message: string): void {
 	const line = `[${new Date().toISOString()}] ${message}`
 	console.error(line)
 	logStream?.write(line + "\n")
-}
-
-function formatMaxIterations(value: number): string {
-	return value === Number.POSITIVE_INFINITY ? "Infinity" : String(value)
 }
 
 type ArkAssertable<T> = {

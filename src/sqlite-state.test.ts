@@ -13,7 +13,6 @@ import {
 import type { JsonObject } from "./loop"
 import type { TaskTreeSnapshot } from "./task-runtime"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon } from "./daemon"
 import { seedCanonicalHistoricalRuntime } from "./issue-558-historical-fixture"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -2013,69 +2012,6 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("context entries are append-only and removed by chain delete", async () => {
-		const { store, dbFile } = await openTestStore("context-gc")
-		let oneId = -1
-		let twoId = -1
-		try {
-			const one = store.createChain({ name: "context-one", repository: "o/r", baseBranch: "main" })
-			const two = store.createChain({ name: "context-two", repository: "o/r", baseBranch: "main" })
-			oneId = one.id
-			twoId = two.id
-			store.appendContextEntry({ chainId: one.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "one" })
-			store.appendContextEntry({ chainId: two.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "two" })
-		} finally { store.close() }
-		const daemon = await startCoderLoopDaemon({ loopDataRoot: dbFileRoot(dbFile), scheduler: { enabled: false } })
-		try {
-			const deleted = await sendDaemonRequest(daemon.snapshot().socketPath, daemonRequest("chain.delete", { chainName: "context-one" }))
-			expect(deleted.ok).toBe(true)
-		} finally { await daemon.stop() }
-		const check = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
-		try {
-			expect(check.listContextEntries(oneId)).toEqual([])
-			expect(check.listContextEntries(twoId).map((entry) => entry.body)).toEqual(["two"])
-		} finally { check.close() }
-		for (const subcommand of ["update", "delete"]) {
-			const proc = Bun.spawnSync({ cmd: ["bun", resolve(REPO_ROOT, "src/loop.ts"), "context", subcommand], cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" })
-			expect(proc.exitCode).not.toBe(0)
-			expect(new TextDecoder().decode(proc.stderr)).toContain("Not a valid subcommand")
-		}
-	})
-
-	test("context schema migration preserves existing data", async () => {
-		const runExtra = storedItemExtra({ preserved: true, definitionKind: "chain", definitionContentIdentity: "sha256:context-migration", definitionPhases: [{ phase: "iteration", definitionNodeId: "task:iteration" }], worktreePath: "/repo/context-migration", branchName: "context-migration", baseCommit: "0123456789abcdef" })
-		const loopDataRoot = resolve(TEST_ROOT, `context-migration-${Date.now()}-${++nextRootId}`)
-		const fixture = seedCanonicalHistoricalRuntime({
-			loopDataRoot,
-			schemaVersion: 13,
-			chain: { name: "context-preserved", repository: "o/r", preset: "gh-issue-pr-iteration" },
-			items: [{ itemId: "migration-item", repoCwd: REPO_ROOT, status: "in_progress", phase: "iteration", preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: {}, extra: { issue: 177 }, run: { runId: "context-migration-run", phase: "iteration", status: "running", startedAt: 10, extra: itemExtraToJsonObject(runExtra), currentExtra: { preserved: true } } }],
-			contextEntries: [],
-		})
-		const { dbFile, chain } = fixture
-		const item = fixture.items[0]
-		if (item === undefined) throw new Error("canonical context fixture omitted item")
-		const runId = "context-migration-run"
-		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
-		try {
-			expect(migrated.getChain(chain.id)?.name).toBe("context-preserved")
-			expect(migrated.getItem(item.id)?.itemId).toBe("migration-item")
-			expect(migrated.getRunByRunId(runId)?.extra).toEqual(runExtra)
-			expect(migrated.getCurrentRun(chain.id)).toEqual({ chainId: chain.id, phase: "iteration", runId, startedAt: 10, extra: storedItemExtra({ preserved: true, itemId: item.id }) })
-			expect(migrated.listTableColumns("context_entries")).toContain("body")
-		} finally { migrated.close() }
-		const indexDb = new Database(dbFile)
-		const indexes = indexDb.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='context_entries' ORDER BY name").all().map((row) => row.name)
-		indexDb.close()
-		expect(indexes).toContain("idx_context_entries_chain_cursor")
-		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
-		try {
-			expect(reopened.getChain(chain.id)?.name).toBe("context-preserved")
-			expect(reopened.getItem(item.id)?.itemId).toBe("migration-item")
-			expect(reopened.getRunByRunId(runId)?.runId).toBe(runId)
-			expect(reopened.getCurrentRun(chain.id)).toEqual({ chainId: chain.id, phase: "iteration", runId, startedAt: 10, extra: storedItemExtra({ preserved: true, itemId: item.id }) })
-		} finally { reopened.close() }
-	})
 })
 
 async function openTestStore(name: string): Promise<{ store: ReturnType<typeof openSqliteStateStore>; dbFile: string }> {

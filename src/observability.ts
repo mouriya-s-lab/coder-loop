@@ -61,8 +61,7 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	// #452: recycle-zone lifecycle. `pending_entered` arms on a successful agent state
 	// write; `timeout_kill` fires when the window elapsed without natural exit and the
 	// engine SIGKILLed the process group; `natural_exit` records that the child closed
-	// during the recycle window without timeout. Replaces the retired stdout-summary
-	// watchdog (`watchdog.armed` / `watchdog.fire`).
+	// during the recycle window without timeout.
 	arkType.unit("recycle.pending_entered"),
 	arkType.unit("recycle.timeout_kill"),
 	arkType.unit("recycle.natural_exit"),
@@ -494,7 +493,7 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 		// #452 recycle-zone fire: SIGKILL-only because the agent has already declared
 		// completion via its state write; SIGTERM-first would only delay the inevitable
 		// for an already-acknowledged-done process. Carries the same excerpt shape as
-		// `attempt.timeout` / `watchdog.fire` did, so existing log consumers stay aligned.
+		// `attempt.timeout`, so log consumers can render both termination paths uniformly.
 		...EventBaseBoundary,
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("recycle.timeout_kill"),

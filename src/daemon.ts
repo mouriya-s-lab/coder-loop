@@ -100,7 +100,6 @@ import {
 	type ItemExtra,
 } from "./runtime-data"
 import {
-	LOOP_RUN_CREDENTIAL_ENV,
 	type LoopDataRootOptions,
 	RuntimePathError,
 	resolveChainRuntimePaths,
@@ -2262,12 +2261,6 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async recordObservabilityEventForChainId(chainId: number, build: (chain: ChainRecord) => ObservabilityEvent): Promise<void> {
-		const chain = this.requireStore().getChain(chainId)
-		if (chain === null) return
-		await this.recordObservabilityEventIfChainNameIsValid(chain, build(chain))
-	}
-
 	private async recordObservabilityEventIfChainNameIsValid(chain: ChainRecord, event: ObservabilityEvent): Promise<void> {
 		if (chain.status === "deleted") return
 		try {
@@ -3680,9 +3673,8 @@ export class CoderLoopDaemon {
 		if (scheduler.startupIdleTimeoutMs !== undefined) options.startupIdleTimeoutMs = scheduler.startupIdleTimeoutMs
 		if (scheduler.startupIdleProgressBytes !== undefined) options.startupIdleProgressBytes = scheduler.startupIdleProgressBytes
 		if (scheduler.startupIdleKillMs !== undefined) options.startupIdleKillMs = scheduler.startupIdleKillMs
-		// #452: the retired `watchdogGraceMs`/`watchdogKillMs` knobs configured the
-		// stdout-summary watchdog. Their replacement is the recycle-zone window that
-		// arms only after the daemon observes a successful agent state write.
+		// #452: the recycle-zone window arms only after the daemon observes a
+		// successful agent state write.
 		if (scheduler.recycleAfterStateWriteMs !== undefined) options.recycleAfterStateWriteMs = scheduler.recycleAfterStateWriteMs
 		if (scheduler.recycleKillGraceMs !== undefined) options.recycleKillGraceMs = scheduler.recycleKillGraceMs
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
@@ -4307,21 +4299,6 @@ export class CoderLoopDaemon {
 		return new Set([...preset.statuses.continuable, ...preset.statuses.terminal])
 	}
 
-	private async continuableItemStatuses(chain: ChainRecord): Promise<Set<InternalStatus>> {
-		const { preset } = await this.loadedPresetForChain(chain, "chain.continuable-statuses")
-		return new Set(preset.statuses.continuable)
-	}
-
-	private async terminalItemStatuses(chain: ChainRecord): Promise<Set<InternalStatus>> {
-		const { preset } = await this.loadedPresetForChain(chain, "chain.terminal-statuses")
-		return new Set(preset.statuses.terminal)
-	}
-
-	private async unblockItemStatuses(chain: ChainRecord): Promise<{ success: readonly InternalStatus[]; entry: InternalStatus }> {
-		const { preset } = await this.loadedPresetForChain(chain, "chain.unblock-statuses")
-		return { success: preset.statuses.success, entry: preset.statuses.entry }
-	}
-
 	private async resolveLoadedPresetPhasePrompt(ctx: SchedulerSpawnContext): Promise<string> {
 		const { preset, presetDir } = ctx.loadedPreset
 		const presetPhase = preset.phases.find((entry) => entry.name === ctx.phase)
@@ -4710,12 +4687,6 @@ function validateItemPriorityForRequest(value: string | null | undefined): strin
 	return value
 }
 
-function validateItemBranchForRequest(value: string | null | undefined): string | null | undefined {
-	if (value === undefined || value === null) return value
-	validateGitBranchNameForRequest(value, "branch")
-	return value
-}
-
 // #419: shape validation for the wire-level opaque item id. Rejects empty / whitespace-bearing
 // values. Identity uniqueness is enforced by the SQLite `UNIQUE (chain_id, item_id)` constraint
 // (translated by `translateCreateItemFailure` into a `duplicate_item` DaemonError surface).
@@ -4740,14 +4711,6 @@ function validateGitBranchNameForRequest(input: string, field: string): string {
 		throw new DaemonError("invalid_request", `${field} must be a valid git branch name`, { [field]: input })
 	}
 	return input
-}
-
-function validateItemPrForRequest(value: number | null | undefined): number | null | undefined {
-	if (value === undefined || value === null) return value
-	if (value < 1) {
-		throw new DaemonError("invalid_request", "pr must be a positive integer or null", { pr: value })
-	}
-	return value
 }
 
 function validateRelativeItemPathForRequest(value: string | null | undefined, field: "issueFile" | "evidenceDir"): string | null | undefined {
@@ -4977,12 +4940,6 @@ function requiredInteger(record: UnknownRecord, key: string): number {
 	return value
 }
 
-function requiredPositiveInteger(record: UnknownRecord, key: string): number {
-	const value = requiredInteger(record, key)
-	if (value < 1) throw new DaemonError("invalid_request", `${key} must be a positive integer`)
-	return value
-}
-
 function optionalInteger(record: UnknownRecord, key: string): number | null {
 	const value = record[key]
 	if (value === undefined) return null
@@ -4992,14 +4949,6 @@ function optionalInteger(record: UnknownRecord, key: string): number | null {
 
 function optionalPositiveInteger(value: unknown): number | null {
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null
-}
-
-function optionalIntegerOrNull(record: UnknownRecord, key: string): number | null | undefined {
-	const value = record[key]
-	if (value === undefined) return undefined
-	if (value === null) return null
-	if (typeof value !== "number" || !Number.isInteger(value)) throw new DaemonError("invalid_request", `${key} must be an integer or null when provided`)
-	return value
 }
 
 function requiredBoolean(record: UnknownRecord, key: string): boolean {
@@ -5415,10 +5364,6 @@ async function validateItemPresetPathForRequest(input: string): Promise<string> 
 
 function bundledPresetDir(presetName: string): string {
 	return resolve(BUNDLED_PRESETS_DIR, presetName)
-}
-
-async function loadSchedulerPresetFromDir(presetDir: string, options: LoadPresetOptions = {}): Promise<SchedulerLoadedPreset> {
-	return { presetDir, preset: await loadPreset(presetDir, options) }
 }
 
 // #530: daemon-side entrypoint that always materializes the preset into

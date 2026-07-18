@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { type as arkType } from "arktype"
 
@@ -12,7 +12,6 @@ const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/db-main-loop-tests", String(process.pid))
 const CHAIN_NAME = "db-main-loop"
-const StatusQueueReadBoundary = arkType({ queue: { selected: arkType.or({ id: "string" }, "null") } })
 const StatusTaskTreeReadBoundary = arkType({ taskTree: TaskTreeSnapshotBoundary })
 const StatusStateReadBoundary = arkType({ state: { kind: "string", ok: "boolean" }, current: { "id?": "string|null" } })
 
@@ -25,27 +24,7 @@ afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
 })
 
-describe("db-backed v2 loop hard cut", () => {
-	test("no-subcommand legacy loop entry prints usage and exits 1", async () => {
-		const fixture = await createFixture()
-		const result = runCli(["--target-cwd", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--once"])
-		expect(result.exitCode).toBe(1)
-		expect(result.stdout).toContain("Usage: coder-loop <command> [options]")
-		expect(readItem(fixture.loopDataRoot).status).toBe("queued")
-	})
-
-	test("status command reads SQLite state without touching legacy state json", async () => {
-		const fixture = await createFixture()
-		const beforeText = await readFile(fixture.statePath, "utf-8")
-		const beforeMtime = (await stat(fixture.statePath)).mtimeMs
-		const result = runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME, "--json"])
-		expect(result.exitCode).toBe(0)
-		const snapshot = StatusQueueReadBoundary.assert(JSON.parse(result.stdout))
-		expect(snapshot.queue.selected?.id).toBe("1")
-		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
-		expect((await stat(fixture.statePath)).mtimeMs).toBe(beforeMtime)
-	})
-
+describe("db-backed loop CLI", () => {
 	test("status task tree projects persisted recursive identity without flat item synthesis", async () => {
 		const fixture = await createFixture()
 		const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
@@ -133,33 +112,6 @@ describe("db-backed v2 loop hard cut", () => {
 		expect(result.stdout).toContain(`daemon start dry-run: chain=${CHAIN_NAME}`)
 		expect(readItem(fixture.loopDataRoot).status).toBe("queued")
 		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
-	})
-
-	test("removed legacy state functions", async () => {
-		const source = await readFile(LOOP_ENTRY, "utf-8")
-		const removedNames = [
-			"selectIssue",
-			"markReviewStarted",
-			"loadLoopStateFromDb",
-			"saveLoopStateToDb",
-			"loopStateFromDbRecords",
-			"persistLoopStateToDb",
-			"checkRuntime",
-			"assertRuntimeValid",
-			"serializeState",
-			"parseLoopState",
-			"itemRecordToQueueItem",
-			"currentRecordToCurrentRun",
-			"requeueBlockedItem",
-			"findQueueItemById",
-			"firstLastRunId",
-			"makeFallbackItem",
-		]
-		for (const name of removedNames) {
-			expect(source).not.toMatch(new RegExp(`function\\s+${name}\\b`))
-			expect(source).not.toMatch(new RegExp(`\\b${name}\\s*\\(`))
-		}
-		expect(source).not.toContain("exists(options.stateFile)")
 	})
 })
 

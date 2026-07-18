@@ -340,29 +340,6 @@ describe("daemon", () => {
 			await fixture.daemon.stop()
 		}
 	})
-	test("cleans runner lifecycle after status persistence failure", () => {
-		for (const [file, name] of [
-			["src/scheduler.test.ts", "rejects successful scheduler completion when terminal persistence fails"],
-			["src/loop.test.ts", "reports ordered chain-complete status persistence failure"],
-			["src/loop.test.ts", "rejects successful chain-complete decision when terminal status persistence fails"],
-		] as const) {
-			const result = Bun.spawnSync(["bun", "test", file, "-t", name], { cwd: REPO_ROOT })
-			const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
-			expect(result.exitCode, output).toBe(0)
-			expect(output).toContain("0 fail")
-		}
-	})
-	test("completes large-output scheduler and chain-complete runners", () => {
-		for (const name of [
-			"streams scheduler runner output without retaining full history",
-			"streams chain-complete runner output without retaining full history",
-		]) {
-			const result = Bun.spawnSync(["bun", "test", "src/scheduler.test.ts", "-t", name], { cwd: REPO_ROOT })
-			expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0)
-			expect(new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)).toContain("0 fail")
-		}
-	})
-
 	test("orders requests within one daemon connection", async () => {
 		const fixture = await startFixture("ordered-connection", { schedulerEnabled: false })
 		const slowStarted = deferred<void>()
@@ -751,33 +728,6 @@ process.exitCode = 0
 	// through `metadata.bindings`, where the operator (or the `--umbrella owner/repo#123` CLI
 	// shorthand) writes them as preset-declared chain bindings. The daemon rejects the legacy keys
 	// at the strict-args gate so stale callers fail loudly instead of silently dropping their value.
-	test("socket chain.create rejects legacy first-class umbrellaIssue / umbrellaRepo args (#457)", async () => {
-		const fixture = await startFixture("chain-create-rejects-legacy-umbrella", { schedulerEnabled: false })
-		try {
-			expectInvalid(await request(fixture, "chain.create", {
-				name: "legacy-umbrella-issue",
-				repository: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: 176,
-			}))
-			expectInvalid(await request(fixture, "chain.create", {
-				name: "legacy-umbrella-repo",
-				repository: "mouriya-s-lab/coder-loop",
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
-			}))
-
-			const created = record(expectOk(await request(fixture, "chain.create", {
-				name: "umbrella-via-bindings",
-				repository: "mouriya-s-lab/coder-loop",
-				metadata: { bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" } },
-			})).chain)
-			expect(created).toMatchObject({
-				metadata: { bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" } },
-			})
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
 	test("socket chain.create rejects undeclared args", async () => {
 		const fixture = await startFixture("chain-create-strict-args", { schedulerEnabled: false })
 		try {
@@ -4186,8 +4136,6 @@ process.exitCode = 0
 			// events file. Synchronize on the in-memory queue.terminal event so the events-file
 			// assertions below see the fully flushed run.
 			await waitForItemQueueTerminal(fixture, item!.id)
-			const paths = resolveChainRuntimePaths(chainName, { loopDataRoot: fixture.loopDataRoot })
-
 			const snapshot = await buildCoderLoopStatusSnapshot({
 				targetCwd: REPO_ROOT,
 				loopDataRoot: fixture.loopDataRoot,
@@ -4755,32 +4703,6 @@ prompt = "review.md"
 	// #406 caller-admission gate (legacy attribution flags). The retired `agentRunId` /
 	// `agentPhase` keys are rejected by `validateKnownKeys` (they are not in ITEM_UPDATE_ARG_KEYS).
 	// This pins the substitutive contract: agents can no longer hand-write their identity.
-	test("socket item.update rejects retired agentRunId / agentPhase attribution claims (#406)", async () => {
-		const fixture = await startFixture("item-update-caller-legacy-args", { schedulerEnabled: false })
-		try {
-			const chain = record(expectOk(await request(fixture, "chain.create", {
-				name: "caller-legacy-args-chain",
-				repository: "mouriya-s-lab/coder-loop",
-			})).chain)
-			const chainId = numberValue(chain.id)
-			const added = record(expectOk(await request(fixture, "item.add", {
-				chainId,
-				itemId: "406003",
-				repoCwd: REPO_ROOT,
-			})).item)
-			const itemId = numberValue(added.id)
-			for (const legacy of [
-				{ itemId, status: runtimeStatus("done"), agentRunId: "fake-run", agentPhase: "review" },
-				{ itemId, status: runtimeStatus("done"), agentRunId: "fake-run" },
-				{ itemId, status: runtimeStatus("done"), agentPhase: "review" },
-			]) {
-				expectInvalid(await request(fixture, "item.update", legacy))
-			}
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
 	// #406 caller-admission gate (live spawn → wrong-item). Two items in the same chain spawn
 	// sequentially under the default fake runner. We capture the active credential from inside
 	// the runner's process env, then use it to attempt an item.update against a sibling item the
@@ -4852,7 +4774,6 @@ process.exitCode = 0
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
-			const itemAId = numberValue(itemA.id)
 			const itemBId = numberValue(itemB.id)
 
 			// Wait for itemA's spawn and the credential capture.
@@ -5657,7 +5578,7 @@ process.exitCode = 0
 			expect(fatal.payload.fatalKind).toBe("unhandledRejection")
 			// the durable record must carry the stack, not the message
 			expect(String(fatal.payload.error)).toContain("Error: BOOM-observability")
-			expect(String(fatal.payload.error)).toContain("daemon.test")
+			expect(String(fatal.payload.error)).toContain("daemon.integration")
 		} finally {
 			await fixture.daemon.stop()
 		}

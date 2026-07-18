@@ -14,8 +14,6 @@ import {
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
 	phaseDeclaredRuntimeBindingPaths,
-	createSummaryWatchdog,
-	createSummaryWatchdogStdoutObserver,
 	decideResume,
 	detectHostRunner,
 	extractErrorCode,
@@ -33,7 +31,6 @@ import {
 	resolveBinding,
 	selectRunnerForPhase,
 	spawnOneAttempt,
-	summaryWatchdogConfigForPhase,
 	validatePresetPhaseTemplate,
 	type RenderBindings,
 	type IssueRunContext,
@@ -365,7 +362,7 @@ describe("runtime binding helpers", () => {
 		expect(documentedEngineRuntimeBindingKeys(presetAuthoring)).toEqual([...ENGINE_RUNTIME_BINDING_KEYS])
 	})
 
-	test("reserved string registry includes engine-parsed summary enums (verdict words retired per #405)", async () => {
+	test("reserved string registry includes engine-parsed summary enums", async () => {
 		const registry = await readFile(resolve(REPO_ROOT, "docs/reserved-strings.md"), "utf8")
 
 		// FINALIZER SUMMARY / decision=* survive — they feed `parseFinalizerSummaryDecisionFromText`
@@ -683,7 +680,7 @@ describe("runner and daemon helpers", () => {
 		expect(stripRoleEntryFrontmatter("---\r\ndefaultRunner: claude\r\n---\r\n# role")).toBe("# role")
 	})
 
-	test("buildDaemonStartPlan starts the central daemon without legacy loop flags", async () => {
+	test("buildDaemonStartPlan emits the central daemon command", async () => {
 		await mkdir(TEST_ROOT, { recursive: true })
 		const plan = buildDaemonStartPlan({
 			action: "start",
@@ -705,22 +702,6 @@ describe("runner and daemon helpers", () => {
 		const daemonStdoutPath = relative(TEST_ROOT, plan.stdoutPath)
 		expect(daemonStdoutPath.split("/")).not.toContain("chains")
 		expect(daemonStdoutPath.includes("runtime/logs")).toBe(false)
-	})
-
-	test("daemon rejects retired max-iterations option", () => {
-		const retiredOption = ["--max", "iterations"].join("-")
-		for (const action of ["start", "restart"]) {
-			const proc = Bun.spawnSync({
-				cmd: ["bun", resolve(import.meta.dir, "loop.ts"), "daemon", action, REPO_ROOT, retiredOption, "1"],
-				cwd: REPO_ROOT,
-				stdout: "pipe",
-				stderr: "pipe",
-			})
-			const stderr = new TextDecoder().decode(proc.stderr)
-			expect(proc.exitCode).toBe(1)
-			expect(stderr).toContain("Unknown arguments")
-			expect(stderr).not.toContain("SQLite state DB")
-		}
 	})
 
 	test("agentCodexArgs and session path helpers keep runner plumbing stable", () => {
@@ -1076,7 +1057,7 @@ describe("small parsers", () => {
 				const outcome = await spawnOneAttempt({
 					options, label: "phase", prompt: "projection-prompt", outputPath,
 					sessionsPath: agentSessionsPath(outputPath), resume, agentCwd: root,
-					runner: { kind, source: "preset", binary: runner, extraArgs: [], model: null }, watchdog: null,
+					runner: { kind, source: "preset", binary: runner, extraArgs: [], model: null },
 					authorizationPaths: { currentIssueFile, evidenceDir },
 					authorizationPhase: {
 						variables: [
@@ -1138,7 +1119,6 @@ describe("small parsers", () => {
 			resume: { kind: "fresh" },
 			agentCwd: root,
 			runner: { kind: "claude", source: "preset", binary: runner, extraArgs: [], model: null },
-			watchdog: null,
 			statusWriter: async (path, payload) => {
 				writes += 1
 				if (writes === 2) {
@@ -1172,7 +1152,6 @@ describe("small parsers", () => {
 			resume: { kind: "fresh" },
 			agentCwd: root,
 			runner: { kind: "claude", source: "preset", binary: runner, extraArgs: [], model: null },
-			watchdog: null,
 			statusWriter: async (path, payload) => {
 				writes += 1
 				if (writes === 3) {
@@ -1196,7 +1175,7 @@ describe("small parsers", () => {
 		expect(observed.sessionId).toBe("thread-streamed")
 	})
 
-	test("streams chain-complete runner output without retaining full history", () => {
+	test("stream text state retains finalizer summary without retaining full history", () => {
 		const observed: { finalizerSummary: string | null } = { finalizerSummary: null }
 		const state = createStreamTextState((line) => {
 			if (line.startsWith("FINALIZER SUMMARY:")) observed.finalizerSummary = line
@@ -1221,7 +1200,7 @@ describe("small parsers", () => {
 		expect(normalizeQueueIssueId("mouriya-s-lab/coder-loop#333")).toBe("333")
 	})
 
-	test("runner stream parsers extract sessions (verdict parser retired per #405)", () => {
+	test("runner stream parsers extract sessions", () => {
 		expect(parseSessionIdFromRunnerStream("claude", "{\"type\":\"system\",\"session_id\":\"sess-1\"}\n")).toBe("sess-1")
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
 	})
@@ -1254,121 +1233,6 @@ describe("small parsers", () => {
 		expect(isTransient5xx("unclassified")).toBe(false)
 	})
 
-	// #456: `summaryWatchdogConfigForPhase` is preserved as a typed hook for #452's pending
-	// summary-injection redesign, but the role-shaped marker field on `PresetPhase` was retired
-	// together with the rest of the role taxonomy. The function now reports "no marker
-	// configured" for every phase regardless of its name or declaration. The test pins that
-	// terminal behavior so #452 can lift it intentionally rather than accidentally.
-	test("summary watchdog config returns null for every phase until #452 lands a DSL-declared injection point", () => {
-		const preset = makePreset()
-		for (const phase of preset.phases) {
-			expect(summaryWatchdogConfigForPhase(phase)).toBeNull()
-		}
-	})
-
-	test("summary watchdog observes only the declared phase marker", () => {
-		const timers: Array<() => void> = []
-		let termCalls = 0
-		let killCalls = 0
-		const watchdog = createSummaryWatchdog({
-			config: { marker: "PHASE DONE:", termMs: 1, killMs: 1 },
-			setTimer: (cb) => {
-				timers.push(cb)
-				return null
-			},
-			clearTimer: () => {},
-			onTerm: () => { termCalls++ },
-			onKill: () => { killCalls++ },
-			log: () => {},
-		})
-
-		watchdog.observeStdout("other summary marker\n")
-		expect(watchdog.state()).toEqual({ kind: "idle" })
-		expect(timers.length).toBe(0)
-
-		watchdog.observeStdout("PHASE DONE: ok\n")
-		expect(watchdog.state()).toEqual({ kind: "armed" })
-		expect(timers.length).toBe(1)
-		timers[0]!()
-		expect(watchdog.state()).toEqual({ kind: "term-sent" })
-		expect(termCalls).toBe(1)
-		expect(timers.length).toBe(2)
-		timers[1]!()
-		expect(watchdog.state()).toEqual({ kind: "kill-sent" })
-		expect(killCalls).toBe(1)
-	})
-
-	test("detects chain-complete summary in a large valid runner event", () => {
-		const watchdog = createSummaryWatchdog({
-			config: { marker: "FINALIZER SUMMARY:", termMs: 1, killMs: 1 },
-			setTimer: () => null,
-			clearTimer: () => {},
-			onTerm: () => {},
-			onKill: () => {},
-			log: () => {},
-		})
-		const observer = createSummaryWatchdogStdoutObserver("codex", "FINALIZER SUMMARY:", watchdog)
-		const event = `${JSON.stringify({
-			type: "item.completed",
-			item: { type: "agent_message", text: `${"x".repeat(1_000_001)}\nFINALIZER SUMMARY: decision=complete; reason=large-event` },
-		})}\n`
-		observer.observeStdout(Buffer.from(event))
-		observer.finish()
-
-		expect(observer.error()).toBeNull()
-		expect(watchdog.state()).toEqual({ kind: "armed" })
-	})
-
-	test("preserves chain-complete summary verdict across event chunking", () => {
-		const event = Buffer.from(`${JSON.stringify({
-			type: "item.completed",
-			item: { type: "agent_message", text: `${"界".repeat(400_000)}\nFINALIZER SUMMARY: decision=keep-active; reason=chunk-invariant` },
-		})}\n`)
-		const observe = (chunkSizes: readonly number[]) => {
-			const watchdog = createSummaryWatchdog({
-				config: { marker: "FINALIZER SUMMARY:", termMs: 1, killMs: 1 },
-				setTimer: () => null,
-				clearTimer: () => {},
-				onTerm: () => {},
-				onKill: () => {},
-				log: () => {},
-			})
-			const observer = createSummaryWatchdogStdoutObserver("codex", "FINALIZER SUMMARY:", watchdog)
-			let offset = 0
-			for (const size of chunkSizes) {
-				observer.observeStdout(event.subarray(offset, offset + size))
-				offset += size
-			}
-			if (offset < event.byteLength) observer.observeStdout(event.subarray(offset))
-			observer.finish()
-			return { state: watchdog.state(), error: observer.error() }
-		}
-
-		expect(observe([event.byteLength])).toEqual(observe([1, 2, 3, 8191, 65_537]))
-		expect(observe([1, 1, 1, 1, 1, 1, 1])).toEqual({ state: { kind: "armed" }, error: null })
-	})
-
-	test("rejects invalid oversized chain-complete runner event explicitly", () => {
-		const watchdog = createSummaryWatchdog({
-			config: { marker: "FINALIZER SUMMARY:", termMs: 1, killMs: 1 },
-			setTimer: () => null,
-			clearTimer: () => {},
-			onTerm: () => {},
-			onKill: () => {},
-			log: () => {},
-		})
-		const observer = createSummaryWatchdogStdoutObserver("codex", "FINALIZER SUMMARY:", watchdog)
-		observer.observeStdout(Buffer.from(`{"type":"item.completed","padding":"${"x".repeat(1_000_001)}"\n`))
-		observer.finish()
-
-		expect(observer.error()).toMatchObject({
-			kind: "invalid-runner-event",
-			runner: "codex",
-		})
-		expect(observer.error()?.frameChars).toBeGreaterThan(1_000_000)
-		expect(observer.error()?.message).toContain("invalid codex JSONL runner event")
-		expect(watchdog.state()).toEqual({ kind: "idle" })
-	})
 
 	test("decideResume resumes interrupted or transient prior sessions only", () => {
 		expect(decideResume(null)).toEqual({ kind: "fresh" })

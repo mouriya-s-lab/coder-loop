@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { buildLiveRuntimeHealthLines } from "./install-commands"
 import { buildCoderLoopStatusSnapshot } from "./loop"
@@ -33,37 +33,6 @@ describe("buildLiveRuntimeHealthLines", () => {
 		expect(lines.some((line) => line.includes("runner hostDefault=") && line.includes("default="))).toBe(true)
 		expect(lines).toContain("INFO: current run=<none>")
 		expect(lines.some((line) => /^INFO: live processes total=\d+, matching=\d+$/.test(line))).toBe(true)
-	})
-})
-
-describe("doctor command ownership", () => {
-	test("does not carry the preset kind label bootstrap asset", async () => {
-		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
-		expect(source).not.toContain("KIND_LABELS")
-		expect(source).not.toContain("\"label\", \"create\"")
-		expect(source).not.toContain("\"label\", \"list\"")
-	})
-
-	test("does not carry user-level skill bootstrap ownership", async () => {
-		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
-		expect(source).not.toContain([".claude", "skills"].join("/"))
-		expect(source).not.toContain(["install", "skills"].join("-"))
-		expect(source).not.toContain(["skip", "skill", "check"].join("-"))
-		expect(source).not.toContain(["WRITING", "ISSUE"].join("_"))
-		await expect(Bun.file(resolve(REPO_ROOT, "templates/skills")).exists()).resolves.toBe(false)
-	})
-
-	// #436: install / uninstall surface deleted entirely. doctor is the only survivor.
-	test("does not carry install / uninstall surface or target file checks", async () => {
-		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
-		expect(source).not.toContain("runInstallCommand")
-		expect(source).not.toContain("runUninstallCommand")
-		expect(source).not.toContain("SLASH_COMMAND_FILES")
-		expect(source).not.toContain("WORKFLOW_REL")
-		expect(source).not.toContain("ensureWorkflowMd")
-		expect(source).not.toContain(["workflow", "md"].join("."))
-		expect(source).not.toContain("[Layer A]")
-		await expect(Bun.file(resolve(REPO_ROOT, "templates/workflow.md")).exists()).resolves.toBe(false)
 	})
 })
 

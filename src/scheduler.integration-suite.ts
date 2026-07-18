@@ -28,7 +28,6 @@ import {
 } from "./scheduler"
 import { resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import {
-	buildPhaseRunnerSelectionFromChain,
 	buildRunnerFilesystemAuthorization,
 	buildRunnerInvocation,
 	loadPreset,
@@ -42,8 +41,7 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
-import { chainMetadataToJsonObject, engineLifecycleAdmittedItemStatus, itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import type { BoundaryRecord } from "./boundary-types"
+import { chainMetadataToJsonObject, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 
@@ -336,15 +334,6 @@ describe("scheduler", () => {
 			"recycle.pending_entered",
 			"recycle.natural_exit",
 		])
-	})
-	test("legacy scheduler spawn diagnostic shape is rejected", () => {
-		expect(() => storedItemExtra({
-			schedulerSpawnError: {
-				at: 1_900_535_000,
-				phase: "iteration",
-				message: "legacy diagnostic",
-			},
-		})).toThrow(/schedulerSpawnError\.attribution/)
 	})
 
 	test("context body is opaque to scheduling", async () => {
@@ -2826,7 +2815,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 
 			// Dep ends in a non-success terminal status (exhausted) → still no awakening.
 			fixture.store.updateItem(blocker.id, { status: runtimeStatus("exhausted"), updatedAt: 1_800_011_200 })
-			const exhaustedTick = await schedulerTick(fixture.options())
+			await schedulerTick(fixture.options())
 			expect(fixture.store.getItem(dependent.id)?.status).toBe("blocked")
 			expect(fixture.store.getItem(dependent.id)?.extra.dependsOn).toEqual([blocker.id])
 
@@ -3453,9 +3442,6 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		// #433: the legacy `metadata.reviewRunner` top-level field is retired. Parsing chain
 		// metadata that carries it must now fail loudly (no silent-ignore fallback), so the
 		// preset's declared review runner remains the single source of truth for that phase.
-		test("chain metadata reviewRunner='claude' is retired and rejected at parse time (#433)", () => {
-			expect(() => storedChainMetadata({ reviewRunner: "claude" })).toThrow(/reviewRunner is retired \(#433\)/)
-		})
 
 		test("chain metadata codex.model overrides the preset-declared review model", async () => {
 			const chain = makeChainFixture({
@@ -3689,22 +3675,6 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 	// parse time (createChain → parseChainMetadata), so the chain never makes it to the trigger
 	// phase code. This locks in the "no silent-ignore" stance: operators who try the old shape get
 	// a loud error pointing at the new bindings/per-runner channels.
-	test("chain metadata runner='claude' is retired and rejected at chain.create time (#433)", async () => {
-		const fixture = await createFixture("trigger-claude-retired")
-		try {
-			expect(() =>
-				createChain(fixture.store, "trigger-claude-retired-chain", {
-					metadata: {
-						runner: "claude",
-						claude: { binary: "fake-claude" },
-						codex: { binary: "fake-codex" },
-					},
-				}),
-			).toThrow(/runner is retired \(#433\)/)
-		} finally {
-			await stopFixture(fixture)
-		}
-	})
 
 	test("phaseRunner override input wins over chain-derived selection for the triggered phase spawn", async () => {
 		const fixture = await createFixture("trigger-phaseRunner-override")
@@ -3918,7 +3888,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const tick = await schedulerTick({ ...options, phase: "iteration" })
 			await tick.spawnedRuns[0]!.closed
 
-			const refreshed = fixture.store.getItem(item.id)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-captured-001")
 		} finally {
 			await stopFixture(fixture)
@@ -3974,7 +3943,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const tick = await schedulerTick({ ...options, phase: "iteration" })
 			await tick.spawnedRuns[0]!.closed
 
-			const refreshed = fixture.store.getItem(item.id)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-captured-002")
 		} finally {
 			await stopFixture(fixture)
@@ -4027,7 +3995,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			await mkdir(chainPaths.evidenceDir, { recursive: true })
 			const attemptFile = resolve(chainPaths.evidenceDir, "fake-claude-invalid-attempt.txt")
-			await writeFakeClaudeInvalidOnceRunner(fakeRunner, attemptFile, "sess-fresh-312")
+			await writeFakeClaudeInvalidOnceRunner(fakeRunner, "sess-fresh-312")
 			let now = 1_800_312_000
 			let runSequence = 0
 
@@ -4108,11 +4076,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			expect(reviewRunId).toMatch(/-item-42$/)
 		})
 
-		test("omitted phase keeps the legacy run-<ts>-<seq>-item-<id> shape", () => {
-			const runId = makeRunId(7)
-			expect(runId).toMatch(/^run-\d+-\d+-item-7$/)
-		})
-
 		test("phase name with unsafe characters is sanitized into a path-safe segment", () => {
 			const runId = makeRunId(9, "weird phase/name")
 			expect(runId).toContain("weird-phase-name")
@@ -4151,7 +4114,7 @@ process.exitCode = 0
 		)
 	}
 
-async function writeFakeClaudeInvalidOnceRunner(path: string, attemptFile: string, freshSessionId: string): Promise<void> {
+async function writeFakeClaudeInvalidOnceRunner(path: string, freshSessionId: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
 	await writeFile(
 		path,
@@ -4898,20 +4861,6 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void; reject
 		reject = rejectPromise
 	})
 	return { promise, resolve, reject }
-}
-
-function captureConsoleWarn(): { messages: string[]; restore: () => void } {
-	const original = console.warn
-	const messages: string[] = []
-	console.warn = (...args: unknown[]) => {
-		messages.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "))
-	}
-	return {
-		messages,
-		restore: () => {
-			console.warn = original
-		},
-	}
 }
 
 async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {

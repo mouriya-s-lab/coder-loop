@@ -2123,17 +2123,6 @@ function requireRuntimeDefinitionPhase(packet: PersistedExecutionDefinitionPacke
 	if (!packet.definitionPhases.some((entry) => entry.phase === phase)) throw new SqliteStateError("invalid_input", `run ${runId} phase ${phase} conflicts with persisted execution definition`, { runId, phase })
 }
 
-type TaskNodeRow = {
-	runtime_node_id: string
-	chain_id: number
-	parent_node_id: string | null
-	child_index: number
-	kind: "leaf" | "seq" | "par"
-	definition_kind: "preset" | "chain"
-	definition_content_identity: string
-	definition_node_id: string
-}
-
 function insertDefinition(db: Database, definition: ExecutionDefinitionRef): void {
 	db.query<never, SqlParams>("INSERT OR IGNORE INTO execution_definitions (kind, content_identity, semantic_hash, schema_version) VALUES ($kind, $identity, $identity, 1)").run({ kind: definition.kind, identity: definition.contentIdentity })
 }

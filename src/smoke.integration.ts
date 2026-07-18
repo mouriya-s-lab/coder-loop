@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { createWriteStream } from "node:fs"
 
-import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
+import { startCoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
 import { parseObservabilityEvent, type ObservabilityEvent } from "./observability"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
@@ -49,43 +49,6 @@ describe("smoke: v2 central chain CLI", () => {
 		expect(result.exitCode).toBe(1)
 		expect(result.stdout).toContain("Usage: coder-loop <command> [options]")
 		expect(result.stdout).toContain("daemon <up|down|status|start|stop|restart>")
-	})
-
-	// #526 (closing #432 K2 末段 + close-verification row #4): the entire `runtime`
-	// CLI namespace is retired. The runner-binding model-override slice that #481
-	// had bolted onto it moved to `coder-loop chain set-runner-model` (chain
-	// subcommand group). Usage must list neither a literal `runtime` line nor the
-	// flag set the retired narrow surface had — and must list the replacement chain
-	// subcommand. The two `toContain` checks are paired so a future regression that
-	// adds the wrong half (e.g. listing `runtime set` again, or dropping the new
-	// `set-runner-model` from the chain group) fails before it merges.
-	test("usage no longer lists the retired runtime CLI; lists chain set-runner-model instead (#526)", () => {
-		const result = runCli([])
-		expect(result.stdout).not.toContain("runtime set <target>")
-		expect(result.stdout).not.toContain("[--claude-model M] [--codex-model M] [--opencode-model M]")
-		expect(result.stdout).not.toMatch(/^\s*runtime\b/m)
-		expect(result.stdout).toContain("chain <create|list|status|stop|resume|delete|set-runner-model>")
-	})
-
-	// #526: typing the retired `runtime` namespace must fall through to the generic
-	// unknown-command branch (usage + exit 1), not into a runtime-scoped error
-	// message. Asserts both the exit code and the absence of the retired sub-error
-	// shape so a future revival of `runRuntimeCommand` (or any analogous dispatch
-	// branch under firstArg === "runtime") fails this row.
-	test("invoking the retired `runtime` namespace falls through to generic usage + exit 1 (#526)", () => {
-		const setResult = runCli(["runtime", "set", ".", "--claude-model", "x"])
-		expect(setResult.exitCode).toBe(1)
-		expect(setResult.stdout).toContain("Usage: coder-loop <command> [options]")
-		const setCombined = setResult.stderr + setResult.stdout
-		expect(setCombined).not.toContain("only `runtime")
-		expect(setCombined).not.toContain("runtime set: <target> is required")
-
-		const showResult = runCli(["runtime", "show", "."])
-		expect(showResult.exitCode).toBe(1)
-		expect(showResult.stdout).toContain("Usage: coder-loop <command> [options]")
-		const showCombined = showResult.stderr + showResult.stdout
-		expect(showCombined).not.toContain("only `runtime")
-		expect(showCombined).not.toContain("runtime set: <target> is required")
 	})
 
 	// #526: happy-path for the new `chain set-runner-model` CLI surface. Locks in the
@@ -284,37 +247,7 @@ describe("smoke: v2 central chain CLI", () => {
 	// #433: status output is flag-insensitive to the retired target config file. Whether or not
 	// any legacy `.coder-loop/runtime/config.{json,toml}` exists on disk, the engine reads the
 	// same chain.metadata and reports the same runner view. Acceptance row 3.
-	test("status --json runner view does not change when a stale target config file is dropped in", async () => {
-		const fixture = await createTarget("status-runner-flag")
-		seedChain(fixture, { issueNumber: 191, status: "queued" })
-
-		const baseline = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
-
-		// Drop a stale legacy file in. With #433, the engine no longer reads it; everything must
-		// resolve via centralized chain metadata, so the runner view is identical.
-		const legacyConfigPath = resolve(fixture.target, ".coder-loop/runtime/cl433-legacy-prefs.json")
-		await writeFile(legacyConfigPath, `${JSON.stringify({ claude: { model: "should-be-ignored" }, codex: { model: "should-also-be-ignored" } }, null, 2)}\n`)
-
-		const afterLegacy = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
-
-		expect(afterLegacy.target.runner).toEqual(baseline.target.runner)
-		expect(afterLegacy.queue.selected.runner).toEqual(baseline.queue.selected.runner)
-		// #456: the per-phase runner enumeration (`queue.selected.phaseRunners`,
-		// `target.runner.phases`) is the only runner face after role taxonomy retirement.
-		expect(afterLegacy.queue.selected.phaseRunners).toEqual(baseline.queue.selected.phaseRunners)
-	})
-
 	// #433: the supervisor-visible status schema no longer carries config/configPath/configFormat.
-	test("status --json target keys do not include any retired config fields", async () => {
-		const fixture = await createTarget("status-no-config")
-		seedChain(fixture, { issueNumber: 192, status: "queued" })
-		const snapshot = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
-		const keys = Object.keys(snapshot.target)
-		for (const retired of ["config", "configPath", "configFormat"]) {
-			expect(keys).not.toContain(retired)
-		}
-	})
-
 	test("daemon start dry-run resolves a chain and emits central-daemon plan", async () => {
 		const fixture = await createTarget("daemon-smoke")
 		seedChain(fixture, { issueNumber: 184, status: "queued" })

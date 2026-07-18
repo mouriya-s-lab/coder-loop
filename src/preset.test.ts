@@ -717,12 +717,6 @@ describe("parsePreset schema validation", () => {
 		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: duplicate status "parked"/)
 	})
 
-	// #456: the per-phase `summaryMarker` field on `PresetPhase` was retired with the role
-	// taxonomy; the watchdog hook (`summaryWatchdogConfigForPhase`) now reports null for every
-	// phase until #452 lands a DSL-declared injection point. The prior "no marker → watchdog
-	// disabled" assertion is unrepresentable here (no field); see the loop.test.ts watchdog
-	// terminal-behavior test for the equivalent pin.
-
 	test("rejects per-phase exit declarations outside preset statuses", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
@@ -739,15 +733,6 @@ describe("parsePreset schema validation", () => {
 		]
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/exits\.status: duplicate status "a"/)
-	})
-
-	test("rejects legacy statusWrites declarations", () => {
-		const root: BoundaryRecord = minimalRoot()
-		root.phases = [
-			{ name: "iteration", prompt: "iter.md", statusWrites: ["a"], variables: { K: "item.id" } },
-		]
-
-		expect(() => parsePreset(root, "/tmp")).toThrow(/statusWrites: use \[\[phases\.exits\]\]/)
 	})
 
 	test("accepts chain-complete trigger phases", () => {

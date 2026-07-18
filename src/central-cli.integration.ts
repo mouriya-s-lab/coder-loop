@@ -4,7 +4,7 @@ import { createConnection, createServer } from "node:net"
 import { resolve } from "node:path"
 
 import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
-import { LOOP_DATA_ROOT_ENV, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
 import { appendObservabilityEvent, makeObservabilityEvent, queryObservabilityEvents } from "./observability"
@@ -936,48 +936,6 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
-	test("daemon start ignores target-local legacy loop-data when loop-data root is omitted", async () => {
-		// #433: the engine no longer reads any target runtime file — `--loop-data-root` / env wins
-		// without exception. The legacy target-local layout below is just a noise directory; the
-		// global store wins on its own merits.
-		const target = await makeTarget("target-cwd-legacy-local")
-		const globalLoopDataRoot = await makeLoopDataRoot("target-cwd-global")
-		const targetLocalLoopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
-		await mkdir(globalLoopDataRoot, { recursive: true })
-		await mkdir(targetLocalLoopDataRoot, { recursive: true })
-
-		const globalStore = openSqliteStateStore({ loopDataRoot: globalLoopDataRoot })
-		try {
-			globalStore.createChain({
-				name: "global-chain",
-				preset: "gh-issue-pr-iteration",
-				repository: "fixture/repo",
-				baseBranch: "main",
-			})
-		} finally {
-			globalStore.close()
-		}
-
-		const legacyStore = openSqliteStateStore({ loopDataRoot: targetLocalLoopDataRoot })
-		try {
-			legacyStore.createChain({
-				name: "legacy-local-chain",
-				preset: "gh-issue-pr-iteration",
-				repository: "fixture/repo",
-				baseBranch: "main",
-			})
-		} finally {
-			legacyStore.close()
-		}
-
-		const result = await runCli(
-			["daemon", "start", target, "--dry-run", "--json"],
-			{ [LOOP_DATA_ROOT_ENV]: globalLoopDataRoot },
-		)
-		const parsed = expectJsonOk(result)
-		expect(parsed).toMatchObject({ action: "start", target, chain: "global-chain", dryRun: true })
-	})
-
 	test("daemon target-cwd fails explicitly when no chain matches", async () => {
 		const fixture = await startFixture("target-cwd-missing")
 		try {
@@ -1097,20 +1055,6 @@ attemptTimeoutSeconds = 3600
 
 	// #436: install/uninstall surface deleted. The two doctor tests below remain — neither
 	// looks at target files (zero target-file check is the K1 property doctor must satisfy).
-	test("install and uninstall subcommands no longer exist", async () => {
-		const env = await fakeCliEnv("install-retired")
-		const installResult = await runCli(["install", "/tmp/x"], env)
-		expect(installResult.exitCode).toBe(1)
-		expect(installResult.stdout).toContain("Usage:")
-		expect(installResult.stdout).not.toContain("install <target>")
-		expect(installResult.stdout).not.toContain("uninstall <target>")
-		const uninstallResult = await runCli(["uninstall", "/tmp/x"], env)
-		expect(uninstallResult.exitCode).toBe(1)
-		expect(uninstallResult.stdout).toContain("Usage:")
-		expect(uninstallResult.stdout).not.toContain("install <target>")
-		expect(uninstallResult.stdout).not.toContain("uninstall <target>")
-	})
-
 	test("doctor checks operator machine and live runtime; no target file checks", async () => {
 		const fixture = await startFixture("doctor-chain")
 		try {

@@ -6,7 +6,10 @@
 		"coder-loop": "src/loop.ts"
 	},
 	"scripts": {
-		"typecheck": "bun x tsc --noEmit"
+		"typecheck": "bun x tsc --noEmit",
+		"test:unit": "bun test",
+		"test:integration": "for file in central-cli.integration.ts daemon.integration.ts db-main-loop.integration.ts scheduler.integration-suite.ts scheduler.cross-runner.integration.ts scheduler.daemon.integration.ts scheduler.worktree.integration.ts smoke.integration.ts; do bun test --timeout 30000 \"./src/$file\" || exit $?; done",
+		"test:all": "bun run test:unit && bun run test:integration"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
