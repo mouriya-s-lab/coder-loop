@@ -32,8 +32,20 @@ fixture repo 只保留极小的提交资产。各 run 在 default branch 上只�
 入口是本 repo 的 `scripts/real-e2e.ts`：
 
 ```bash
-bun scripts/real-e2e.ts
+bun scripts/real-e2e.ts --log-file /tmp/coder-loop-real-e2e.log
 ```
+
+`--log-file` 必填。相对路径按启动命令的 cwd 解析，父目录会自动创建；每次运行都会
+truncate 后重写该文件。默认模式 detached 到后台，父进程只打印子进程 pid 和日志绝对
+路径后立即成功退出。需要阻塞等待真实结果与真实退出码时使用 foreground：
+
+```bash
+bun scripts/real-e2e.ts --foreground --log-file /tmp/coder-loop-real-e2e.log
+```
+
+foreground 运行期间，脚本及其 gh、daemon、runner 等子进程输出全部进入日志，终端
+stdout 只显示最终一行 `real-e2e exit=<code> log=<path>` 摘要。后台模式的启动行不能代表
+测试成功；以子进程结束后日志末行的 `FINAL exit=<code>` 为准。
 
 默认 preset 是 `real-e2e-minimal`（`presets/real-e2e-minimal/`）：两 phase 的最小
 GitHub loop——iteration 直接改文件开 PR，review 验证 + merge + 写
@@ -43,7 +55,7 @@ PR/merge、终态写入），不是 agent 编排质量，所以不默认走 `gh-
 钟）。要做 bundled preset 的全保真验证时显式选它：
 
 ```bash
-bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
+bun scripts/real-e2e.ts --log-file /tmp/coder-loop-real-e2e-full.log --preset gh-issue-pr-iteration
 ```
 
 它按序做完一轮完整真实 e2e：
@@ -57,16 +69,18 @@ bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
    - `--max-attempts`（默认 5）
    - `--max-runs`（默认 20，短周期 spin 的信号）
 6. **assert** — item 到 `done` 后验证 GitHub 终态：seed issue CLOSED、closing PR MERGED、default branch 上本轮 `runs/<uuid>.txt == status: complete`，并以真实 Bun 读取执行检查。
-7. **teardown + evidence** — `daemon down` 后通过 Contents API 只删除本轮 `runs/<uuid>.txt`；失败时只关闭 body 第一行精确 `Closes #<本轮 issue>` 的本轮 open PR 与本轮 seed，不碰其他 run。stdout 输出 evidence 摘要（issue URL、PR URL、merge commit、耗时、loop-data 路径）。
+7. **teardown + evidence** — `daemon down` 后通过 Contents API 只删除本轮 `runs/<uuid>.txt`；失败时只关闭 body 第一行精确 `Closes #<本轮 issue>` 的本轮 open PR 与本轮 seed，不碰其他 run。日志输出 evidence 摘要（issue URL、PR URL、merge commit、耗时、loop-data 路径），末行固定为 `FINAL exit=<code>`。
 
-失败路径（终态 `blocked` / `moot` / `exhausted`、tripwire、`chain create` 失败）都会打印
-loop-data root、daemon stdout/stderr log 路径和最后一次 status snapshot，然后
-exit 1。
+失败路径（终态 `blocked` / `moot` / `exhausted`、tripwire、`chain create` 失败）都会向
+指定日志写入 loop-data root、统一 daemon log 路径和最后一次 status snapshot，然后以
+非零码结束。
 
 ### Flags
 
 | Flag | 默认 | 含义 |
 |---|---|---|
+| `--log-file` | 无（必填） | 统一日志文件；相对 cwd 解析，自动建父目录，每次 truncate |
+| `--foreground` | 否（后台） | 阻塞运行，终端只输出最终摘要并返回真实结果 |
 | `--fixture-cwd` | `../coder-loop-e2e-fixture` | fixture source checkout（只读 origin 来源与身份校验） |
 | `--fixture-repo` | `mouriya-s-lab/coder-loop-e2e-fixture` | fixture GitHub repo |
 | `--preset` | `real-e2e-minimal` | 跑哪个 preset（全保真用 `gh-issue-pr-iteration`） |
