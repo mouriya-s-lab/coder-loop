@@ -1054,6 +1054,20 @@ export async function cleanupSchedulerChainWorktrees(
 			})
 			continue
 		}
+		if (!existsSync(repoCwd)) {
+			let directoryRemoved = false
+			let error: string | null = null
+			if (existsSync(worktreePath)) {
+				try {
+					await rm(worktreePath, { recursive: true, force: true })
+					directoryRemoved = true
+				} catch (cleanupError) {
+					error = `worktree directory remove failed: ${errorMessage(cleanupError)}`
+				}
+			}
+			cleaned.push({ repoCwd, worktreePath, registered: false, removed: false, directoryRemoved, pruned: false, error })
+			continue
+		}
 		const result = await repositoryGitCoordinator.run(repoCwd, async (): Promise<SchedulerChainWorktreeCleanup> => {
 			const listResult = await git(repoCwd, ["worktree", "list", "--porcelain"])
 			if (listResult.exitCode !== 0) {
@@ -1101,10 +1115,10 @@ export async function cleanupSchedulerChainWorktrees(
 export type ConsumeSchedulerClosureInput = {
 	chainId: number
 	chainName: string
+	baseBranch: string
 	repoCwd: string
 	closure: ClosureSnapshot
 	authority: ClosureConsumptionAuthority
-	evidence: ClosureConsumptionEvidence
 	updatedAt: number
 	loopDataRootOptions?: LoopDataRootOptions
 	store: Pick<SqliteStateStore, "consumeClosureIfUnreachable" | "setClosureResources">
@@ -1114,20 +1128,61 @@ export type ConsumeSchedulerClosureInput = {
 export type ConsumeSchedulerClosureResult = {
 	decision: ConsumeClosureResult
 	cleanup: SchedulerChainWorktreeCleanup | null
+	complete: boolean
+}
+
+export type ClosureConsumptionObservation = {
+	evidence: ClosureConsumptionEvidence
+	freshness: OriginFreshness
+}
+
+export async function sampleClosureConsumptionObservation(input: {
+	repoCwd: string
+	baseBranch: string
+	branchName: string
+	baseCommit: string
+}): Promise<ClosureConsumptionObservation> {
+	return await repositoryGitCoordinator.run(input.repoCwd, async () => {
+		const branch = await git(input.repoCwd, ["rev-parse", "--verify", `${input.branchName}^{commit}`])
+		if (branch.exitCode !== 0 || branch.stdout === "") {
+			const origin = await git(input.repoCwd, ["remote", "get-url", "origin"])
+			return {
+				evidence: "unevaluable",
+				freshness: origin.exitCode === 0
+					? { kind: "retained", commit: input.baseCommit }
+					: { kind: "no-origin", availability: "unavailable", commit: input.baseCommit },
+			}
+		}
+		let freshness: OriginFreshness
+		try {
+			freshness = (await resolveClosureBase(input.repoCwd, input.baseBranch)).freshness
+		} catch {
+			freshness = { kind: "retained", commit: input.baseCommit }
+		}
+		if (branch.stdout === input.baseCommit) return { evidence: "no-work", freshness }
+		if (freshness.kind === "fetched") {
+			const remoteContains = await git(input.repoCwd, ["for-each-ref", "--contains", branch.stdout, "--format=%(refname)", "refs/remotes/origin/"])
+			if (remoteContains.exitCode !== 0) return { evidence: "unevaluable", freshness }
+			if (remoteContains.stdout.split("\n").some((ref) => ref.startsWith("refs/remotes/origin/"))) return { evidence: "published", freshness }
+		}
+		return { evidence: "unpublished-discarded", freshness }
+	})
 }
 
 export async function consumeSchedulerClosure(input: ConsumeSchedulerClosureInput): Promise<ConsumeSchedulerClosureResult> {
 	const decision = input.store.consumeClosureIfUnreachable(input.closure.closureId, {
 		authority: input.authority,
 		updatedAt: input.updatedAt,
-		evidence: input.evidence,
 	})
-	if (decision.kind !== "consumed") return { decision, cleanup: null }
-	const [cleanup] = await cleanupSchedulerChainWorktrees([{ chainName: input.chainName, repoCwd: input.repoCwd, closure: decision.closure, ...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }) }])
-	input.store.setClosureResources(decision.closure.closureId, { worktreePath: null, branchName: null, updatedAt: input.updatedAt })
-	const freshness: OriginFreshness = { kind: "retained", commit: decision.closure.baseCommit }
-	await input.emit({ type: "closure.consumed", chainId: input.chainId, closureId: decision.closure.closureId, evidence: decision.evidence, freshness })
-	return { decision, cleanup: cleanup ?? null }
+	if (decision.kind === "retained" && decision.reason !== "already-consumed") return { decision, cleanup: null, complete: false }
+	const closure = decision.kind === "consumed" ? decision.closure : { ...input.closure, lifecycle: "consumed" as const }
+	if (closure.worktreePath === null || closure.branchName === null) return { decision, cleanup: null, complete: true }
+	const observation = await sampleClosureConsumptionObservation({ repoCwd: input.repoCwd, baseBranch: input.baseBranch, branchName: closure.branchName, baseCommit: closure.baseCommit })
+	const [cleanup] = await cleanupSchedulerChainWorktrees([{ chainName: input.chainName, repoCwd: input.repoCwd, closure, ...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }) }])
+	if (cleanup === undefined || cleanup.error !== null) return { decision, cleanup: cleanup ?? null, complete: false }
+	input.store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: input.updatedAt })
+	await input.emit({ type: "closure.consumed", chainId: input.chainId, closureId: closure.closureId, evidence: observation.evidence, freshness: observation.freshness })
+	return { decision, cleanup, complete: true }
 }
 
 export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
@@ -2338,16 +2393,16 @@ async function consumeCompletedChainClosures(options: SchedulerOptions, chain: C
 		const result = await consumeSchedulerClosure({
 			chainId: chain.id,
 			chainName: chain.name,
+			baseBranch: chain.baseBranch,
 			repoCwd,
 			closure,
 			authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [...terminalStatuses] },
-			evidence: "unevaluable",
 			updatedAt: nowSeconds(options),
 			...(options.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: options.loopDataRootOptions }),
 			store: options.store,
 			emit: async (event) => await emit(options, event),
 		})
-		if (result.decision.kind === "retained" && result.decision.reason !== "already-consumed") consumable = false
+		if (!result.complete) consumable = false
 	}
 	return consumable
 }

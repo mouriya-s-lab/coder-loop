@@ -286,7 +286,7 @@ export type ConsumeClosureResult =
 export type JoinBindingRecord = { parNodeId: string; version: number; value: JoinValueSnapshot; authorKind: string; authorId: string; authorityClass: string; effectiveFromEpoch: number; createdAt: number }
 export type JoinEvaluationRecord = { parNodeId: string; epoch: number; bindingVersion: number; state: "evaluating" | "decided" | "consumed" }
 
-export type StateTableName = "chains" | "items" | "runs" | "execution_definitions" | "task_trees" | "task_nodes" | "task_leaf_nodes" | "task_seq_nodes" | "task_par_nodes" | "task_join_bindings" | "task_join_evaluation_bindings" | "task_closures" | "closure_sessions" | "active_runs" | "context_entries"
+export type StateTableName = "chains" | "items" | "runs" | "execution_definitions" | "task_trees" | "task_nodes" | "task_leaf_nodes" | "task_seq_nodes" | "task_par_nodes" | "task_join_bindings" | "task_join_evaluation_bindings" | "task_closures" | "closure_reachability_seeds" | "closure_reachability_edges" | "closure_sessions" | "active_runs" | "context_entries"
 
 export type SqliteStateStoreOptions = LoopDataRootOptions & {
 	createIfMissing?: boolean
@@ -439,6 +439,8 @@ const JoinBindingValueRowBoundary = arkType({ version: "number.integer>=1", join
 const JoinBindingRowBoundary = arkType({ par_node_id: "string>0", version: "number.integer>=1", join_kind: "'drain'|'validator'", candidate_definition_kind: "'preset'|'chain'|null", candidate_definition_content_identity: "string|null", candidate_id: "string|null", author_kind: "string>0", author_id: "string>0", authority_class: "string>0", effective_from_epoch: "number.integer>=0", created_at: "number", "+": "reject" })
 const JoinEvaluationValueRowBoundary = arkType({ epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'", "+": "reject" })
 const JoinEvaluationRowBoundary = arkType({ par_node_id: "string>0", epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'", "+": "reject" })
+const ClosureReachabilitySeedRowBoundary = arkType({ closure_id: "string>0", kind: "'open-append'", "+": "reject" })
+const ClosureReachabilityEdgeRowBoundary = arkType({ from_closure_id: "string>0", to_closure_id: "string>0", kind: "'resume'|'scope-target'", "+": "reject" })
 const ClosureLeafRowBoundary = arkType({ leaf_node_id: "string>0", "+": "reject" })
 const ActiveRunAssociationRowBoundary = arkType({ lifecycle: "'active'|'suspended'|'consumed'", phase: "string>0", chain_id: "number.integer", "+": "reject" })
 const ClosureAssociationRowBoundary = arkType({ closure_id: "string>0", leaf_node_id: "string>0", lifecycle: "'active'|'suspended'|'consumed'", "+": "reject" })
@@ -695,6 +697,19 @@ CREATE TABLE IF NOT EXISTS task_join_evaluation_bindings (
 	PRIMARY KEY (par_node_id, epoch),
 	FOREIGN KEY (par_node_id, binding_version) REFERENCES task_join_bindings(par_node_id, version)
 );
+CREATE TABLE IF NOT EXISTS closure_reachability_seeds (
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
+	kind TEXT NOT NULL CHECK (kind IN ('open-append')),
+	PRIMARY KEY (chain_id, closure_id, kind)
+);
+CREATE TABLE IF NOT EXISTS closure_reachability_edges (
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	from_closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
+	to_closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
+	kind TEXT NOT NULL CHECK (kind IN ('resume','scope-target')),
+	PRIMARY KEY (chain_id, from_closure_id, to_closure_id, kind)
+);
 CREATE TABLE IF NOT EXISTS closure_sessions (
 	closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
 	runner_kind TEXT NOT NULL CHECK (runner_kind IN ('claude','codex','opencode')),
@@ -834,6 +849,13 @@ function v3RuntimeSchemaExists(db: Database): boolean {
 	return row?.table_count === 11
 }
 
+function closureReachabilitySchemaExists(db: Database): boolean {
+	return (db.query<TableCountRow, []>(`
+		SELECT COUNT(*) AS table_count FROM sqlite_master
+		WHERE type = 'table' AND name IN ('closure_reachability_seeds','closure_reachability_edges')
+	`).get()?.table_count ?? 0) === 2
+}
+
 function readUserVersion(db: Database): number {
 	return db.query<UserVersionRow, []>("PRAGMA user_version").get()?.user_version ?? 0
 }
@@ -912,6 +934,7 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 		&& stateSchemaExists(db)
 		&& contextEntriesTableExists(db)
 		&& v3RuntimeSchemaExists(db)
+		&& closureReachabilitySchemaExists(db)
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& !needsItemTableRebuildForOpencodeCheck
@@ -1959,7 +1982,16 @@ function closureConsumptionReachabilityModel(
 			const terminal = new Set(authority.terminalStatuses)
 			const rows = queryPersistedAll(db, "SELECT id, status FROM items WHERE chain_id = $chainId ORDER BY id", { chainId: authority.chainId }, ItemReachabilityStatusRowBoundary, `closure reachability items for chain ${authority.chainId}`)
 			const terminalItemRowIds = new Set(rows.filter((row) => terminal.has(parseInternalStatus(row.status, `items.${row.id}.status`))).map((row) => row.id))
-			return persistedClosureReachabilityModel(tree, terminalItemRowIds)
+			const structural = persistedClosureReachabilityModel(tree, terminalItemRowIds)
+			const supplementalSeeds = queryPersistedAll(db,
+				"SELECT closure_id, kind FROM closure_reachability_seeds WHERE chain_id = $chainId ORDER BY closure_id, kind",
+				{ chainId: authority.chainId }, ClosureReachabilitySeedRowBoundary, `closure reachability seeds for chain ${authority.chainId}`)
+				.map((row) => ({ kind: row.kind, closureId: row.closure_id } as const))
+			const supplementalEdges = queryPersistedAll(db,
+				"SELECT from_closure_id, to_closure_id, kind FROM closure_reachability_edges WHERE chain_id = $chainId ORDER BY from_closure_id, to_closure_id, kind",
+				{ chainId: authority.chainId }, ClosureReachabilityEdgeRowBoundary, `closure reachability edges for chain ${authority.chainId}`)
+				.map((row) => ({ kind: row.kind, fromClosureId: row.from_closure_id, toClosureId: row.to_closure_id } as const))
+			return { closures: structural.closures, seeds: [...structural.seeds, ...supplementalSeeds], edges: [...structural.edges, ...supplementalEdges] }
 		}
 		default: return assertNever(authority)
 	}

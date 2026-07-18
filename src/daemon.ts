@@ -2838,17 +2838,18 @@ export class CoderLoopDaemon {
 		const worktrees: SchedulerChainWorktreeCleanup[] = []
 		for (const { repoCwd, closure } of closures) {
 			if (closure.lifecycle === "consumed") {
-				worktrees.push(...await cleanupSchedulerChainWorktrees([{ chainName: chain.name, repoCwd, closure, loopDataRootOptions: { loopDataRoot: this.paths.root } }]))
-				store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: unixSeconds() })
+				const cleanup = await cleanupSchedulerChainWorktrees([{ chainName: chain.name, repoCwd, closure, loopDataRootOptions: { loopDataRoot: this.paths.root } }])
+				worktrees.push(...cleanup)
+				if (cleanup.every((result) => result.error === null)) store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: unixSeconds() })
 				continue
 			}
 			const consumed = await consumeSchedulerClosure({
 				chainId: chain.id,
 				chainName: chain.name,
+				baseBranch: chain.baseBranch,
 				repoCwd,
 				closure,
 				authority: { kind: "chain-deletion", chainId: chain.id },
-				evidence: "unevaluable",
 				updatedAt: unixSeconds(),
 				loopDataRootOptions: { loopDataRoot: this.paths.root },
 				store,

@@ -359,12 +359,12 @@ test("serialized closure consumption removes only owned resources and emits evid
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-consume", definitionRef: { kind: "chain", contentIdentity: "sha256:consume" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
 		const events: SchedulerEvent[] = []
 		store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_900_000_099 })
-		const result = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, evidence: "unpublished-discarded", updatedAt: 1_900_000_100, loopDataRootOptions: { loopDataRoot }, store, emit: (event) => { events.push(event) } })
+		const result = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, updatedAt: 1_900_000_100, loopDataRootOptions: { loopDataRoot }, store, emit: (event) => { events.push(event) } })
 		expect(result.decision.kind).toBe("consumed")
 		expect(result.cleanup).toMatchObject({ registered: true, removed: true, error: null })
 		expect(existsSync(resources.worktreePath)).toBe(false)
 		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] } })
-		expect(events).toEqual([{ type: "closure.consumed", chainId: chain.id, closureId: closure.closureId, evidence: "unpublished-discarded", freshness: { kind: "retained", commit: resources.baseCommit } }])
+		expect(events).toEqual([{ type: "closure.consumed", chainId: chain.id, closureId: closure.closureId, evidence: "no-work", freshness: { kind: "no-origin", availability: "unavailable", commit: resources.baseCommit } }])
 	} finally { store.close() }
 })
 

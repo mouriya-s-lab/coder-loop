@@ -273,12 +273,13 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 	const store = openSqliteStateStore({ loopDataRoot })
 	const manager = createGitWorktreeManager({ loopDataRoot })
 	const results: JsonObject[] = []
-	type CaseKind = "materialized-seq-suffix" | "open-par-epoch" | "decided-reopen" | "next-epoch-candidate" | "sealed-seq"
+	type CaseKind = "materialized-seq-suffix" | "open-par-epoch" | "decided-reopen" | "next-epoch-candidate" | "open-append" | "sealed-seq"
 	const cases: readonly { kind: CaseKind; itemStatus: "queued" | "done"; expected: "retained" | "consumed" }[] = [
 		{ kind: "materialized-seq-suffix", itemStatus: "queued", expected: "retained" },
 		{ kind: "open-par-epoch", itemStatus: "done", expected: "retained" },
 		{ kind: "decided-reopen", itemStatus: "done", expected: "retained" },
 		{ kind: "next-epoch-candidate", itemStatus: "done", expected: "retained" },
+		{ kind: "open-append", itemStatus: "done", expected: "retained" },
 		{ kind: "sealed-seq", itemStatus: "done", expected: "consumed" },
 	]
 	try {
@@ -300,6 +301,12 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 				tree = { root: { kind: "seq", identity: { runtimeNodeId: `seq-c05-${index}`, definitionRef, definitionNodeId: `seq-c05-${index}` }, cursor: spec.kind === "sealed-seq" ? { kind: "complete" } : { kind: "next", nodeId: leaf.identity.runtimeNodeId }, children: [leaf] }, activeRuns: [] }
 			}
 			store.createTaskTree(chain.id, tree)
+			if (spec.kind === "open-append") {
+				const db = new Database(resolve(loopDataRoot, "db.sqlite"))
+				try {
+					db.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,'open-append')").run({ $chain: chain.id, $closure: closureId })
+				} finally { db.close() }
+			}
 			if (spec.kind === "next-epoch-candidate") {
 				const db = new Database(resolve(loopDataRoot, "db.sqlite"))
 				try {
@@ -307,11 +314,11 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 				} finally { db.close() }
 			}
 			const events: JsonObject[] = []
-			const observed = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, evidence: "unevaluable", updatedAt: 2_000_000_000 + index, loopDataRootOptions: { loopDataRoot }, store, emit: (value) => { events.push(value) } })
+			const observed = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, updatedAt: 2_000_000_000 + index, loopDataRootOptions: { loopDataRoot }, store, emit: (value) => { events.push(value) } })
 			assert(observed.decision.kind === spec.expected, `C05 ${spec.kind} expected ${spec.expected}, observed ${observed.decision.kind}`)
 			results.push({ kind: spec.kind, decision: observed.decision.kind, reason: observed.decision.kind === "retained" ? observed.decision.reason : null, events })
 			if (observed.decision.kind === "retained") {
-				const cleanup = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, repoCwd, closure, authority: { kind: "chain-deletion", chainId: chain.id }, evidence: "unevaluable", updatedAt: 2_000_000_100 + index, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+				const cleanup = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure, authority: { kind: "chain-deletion", chainId: chain.id }, updatedAt: 2_000_000_100 + index, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
 				assert(cleanup.decision.kind === "consumed", `C05 ${spec.kind} cleanup did not consume`)
 			}
 		}
@@ -432,11 +439,11 @@ async function main(): Promise<void> {
 			assert(!existsSync(row.worktree_path) && command([REAL_GIT, "show-ref", "--verify", row.branch_name], { cwd: repos.target, allowFail: true }).exitCode !== 0, `C05 resource survived normal consume for ${row.phase}`)
 		}
 		const consumedLog = readFileSync(daemon.stderr, "utf8").split("\n").filter((line) => line.includes(`chain=${lifecycle}`) && line.includes("closure.consumed")).join("\n")
-		assert(consumedLog.includes("evidence=unevaluable") && consumedLog.includes("freshness=retained"), "C05 normal consumption evidence/freshness event missing")
+		assert(consumedLog.includes("evidence=no-work") && consumedLog.includes("freshness=fetched"), "C05 normal consumption did not sample branch publication and origin freshness")
 		const resumed = resumedBeforeRelease
 		retainedRunnerObservations.push(resumed)
 		assert(resumed.attempt >= 3 && resumed.cwd === first.cwd && resumed.branch === first.branch && resumed.argv.includes(first.sessionId), "C09 daemon restart did not resume the same closure/session")
-		event("C05.pass", { persistedReachabilityCases, consumed: consumedRows, observedEvidence: "unevaluable", observedFreshness: "retained" })
+		event("C05.pass", { persistedReachabilityCases, consumed: consumedRows, observedEvidence: "no-work", observedFreshness: "fetched" })
 		event("C09.pass", { first, reopened: second, resumed })
 
 		// C06/C10: direct production manager exercise for persisted par pin and concurrent repo coordination.
