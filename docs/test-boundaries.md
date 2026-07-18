@@ -41,23 +41,25 @@
 目录不存在或没有匹配测试文件时，该批输出警告并记为 `skipped`，不导致整轮失败。
 
 - `bun run test:unit`：Bun 默认 unit 收集面。
-- `bun run test:integration`：只按序运行三个 integration 批次。
-- `bun run test:all` 或 `bun scripts/run-tests.ts`：运行全部四个批次。
-- `bun scripts/run-tests.ts --batch integration-cli`：只运行指定批次；可用批次名为 `unit`、`integration-cli`、`integration-scheduler`、`integration-daemon`。
+- `bun run test:integration -- --log-file /tmp/integration.log`：只按序运行三个 integration 批次；package script 不写死日志路径，调用者在 `--` 后透传。
+- `bun run test:all -- --log-file /tmp/all-tests.log` 或 `bun scripts/run-tests.ts --log-file /tmp/all-tests.log`：运行全部四个批次。
+- `bun scripts/run-tests.ts --batch integration-cli --log-file /tmp/integration-cli.log`：只运行指定批次；可用批次名为 `unit`、`integration-cli`、`integration-scheduler`、`integration-daemon`。
 
-前台模式实时透传测试输出，并在末尾报告各批状态、pass/fail 数与耗时。
+任何包含 integration 批次的调用都必须传 `--log-file <path>`；缺失时 runner 在执行任何测试前向 stderr 打印原因和用法，并以 2 退出。相对日志路径按调用者 cwd 解析，runner 自动创建缺失的父目录，每轮开始时 truncate 重写文件。
 
-## Background runs
+默认模式是 detached 后台运行：父进程以相同参数追加 `--foreground` 重启自身，将子进程 stdout/stderr 全部重定向到日志文件，打印子 PID 与绝对日志路径后立即以 0 退出。后台与前台模式都持续更新 `.test-runs/<runId>/state.json`；状态记录 PID、批次状态、pass/fail 数、耗时和整轮结论。
 
-长时间本地验证可 detached 到后台：
+追加 `--foreground` 后阻塞到测试完成；测试与 runner 输出只写日志，终端 stdout 只打印最终一行摘要，进程退出码反映真实结果。两种模式都会把 `FINAL exit=<code>` 写成日志末行。
 
 ```sh
-bun scripts/run-tests.ts --background
-bun scripts/run-tests.ts --integration --background
-bun scripts/run-tests.ts --batch integration-daemon --background
+bun scripts/run-tests.ts --integration --log-file /tmp/integration.log
+bun scripts/run-tests.ts --integration --log-file /tmp/integration.log --foreground
+bun scripts/run-tests.ts --batch integration-daemon --log-file ./logs/daemon.log
 ```
 
-命令会立即打印 `.test-runs/<runId>/`。该目录包含每批日志与增量更新的 `state.json`；状态记录 worker PID、批次状态、pass/fail 数、耗时和整轮结论。
+`--batch unit` 是唯一例外：不传 `--log-file` 时保持原有前台透传行为；若传日志，则遵循相同的默认后台、`--foreground`、统一日志和 `FINAL` 契约。
+
+## Run status
 
 ```sh
 bun scripts/run-tests.ts --status

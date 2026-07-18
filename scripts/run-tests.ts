@@ -1,4 +1,5 @@
-import { mkdir, readdir, rename, stat } from "node:fs/promises"
+import { mkdir, open, readdir, rename, stat } from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
 import { basename, dirname, resolve } from "node:path"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -36,8 +37,7 @@ interface RunState {
 
 type Command =
 	| { kind: "status"; runId: string | null }
-	| { kind: "worker"; runId: string }
-	| { kind: "run"; batches: BatchName[]; background: boolean }
+	| { kind: "run"; batches: BatchName[]; foreground: boolean; logPath: string | null }
 
 interface TestCommandResult {
 	exitCode: number
@@ -53,11 +53,12 @@ const BATCH_DEFINITIONS: readonly BatchDefinition[] = [
 ]
 
 class BatchReporter {
-	private readonly writer: Bun.FileSink | null
 	private writeChain: Promise<void> = Promise.resolve()
 
-	constructor(logPath: string | null) {
-		this.writer = logPath === null ? null : Bun.file(logPath).writer()
+	private constructor(private readonly writer: FileHandle | null) {}
+
+	static async create(logPath: string | null): Promise<BatchReporter> {
+		return new BatchReporter(logPath === null ? null : await open(logPath, "a"))
 	}
 
 	write(chunk: string | Uint8Array, channel: "stdout" | "stderr" = "stdout"): Promise<void> {
@@ -67,24 +68,25 @@ class BatchReporter {
 			return Promise.resolve()
 		}
 		this.writeChain = this.writeChain.then(async () => {
-			await this.writer?.write(chunk)
-			await this.writer?.flush()
+			if (typeof chunk === "string") await this.writer?.write(chunk)
+			else await this.writer?.write(chunk)
 		})
 		return this.writeChain
 	}
 
 	async close(): Promise<void> {
 		await this.writeChain
-		await this.writer?.end()
+		await this.writer?.close()
 	}
 }
+
+class UsageError extends Error {}
 
 function usage(): string {
 	return [
 		"Usage:",
-		"  bun scripts/run-tests.ts [--background]",
-		"  bun scripts/run-tests.ts --integration [--background]",
-		"  bun scripts/run-tests.ts --batch <unit|integration-cli|integration-scheduler|integration-daemon> [--background]",
+		"  bun scripts/run-tests.ts --batch unit [--log-file <path>] [--foreground]",
+		"  bun scripts/run-tests.ts [--integration | --batch <integration-cli|integration-scheduler|integration-daemon>] --log-file <path> [--foreground]",
 		"  bun scripts/run-tests.ts --status [runId]",
 	].join("\n")
 }
@@ -94,46 +96,53 @@ function isBatchName(value: string): value is BatchName {
 }
 
 function parseArguments(args: string[]): Command {
-	if (args[0] === "--worker") {
-		const runId = args[1]
-		if (args.length !== 2 || runId === undefined) throw new Error(`Invalid background worker arguments\n${usage()}`)
-		return { kind: "worker", runId }
-	}
 	if (args[0] === "--status") {
-		if (args.length > 2) throw new Error(`--status accepts at most one runId\n${usage()}`)
+		if (args.length > 2) throw new UsageError(`--status accepts at most one runId\n${usage()}`)
 		return { kind: "status", runId: args[1] ?? null }
 	}
 
-	let background = false
+	let foreground = false
+	let logPath: string | null = null
 	let selectedBatch: BatchName | null = null
 	let integrationOnly = false
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index]
-		if (argument === "--background") {
-			if (background) throw new Error(`--background may only be provided once\n${usage()}`)
-			background = true
+		if (argument === "--foreground") {
+			if (foreground) throw new UsageError(`--foreground may only be provided once\n${usage()}`)
+			foreground = true
+			continue
+		}
+		if (argument === "--log-file") {
+			const value = args[index + 1]
+			if (value === undefined || value.length === 0 || value.startsWith("--")) {
+				throw new UsageError(`Missing path after --log-file\n${usage()}`)
+			}
+			if (logPath !== null) throw new UsageError(`--log-file may only be provided once\n${usage()}`)
+			logPath = resolve(process.cwd(), value)
+			index++
 			continue
 		}
 		if (argument === "--integration") {
-			if (integrationOnly) throw new Error(`--integration may only be provided once\n${usage()}`)
+			if (integrationOnly) throw new UsageError(`--integration may only be provided once\n${usage()}`)
 			integrationOnly = true
 			continue
 		}
 		if (argument === "--batch") {
 			const value = args[index + 1]
-			if (value === undefined || !isBatchName(value)) throw new Error(`Unknown or missing batch name after --batch\n${usage()}`)
-			if (selectedBatch !== null) throw new Error(`--batch may only be provided once\n${usage()}`)
+			if (value === undefined || !isBatchName(value)) throw new UsageError(`Unknown or missing batch name after --batch\n${usage()}`)
+			if (selectedBatch !== null) throw new UsageError(`--batch may only be provided once\n${usage()}`)
 			selectedBatch = value
 			index++
 			continue
 		}
-		throw new Error(`Unknown argument: ${argument}\n${usage()}`)
+		throw new UsageError(`Unknown argument: ${argument}\n${usage()}`)
 	}
-	if (integrationOnly && selectedBatch !== null) throw new Error(`--integration and --batch cannot be combined\n${usage()}`)
+	if (integrationOnly && selectedBatch !== null) throw new UsageError(`--integration and --batch cannot be combined\n${usage()}`)
 	return {
 		kind: "run",
 		batches: selectedBatch === null ? (integrationOnly ? [...INTEGRATION_BATCH_NAMES] : [...BATCH_NAMES]) : [selectedBatch],
-		background,
+		foreground,
+		logPath,
 	}
 }
 
@@ -253,9 +262,11 @@ async function consumeStream(stream: ReadableStream<Uint8Array>, reporter: Batch
 }
 
 async function runTestCommand(command: string[], reporter: BatchReporter): Promise<TestCommandResult> {
+	const env = { ...process.env }
+	delete env.CODER_LOOP_RUN_TESTS_RUN_ID
 	const child = Bun.spawn(command, {
 		cwd: REPO_ROOT,
-		env: process.env,
+		env,
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -266,11 +277,9 @@ async function runTestCommand(command: string[], reporter: BatchReporter): Promi
 	return { exitCode, ...countsFromOutput(`${stdout}\n${stderr}`, exitCode) }
 }
 
-async function runBatch(state: RunState, name: BatchName, runDir: string | null): Promise<boolean> {
+async function runBatch(state: RunState, name: BatchName, runDir: string | null, reporter: BatchReporter): Promise<boolean> {
 	const definition = definitionFor(name)
 	const batch = mutableBatch(state, name)
-	const logPath = runDir === null ? null : resolve(runDir, `${name}.log`)
-	const reporter = new BatchReporter(logPath)
 	const startedAt = Date.now()
 	try {
 		await reporter.write(`\n[test-runner] batch ${name}\n`)
@@ -315,8 +324,6 @@ async function runBatch(state: RunState, name: BatchName, runDir: string | null)
 		await reporter.write(`[test-runner] batch ${name} failed: ${error instanceof Error ? error.message : String(error)}\n`, "stderr")
 		if (runDir !== null) await writeState(runDir, state)
 		return false
-	} finally {
-		await reporter.close()
 	}
 }
 
@@ -333,8 +340,17 @@ function printSummary(state: RunState): void {
 }
 
 async function executeRun(state: RunState, runDir: string | null): Promise<number> {
+	const reporter = await BatchReporter.create(null)
+	try {
+		return await executeRunWithReporter(state, runDir, reporter)
+	} finally {
+		await reporter.close()
+	}
+}
+
+async function executeRunWithReporter(state: RunState, runDir: string | null, reporter: BatchReporter): Promise<number> {
 	for (const batch of state.batches) {
-		if (!(await runBatch(state, batch.name, runDir))) {
+		if (!(await runBatch(state, batch.name, runDir, reporter))) {
 			state.conclusion = "failed"
 			state.finishedAt = new Date().toISOString()
 			if (runDir !== null) await writeState(runDir, state)
@@ -353,34 +369,46 @@ function timestampRunId(): string {
 	return `${new Date().toISOString().replace(/[-:]/g, "").replace(".", "-")}-${process.pid}`
 }
 
-async function launchBackground(batches: BatchName[]): Promise<number> {
+async function prepareLogFile(logPath: string): Promise<void> {
+	await mkdir(dirname(logPath), { recursive: true })
+	await Bun.write(logPath, "")
+}
+
+async function launchBackground(command: Extract<Command, { kind: "run" }>, args: string[]): Promise<number> {
+	if (command.logPath === null) throw new Error("Background run is missing its log file")
 	const runId = timestampRunId()
 	const runDir = resolve(RUNS_ROOT, runId)
 	await mkdir(RUNS_ROOT, { recursive: true })
 	await mkdir(runDir, { recursive: false })
-	const child = Bun.spawn([process.execPath, SCRIPT_PATH, "--worker", runId], {
-		cwd: REPO_ROOT,
-		env: process.env,
-		stdin: "ignore",
-		stdout: "ignore",
-		stderr: "ignore",
-		detached: true,
-	})
+	await prepareLogFile(command.logPath)
+	const logHandle = await open(command.logPath, "a")
+	let child: Bun.Subprocess
+	try {
+		child = Bun.spawn([process.execPath, SCRIPT_PATH, ...args, "--foreground"], {
+			cwd: process.cwd(),
+			env: { ...process.env, CODER_LOOP_RUN_TESTS_RUN_ID: runId },
+			stdin: "ignore",
+			stdout: logHandle.fd,
+			stderr: logHandle.fd,
+			detached: true,
+		})
+	} finally {
+		await logHandle.close()
+	}
 	child.unref()
-	await writeState(runDir, makeInitialState(runId, child.pid, "background", batches))
-	console.log(`Background test run started: ${runDir}`)
+	await writeState(runDir, makeInitialState(runId, child.pid, "background", command.batches))
+	console.log(`pid=${child.pid} log=${command.logPath}`)
 	return 0
 }
 
-async function runWorker(runId: string): Promise<number> {
+async function readBackgroundState(runId: string): Promise<{ runDir: string; state: RunState }> {
 	const runDir = resolveRunDirectory(runId)
 	const deadline = Date.now() + 5_000
 	while (!(await Bun.file(statePath(runDir)).exists())) {
 		if (Date.now() >= deadline) throw new Error(`Background state was not initialized: ${statePath(runDir)}`)
 		await Bun.sleep(10)
 	}
-	const state = await readState(runDir)
-	return executeRun(state, runDir)
+	return { runDir, state: await readState(runDir) }
 }
 
 function resolveRunDirectory(runId: string): string {
@@ -415,17 +443,85 @@ async function showStatus(requestedRunId: string | null): Promise<number> {
 	return 0
 }
 
+function summaryLine(state: RunState, logPath: string): string {
+	const pass = state.batches.reduce((total, batch) => total + batch.pass, 0)
+	const fail = state.batches.reduce((total, batch) => total + batch.fail, 0)
+	return `Test summary: ${state.conclusion}; pass=${pass}; fail=${fail}; log=${logPath}`
+}
+
+async function initializeForegroundState(batches: readonly BatchName[]): Promise<{ runDir: string; state: RunState }> {
+	const runId = timestampRunId()
+	const runDir = resolve(RUNS_ROOT, runId)
+	await mkdir(RUNS_ROOT, { recursive: true })
+	await mkdir(runDir, { recursive: false })
+	const state = makeInitialState(runId, process.pid, "foreground", batches)
+	await writeState(runDir, state)
+	return { runDir, state }
+}
+
+async function runLoggedForeground(command: Extract<Command, { kind: "run" }>): Promise<number> {
+	if (command.logPath === null) throw new Error("Foreground logged run is missing its log file")
+	const backgroundRunId = process.env.CODER_LOOP_RUN_TESTS_RUN_ID ?? null
+	if (backgroundRunId === null) await prepareLogFile(command.logPath)
+	const reporter = await BatchReporter.create(command.logPath)
+	let state: RunState | null = null
+	let runDir: string | null = null
+	let exitCode = 1
+	try {
+		const initialized = backgroundRunId === null
+			? await initializeForegroundState(command.batches)
+			: await readBackgroundState(backgroundRunId)
+		state = initialized.state
+		runDir = initialized.runDir
+		await reporter.write(`[test-runner] run ${state.runId}; mode=${state.mode}; log=${command.logPath}\n`)
+		exitCode = await executeRunWithReporter(state, runDir, reporter)
+		const summary = summaryLine(state, command.logPath)
+		await reporter.write(`${summary}\n`)
+		if (backgroundRunId === null) console.log(summary)
+	} catch (error) {
+		exitCode = 1
+		const message = error instanceof Error ? error.message : String(error)
+		await reporter.write(`[test-runner] failed: ${message}\n`, "stderr")
+		if (state !== null) {
+			state.conclusion = "failed"
+			state.finishedAt = new Date().toISOString()
+			if (runDir !== null) {
+				try {
+					await writeState(runDir, state)
+				} catch (stateError) {
+					await reporter.write(`[test-runner] failed to update state: ${stateError instanceof Error ? stateError.message : String(stateError)}\n`, "stderr")
+				}
+			}
+		}
+		const summary = state === null
+			? `Test summary: failed; pass=0; fail=1; log=${command.logPath}`
+			: summaryLine(state, command.logPath)
+		await reporter.write(`${summary}\n`)
+		if (backgroundRunId === null) console.log(summary)
+	} finally {
+		await reporter.write(`FINAL exit=${exitCode}\n`)
+		await reporter.close()
+	}
+	return exitCode
+}
+
 async function main(): Promise<number> {
-	const command = parseArguments(process.argv.slice(2))
+	const args = process.argv.slice(2)
+	const command = parseArguments(args)
 	if (command.kind === "status") return showStatus(command.runId)
-	if (command.kind === "worker") return runWorker(command.runId)
-	if (command.background) return launchBackground(command.batches)
-	return executeRun(makeInitialState("foreground", process.pid, "foreground", command.batches), null)
+	if (command.logPath === null && command.batches.some((batch) => batch !== "unit")) {
+		throw new UsageError(`--log-file <path> is required for any run containing integration batches.\n${usage()}`)
+	}
+	if (command.logPath === null) {
+		return executeRun(makeInitialState("foreground", process.pid, "foreground", command.batches), null)
+	}
+	if (!command.foreground) return launchBackground(command, args)
+	return runLoggedForeground(command)
 }
 
 try {
 	process.exitCode = await main()
 } catch (error) {
 	console.error(error instanceof Error ? error.message : String(error))
-	process.exitCode = 1
+	process.exitCode = error instanceof UsageError ? 2 : 1
 }
