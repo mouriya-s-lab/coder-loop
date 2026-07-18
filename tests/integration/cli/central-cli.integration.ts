@@ -1169,7 +1169,7 @@ attemptTimeoutSeconds = 3600
 		const loopDataRoot = await makeLoopDataRoot("context-append-runtime")
 		const agentCwd = resolve(loopDataRoot, "..", "context-live-agent")
 		const liveEvidenceDir = resolveChainRuntimePaths("context-live-chain", { loopDataRoot }).issueEvidenceDir("live-item")
-		await mkdir(agentCwd, { recursive: true })
+		await initGitTarget(agentCwd)
 		await mkdir(liveEvidenceDir, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		const bodyPath = resolve(TEST_ROOT, `${++nextFixtureId}-context-body.txt`)
@@ -1500,6 +1500,23 @@ async function makeTarget(name: string): Promise<string> {
 	const target = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
 	await mkdir(target, { recursive: true })
 	return target
+}
+
+async function initGitTarget(path: string): Promise<void> {
+	await mkdir(path, { recursive: true })
+	for (const args of [
+		["init", "-q", "-b", "main"],
+		["config", "user.email", "test@example.invalid"],
+		["config", "user.name", "Test User"],
+	] as const) {
+		const result = Bun.spawnSync(["git", ...args], { cwd: path })
+		if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr))
+	}
+	await writeFile(resolve(path, "README.md"), "test\n")
+	for (const args of [["add", "README.md"], ["commit", "-q", "-m", "init"]] as const) {
+		const result = Bun.spawnSync(["git", ...args], { cwd: path })
+		if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr))
+	}
 }
 
 async function fakeCliEnv(name: string): Promise<Record<string, string>> {
