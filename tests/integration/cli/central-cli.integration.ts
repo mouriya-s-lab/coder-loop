@@ -1416,6 +1416,7 @@ async function seedChainFixture(fixture: Fixture, name: string, preset: string):
 	if (!createdChain.ok) throw new Error(`chain.create setup failed: ${createdChain.error.code}: ${createdChain.error.message}`)
 	const chain = boundaryRecord(createdChain.result.chain)
 	if (typeof chain.id !== "number") throw new Error("chain.create setup returned no numeric chain id")
+	expect(chain).toMatchObject({ name, status: "active" })
 	return chain.id
 }
 
@@ -1445,8 +1446,7 @@ async function exerciseIgnoredDaemonSignal(signal: IgnoredDaemonSignal): Promise
 		process.kill(daemonPid, signal)
 		await sleep(100)
 		expect(isPidAlive(daemonPid), `${signal} should not stop daemon up`).toBe(true)
-		const response = await sendDaemonRequest(resolve(loopDataRoot, "daemon.sock"), daemonRequest("chain.list"))
-		expect(response.ok).toBe(true)
+		expectJsonOk(await runCli(["chain", "list", "--loop-data-root", loopDataRoot, "--json"]))
 		process.kill(daemonPid, "SIGQUIT")
 		expect(await daemonProcess.exited).toBe(0)
 		await waitForDaemonSocketRemoval(loopDataRoot)
