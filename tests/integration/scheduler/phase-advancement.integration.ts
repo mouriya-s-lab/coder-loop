@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
 	createChain, createFixture, createItem, historicalRunExtra, itemExtraToJsonObject, loadedPresetFromDir,
-	readFile, readRunnerEvents, resolve, resolveChainRuntimePaths, runSchedulerUntilIdle, runtimeStatus,
+	initializeFixtureGitWorktree, mkdir, readFile, readRunnerEvents, resolve, resolveChainRuntimePaths, runSchedulerUntilIdle, runtimeStatus,
 	schedulerTick, stopFixture, storedItemExtra, writeFile, writeThreeStepPreset, type SchedulerEvent,
 } from "./harness"
 
@@ -549,13 +549,16 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 	test("trigger phase terminal: blocked item triggered, phase exit 0 keeps terminal status and is not pulled back into iteration", async () => {
 		const fixture = await createFixture("trigger-b3-unblock")
 		try {
+			const repoCwd = resolve(fixture.loopDataRoot, "fixture-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "trigger-b3-unblock-chain")
 			// The production blocked-responder ends with an ITERATION-shaped marker on a non-iteration
 			// phase. Under the old fall-through this mapped to changes_requested and pulled the
 			// terminal item back into iteration → review. The fix keeps the pre-trigger terminal status.
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29003,
-				repoCwd: "/repo/a",
+				repoCwd,
 				summary: "ITERATION SUMMARY: blocked_responder=created; issue=#29003; blockerRepo=mouriya-s-lab/coder-loop-e2e-blocker; followup=https://example/1; queue=injected; daemon=started; reason=unblock",
 			})
 			fixture.store.updateItem(item.id, {
@@ -786,16 +789,22 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 	test("dependsOn unblock e2e: blocker chain reaching done auto-recovers the cross-chain blocked item to done with no manual intervention", async () => {
 		const fixture = await createFixture("depends-unblock-e2e")
 		try {
+			const blockerRepoCwd = resolve(fixture.loopDataRoot, "fixture-repos", "blocker")
+			const dependentRepoCwd = resolve(fixture.loopDataRoot, "fixture-repos", "dependent")
+			await mkdir(blockerRepoCwd, { recursive: true })
+			await mkdir(dependentRepoCwd, { recursive: true })
+			initializeFixtureGitWorktree(blockerRepoCwd)
+			initializeFixtureGitWorktree(dependentRepoCwd)
 			// Two ACTIVE chains in the same central DB — the realistic cross-repo shape. The whole
 			// run is driven by the real fake runner over many ticks; the only state we set by hand is
 			// the blocked-responder postcondition (item parked blocked with a cross-chain dependsOn).
 			const blockerChain = createChain(fixture.store, "depends-e2e-blocker-chain", {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 			})
-			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 41, repoCwd: "/repo/blocker", writeStatus: "done" })
+			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 41, repoCwd: blockerRepoCwd, writeStatus: "done" })
 
 			const dependentChain = createChain(fixture.store, "depends-e2e-dependent-chain")
-			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: "/repo/a", writeStatus: "done" })
+			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: dependentRepoCwd, writeStatus: "done" })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
@@ -855,13 +864,16 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 	test("race: review writes blocked, chain stays active until item-level trigger spawns", async () => {
 		const fixture = await createFixture("trigger-b3-race")
 		try {
+			const repoCwd = resolve(fixture.loopDataRoot, "fixture-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "trigger-b3-race-chain")
 			// #405: agent's blocked-status decision now comes through `extra.writeStatus`
 			// (mirror of `coder-loop item update --status blocked`), not a `REVIEW SUMMARY:
 			// verdict=blocked` stdout token.
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29005,
-				repoCwd: "/repo/a",
+				repoCwd,
 				writeStatus: "blocked",
 			})
 			fixture.store.recordRun({
