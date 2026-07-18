@@ -11,9 +11,9 @@ import {
 	createRepositoryGitCoordinator,
 	persistedParPin,
 	type ClosureReachabilityModel,
-} from "./closure-lifecycle"
+} from "../../../src/closure-lifecycle"
 
-const TEST_ROOT = resolve(import.meta.dir, "../.coder-loop/runtime/evidence/closure-lifecycle-tests", String(process.pid))
+const TEST_ROOT = resolve(import.meta.dir, "../../../.coder-loop/runtime/evidence/closure-lifecycle-tests", String(process.pid))
 
 describe("closure reachability fixed point", () => {
 	test("transitively protects seeded closures and leaves unrelated closures consumable", () => {

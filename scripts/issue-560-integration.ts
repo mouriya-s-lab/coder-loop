@@ -33,7 +33,7 @@ function assert(value: unknown, message: string): asserts value { if (!value) fa
 function runtimeStatus(value: string) { return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "issue-560.status"), "test") }
 function record(value: unknown, label: string): Record<string, unknown> {
 	assert(typeof value === "object" && value !== null && !Array.isArray(value), `${label} must be an object`)
-	return value as Record<string, unknown>
+	return Object.fromEntries(Object.entries(value))
 }
 function stringField(value: Record<string, unknown>, key: string, label: string): string {
 	const field = value[key]; assert(typeof field === "string", `${label}.${key} must be a string`); return field
