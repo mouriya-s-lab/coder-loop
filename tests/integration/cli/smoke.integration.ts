@@ -3,13 +3,13 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { createWriteStream } from "node:fs"
 
-import { startCoderLoopDaemon } from "./daemon"
-import { openSqliteStateStore } from "./sqlite-state"
-import { parseObservabilityEvent, type ObservabilityEvent } from "./observability"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import { createStreamTextState } from "./runner-output"
+import { startCoderLoopDaemon } from "../../../src/daemon"
+import { openSqliteStateStore } from "../../../src/sqlite-state"
+import { parseObservabilityEvent, type ObservabilityEvent } from "../../../src/observability"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
+import { createStreamTextState } from "../../../src/runner-output"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/smoke-tests", String(process.pid))
 

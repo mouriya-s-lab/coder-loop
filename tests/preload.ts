@@ -1,4 +1,4 @@
-import { LOOP_RUN_CREDENTIAL_ENV } from "./runtime-paths"
+import { LOOP_RUN_CREDENTIAL_ENV } from "../src/runtime-paths"
 
 delete process.env[LOOP_RUN_CREDENTIAL_ENV]
 

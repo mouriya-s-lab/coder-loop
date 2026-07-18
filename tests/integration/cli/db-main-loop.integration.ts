@@ -3,12 +3,12 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { type as arkType } from "arktype"
 
-import { startCoderLoopDaemon } from "./daemon"
-import { openSqliteStateStore } from "./sqlite-state"
-import { TaskTreeSnapshotBoundary } from "./task-runtime"
-import { engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { startCoderLoopDaemon } from "../../../src/daemon"
+import { openSqliteStateStore } from "../../../src/sqlite-state"
+import { TaskTreeSnapshotBoundary } from "../../../src/task-runtime"
+import { engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/db-main-loop-tests", String(process.pid))
 const CHAIN_NAME = "db-main-loop"

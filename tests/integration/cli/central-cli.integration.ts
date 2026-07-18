@@ -3,11 +3,11 @@ import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { createConnection, createServer } from "node:net"
 import { resolve } from "node:path"
 
-import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
-import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
-import { openSqliteStateStore } from "./sqlite-state"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
-import { appendObservabilityEvent, makeObservabilityEvent, queryObservabilityEvents } from "./observability"
+import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "../../../src/daemon"
+import { resolveChainRuntimePaths, resolveLoopDataPaths } from "../../../src/runtime-paths"
+import { openSqliteStateStore } from "../../../src/sqlite-state"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "../../../src/runtime-data"
+import { appendObservabilityEvent, makeObservabilityEvent, queryObservabilityEvents } from "../../../src/observability"
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function admittedTestStatus(value: string) {
@@ -17,12 +17,12 @@ function admittedTestStatus(value: string) {
 function observabilityTaskIdentity(runId: string) {
 	return { runtimeNodeId: `runtime:${runId}`, definitionRef: { kind: "chain", contentIdentity: "sha256:central-cli-test" }, definitionNodeId: `definition:${runId}` } as const
 }
-import type { BoundaryRecord } from "./boundary-types"
+import type { BoundaryRecord } from "../../../src/boundary-types"
 
 // #456: the legacy chain-drain auto-fire suppressor helper retired with the path itself; tests
 // that used to pre-install its lock now rely on the DSL chain-complete trigger driver only.
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/central-cli-tests", String(process.pid))
 const DEFAULT_CHAIN_CONFIG = chainConfig("mouriya-s-lab/coder-loop")
