@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { createWriteStream, existsSync, realpathSync, type WriteStream } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 
@@ -898,6 +898,7 @@ export function createGitWorktreeManager(
 				async () => await coordinator.run(context.repoCwd, async () => await resolveClosureBase(context.repoCwd, context.chain.baseBranch)),
 			)
 		return await coordinator.run(context.repoCwd, async () => {
+			await loadOrCaptureRepositoryGitContract(context.chain.name, context.repoCwd, options)
 			await mkdir(dirname(worktreePath), { recursive: true })
 			if (await gitWorktreeListIncludesPath(context.repoCwd, worktreePath)) {
 				if (!existsSync(worktreePath)) {
@@ -911,6 +912,17 @@ export function createGitWorktreeManager(
 			}
 			const shortBranch = branchName.replace(/^refs\/heads\//, "")
 			const branchExists = (await git(context.repoCwd, ["show-ref", "--verify", "--quiet", branchName])).exitCode === 0
+			if (branchExists) {
+				const listed = await git(context.repoCwd, ["worktree", "list", "--porcelain"])
+				if (listed.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to inspect closure worktrees for ${context.closureId}: ${listed.stderr}`)
+				const registeredPath = gitWorktreePathForBranch(listed.stdout, branchName)
+				if (registeredPath !== null && registeredPath !== worktreePath) {
+					const suffix = closureWorktreePath("/", context.chain.name, context.repoCwd, context.closureId)
+					if (!resolve(registeredPath).endsWith(suffix)) throw new SchedulerError("worktree_create_failed", `closure branch ${branchName} is checked out outside its engine namespace at ${registeredPath}`)
+					const remove = await git(context.repoCwd, ["worktree", "remove", "--force", registeredPath])
+					if (remove.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to remove stale closure worktree registration ${registeredPath}: ${remove.stderr}`)
+				}
+			}
 			const result = await git(context.repoCwd, branchExists
 				? ["worktree", "add", worktreePath, branchName]
 				: ["worktree", "add", "-b", shortBranch, worktreePath, base.commit])
@@ -938,8 +950,8 @@ export type ClosureReconciliationMismatch =
 	| { kind: "orphan-branch"; branchName: string; repaired: true }
 	| { kind: "orphan-branch"; branchName: string; repaired: false; error: string }
 	| { kind: "repository-scan-failed"; surface: "branches" | "worktrees"; repaired: false; error: string }
-	| { kind: "hooks-drift"; hooksPath: string; repaired: false }
-	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; value: string; repaired: false }
+	| { kind: "hooks-drift"; expected: string | null; actual: string | null; repaired: false }
+	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; expected: string | null; actual: string | null; repaired: false }
 
 export type ReconcileClosureResourcesInput = {
 	chain: ChainRecord
@@ -975,10 +987,10 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 	}
 	for (const repoCwd of new Set(input.items.map((item) => item.repoCwd))) {
 		await repositoryGitCoordinator.run(repoCwd, async () => {
-			const hooks = await git(repoCwd, ["config", "--get", "core.hooksPath"])
-			if (hooks.exitCode === 0 && hooks.stdout !== "") findings.push({ closureId: null, repoCwd, mismatch: { kind: "hooks-drift", hooksPath: hooks.stdout, repaired: false } })
-			const worktreeConfig = await git(repoCwd, ["config", "--get", "extensions.worktreeConfig"])
-			if (worktreeConfig.exitCode === 0 && worktreeConfig.stdout !== "") findings.push({ closureId: null, repoCwd, mismatch: { kind: "repo-config-drift", key: "extensions.worktreeConfig", value: worktreeConfig.stdout, repaired: false } })
+			const expected = await loadOrCaptureRepositoryGitContract(input.chain.name, repoCwd, input.loopDataRootOptions)
+			const actual = await readRepositoryGitContract(repoCwd)
+			if (actual.hooksPath !== expected.hooksPath) findings.push({ closureId: null, repoCwd, mismatch: { kind: "hooks-drift", expected: expected.hooksPath, actual: actual.hooksPath, repaired: false } })
+			if (actual.worktreeConfig !== expected.worktreeConfig) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repo-config-drift", key: "extensions.worktreeConfig", expected: expected.worktreeConfig, actual: actual.worktreeConfig, repaired: false } })
 			const prefix = closureBranchPrefix(input.chain.name)
 			const listed = await git(repoCwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
 			if (listed.exitCode !== 0) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "branches", repaired: false, error: gitFailure("for-each-ref", listed) } })
@@ -1022,6 +1034,75 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 
 function gitWorktreePaths(output: string): string[] {
 	return output.split("\n").flatMap((line) => line.startsWith("worktree ") ? [resolve(line.slice("worktree ".length))] : [])
+}
+
+function gitWorktreePathForBranch(output: string, branchName: string): string | null {
+	for (const record of output.split("\n\n")) {
+		const lines = record.split("\n")
+		if (!lines.includes(`branch ${branchName}`)) continue
+		const worktree = lines.find((line) => line.startsWith("worktree "))
+		return worktree === undefined ? null : resolve(worktree.slice("worktree ".length))
+	}
+	return null
+}
+
+type RepositoryGitContract = {
+	hooksPath: string | null
+	worktreeConfig: string | null
+}
+
+async function readRepositoryGitContract(repoCwd: string): Promise<RepositoryGitContract> {
+	const readConfig = async (key: "core.hooksPath" | "extensions.worktreeConfig"): Promise<string | null> => {
+		const result = await git(repoCwd, ["config", "--get", key])
+		if (result.exitCode === 0) return result.stdout
+		if (result.exitCode === 1 && result.stdout === "") return null
+		throw new SchedulerError("worktree_create_failed", `failed to read repository Git contract ${key}: ${result.stderr}`)
+	}
+	return {
+		hooksPath: await readConfig("core.hooksPath"),
+		worktreeConfig: await readConfig("extensions.worktreeConfig"),
+	}
+}
+
+function repositoryGitContractPath(chainName: string, repoCwd: string, options: LoopDataRootOptions = {}): string {
+	const identity = createHash("sha256").update(resolve(repoCwd)).digest("hex").slice(0, 24)
+	return resolve(resolveChainRuntimePaths(chainName, options).chainRoot, "git-contracts", identity)
+}
+
+function encodeGitContractValue(value: string | null): string {
+	return value === null ? "unset\n" : `value\n${value}`
+}
+
+function decodeGitContractValue(value: string): string | null {
+	if (value === "unset\n") return null
+	if (value.startsWith("value\n")) return value.slice("value\n".length)
+	throw new SchedulerError("worktree_create_failed", "persisted repository Git contract is malformed")
+}
+
+async function loadOrCaptureRepositoryGitContract(chainName: string, repoCwd: string, options: LoopDataRootOptions = {}): Promise<RepositoryGitContract> {
+	const root = repositoryGitContractPath(chainName, repoCwd, options)
+	const hooksFile = resolve(root, "core-hooks-path")
+	const worktreeConfigFile = resolve(root, "extensions-worktree-config")
+	try {
+		return {
+			hooksPath: decodeGitContractValue(await readFile(hooksFile, "utf8")),
+			worktreeConfig: decodeGitContractValue(await readFile(worktreeConfigFile, "utf8")),
+		}
+	} catch (error) {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
+	}
+	const current = await readRepositoryGitContract(repoCwd)
+	await mkdir(root, { recursive: true })
+	await writeFile(hooksFile, encodeGitContractValue(current.hooksPath), { flag: "wx" }).catch((error) => {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error
+	})
+	await writeFile(worktreeConfigFile, encodeGitContractValue(current.worktreeConfig), { flag: "wx" }).catch((error) => {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error
+	})
+	return {
+		hooksPath: decodeGitContractValue(await readFile(hooksFile, "utf8")),
+		worktreeConfig: decodeGitContractValue(await readFile(worktreeConfigFile, "utf8")),
+	}
 }
 
 function gitFailure(operation: string, result: { exitCode: number; stderr: string }): string {
@@ -1157,7 +1238,7 @@ export async function sampleClosureConsumptionObservation(input: {
 		try {
 			freshness = (await resolveClosureBase(input.repoCwd, input.baseBranch)).freshness
 		} catch {
-			freshness = { kind: "retained", commit: input.baseCommit }
+			return { evidence: "unevaluable", freshness: { kind: "retained", commit: input.baseCommit } }
 		}
 		if (branch.stdout === input.baseCommit) return { evidence: "no-work", freshness }
 		if (freshness.kind === "fetched") {

@@ -362,7 +362,7 @@ async function main(): Promise<void> {
 		const blockedLifecycleLog = command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--chain", blocked, "--loop-data-root", daemon.root], { env }).stdout
 		assert(blockedLifecycleLog.indexOf("closure.resource_prepared") >= 0 && blockedLifecycleLog.indexOf("closure.resource_prepared") < blockedLifecycleLog.indexOf("agent.spawn"), "C01/C03 resources were not durably observed before runner spawn")
 		const fetchCount = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").split("\n").filter((line) => line.includes('"event":"fetch"')).length
-		assert(fetchCount === 1, `C02 expected one serialized/deduplicated fetch for the phase sequence, observed ${fetchCount}`)
+		assert(fetchCount === 2, `C02 expected one fresh-base fetch per first-open phase closure, observed ${fetchCount}`)
 		writeFileSync(resolve(blockedReview.cwd, ".issue560-blocked-review-release"), "release\n")
 		await until(() => statusDone(daemon, blocked, repos.target), Boolean, "blocked chain completion")
 		await until(() => closureRows(daemon.root, blocked).every((row) => row.lifecycle === "consumed"), Boolean, "blocked closure consumption")

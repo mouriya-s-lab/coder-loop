@@ -86,7 +86,7 @@ function makeItem(store: ReturnType<typeof openSqliteStateStore>, chain: ReturnT
 	return store.createItem({ chainId: chain.id, itemId, repoCwd, status: runtimeStatus("queued"), attempts: 0, extra: storedItemExtra({}) })
 }
 
-test("different closures retain different worktrees and branches across loop-data roots", async () => {
+test("the same closure recovers its branch from a stale loop-data-root worktree", async () => {
 	const root = resolve(TEST_ROOT, "stale-slot-branch")
 	const repoCwd = resolve(root, "repo")
 	await initGitRepo(repoCwd)
@@ -106,21 +106,48 @@ test("different closures retain different worktrees and branches across loop-dat
 		expect(existsSync(resourceA.worktreePath)).toBe(true)
 
 		const chainB = makeChain(storeB, "wedge-chain")
-		const itemB = makeItem(storeB, chainB, "b")
+		const itemB = makeItem(storeB, chainB, "a")
 		const managerB = createGitWorktreeManager({ loopDataRoot: rootB })
-		const resourceB = await managerB({ chain: chainB, item: itemB, phase: "review", closureId: "closure:b:review", repoCwd, slotKey: "slot-b", existing: null })
+		const resourceB = await managerB({ chain: chainB, item: itemB, phase: "iteration", closureId: "closure:a:iteration", repoCwd, slotKey: "slot-b", existing: null })
 		if (typeof resourceB === "string") throw new Error("expected closure resources")
-		expect(resourceB.worktreePath).toBe(closureWorktreePath(rootB, chainB.name, repoCwd, "closure:b:review"))
+		expect(resourceB.worktreePath).toBe(closureWorktreePath(rootB, chainB.name, repoCwd, "closure:a:iteration"))
 		expect(resourceB.worktreePath).not.toBe(resourceA.worktreePath)
-		expect(resourceB.branchName).not.toBe(resourceA.branchName)
+		expect(resourceB.branchName).toBe(resourceA.branchName)
 		expect(existsSync(resourceB.worktreePath)).toBe(true)
+		expect(existsSync(resourceA.worktreePath)).toBe(false)
 		const list = git(repoCwd, ["worktree", "list", "--porcelain"]).stdout
-		expect(list).toContain(resourceA.worktreePath)
+		expect(list).not.toContain(resourceA.worktreePath)
 		expect(list).toContain(resourceB.worktreePath)
 	} finally {
 		storeA.close()
 		storeB.close()
 	}
+})
+
+test("reconciliation compares repository Git config with its captured baseline", async () => {
+	const root = resolve(TEST_ROOT, "repository-contract-baseline")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	expect(git(repoCwd, ["config", "core.hooksPath", ".preexisting-hooks"]).exitCode).toBe(0)
+	expect(git(repoCwd, ["config", "extensions.worktreeConfig", "true"]).exitCode).toBe(0)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "repository-contract-chain")
+		const item = makeItem(store, chain, "contract", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		await manager({ chain, item, phase: "iteration", closureId: "closure:contract:iteration", repoCwd, slotKey: "slot", existing: null })
+		const baseline = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		expect(baseline.filter((finding) => finding.mismatch.kind === "hooks-drift" || finding.mismatch.kind === "repo-config-drift")).toEqual([])
+		expect(git(repoCwd, ["config", "core.hooksPath", ".changed-hooks"]).exitCode).toBe(0)
+		expect(git(repoCwd, ["config", "extensions.worktreeConfig", "false"]).exitCode).toBe(0)
+		const drift = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		expect(drift.map((finding) => finding.mismatch).filter((mismatch) => mismatch.kind === "hooks-drift" || mismatch.kind === "repo-config-drift")).toEqual([
+			{ kind: "hooks-drift", expected: ".preexisting-hooks", actual: ".changed-hooks", repaired: false },
+			{ kind: "repo-config-drift", key: "extensions.worktreeConfig", expected: "true", actual: "false", repaired: false },
+		])
+	} finally { store.close() }
 })
 
 test("concurrent closure opens share the scheduler's origin fetch", async () => {

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { existsSync } from "node:fs"
 import { createHash } from "node:crypto"
-import { basename, dirname, resolve } from "node:path"
+import { resolve } from "node:path"
 import { type as arkType } from "arktype"
 
 import type { AgentRunnerKind, JsonObject, JsonValue } from "./loop"
@@ -29,7 +29,7 @@ import {
 	type TaskTreeSnapshot,
 } from "./task-runtime"
 import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
-import { closureBranchName, closureWorktreePath, computeClosureReachability, persistedClosureReachabilityModel, type ClosureReachabilityModel } from "./closure-lifecycle"
+import { computeClosureReachability, persistedClosureReachabilityModel, type ClosureReachabilityModel } from "./closure-lifecycle"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -462,7 +462,6 @@ const SessionIdRowBoundary = arkType({ session_id: "string>0", "+": "reject" })
 const ItemIdRowBoundary = arkType({ item_id: "string>0", "+": "reject" })
 const DefinitionIdentityRowBoundary = arkType({ definition_kind: "'preset'|'chain'", definition_content_identity: "string>0", "+": "reject" })
 const TaskNodeKindRowBoundary = arkType({ kind: "'leaf'|'seq'|'par'", "+": "reject" })
-const RuntimeClosureOwnerBoundary = arkType({ chain_name: "string>0", repo_cwd: "string>0", "+": "reject" })
 const NextChildIndexRowBoundary = arkType({ next_index: "number.integer>=0", "+": "reject" })
 const RuntimeNodeIdRowBoundary = arkType({ runtime_node_id: "string>0", "+": "reject" })
 const RunTaskIdentityRowBoundary = arkType({ closure_id: "string>0", leaf_node_id: "string>0", "+": "reject" })
@@ -2164,31 +2163,19 @@ function ensureRuntimeClosure(db: Database, run: RuntimeClosureSeed): void {
 	const worktree = worktreeValue
 	const branch = branchValue
 	const baseCommit = baseCommitValue
-	const owner = queryPersistedOne(db, "SELECT chains.name AS chain_name, items.repo_cwd AS repo_cwd FROM items INNER JOIN chains ON chains.id = items.chain_id WHERE items.id = $itemId", { itemId: run.itemId }, RuntimeClosureOwnerBoundary, `runtime closure owner for item ${run.itemId}`)
-	if (owner === null) throw new SqliteStateError("run_closure_mismatch", `run ${run.runId} closure owner does not exist`, { runId: run.runId })
 	const now = unixSeconds()
 	requireRuntimeDefinitionPhase(definitionPacket, run.phase, run.runId)
-	let firstLeafId: string | null = null
-	for (const definitionPhase of definitionPacket.definitionPhases) {
-		const { phase, definitionNodeId } = definitionPhase
-		if (queryPersistedOne(db, "SELECT closure_id FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: run.itemId, phase }, ClosureIdRowBoundary, `runtime closure for item ${run.itemId} phase ${phase}`) !== null) continue
-		const indexRow = queryPersistedOne(db, "SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root", { root: root.root_node_id }, NextChildIndexRowBoundary, `next runtime closure child index for ${root.root_node_id}`)
-		if (indexRow === null) throw new SqliteStateError("invalid_json", `runtime closure root ${root.root_node_id} has no child index projection`, { rootNodeId: root.root_node_id })
-		const index = indexRow.next_index
-		const leafId = `closure-node:${run.itemId}:${phase}`
-		const closureId = `closure:${run.itemId}:${phase}`
-		const phaseWorktree = phase === run.phase
-			? worktree
-			: resolve(dirname(worktree), basename(closureWorktreePath("/", owner.chain_name, owner.repo_cwd, closureId)))
-		const phaseBranch = phase === run.phase ? branch : closureBranchName(owner.chain_name, closureId)
-		const lifecycle = phase === run.phase ? "active" : "suspended"
-		db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $index, 'leaf', $definitionKind, $definition, $definitionNode)").run({ leaf: leafId, chainId: run.chainId, root: root.root_node_id, index, definitionKind: definitionRef.kind, definition: definitionRef.contentIdentity, definitionNode: definitionNodeId })
-		db.query<never, SqlParams>("INSERT INTO task_closures (closure_id, leaf_node_id, item_row_id, phase, lifecycle, worktree_path, branch_name, base_commit, source_par_node_id, created_at, updated_at) VALUES ($closure, $leaf, $itemId, $phase, $lifecycle, $worktree, $branch, $baseCommit, NULL, $now, $now)").run({ closure: closureId, leaf: leafId, itemId: run.itemId, phase, lifecycle, worktree: phaseWorktree, branch: phaseBranch, baseCommit, now })
-		db.query<never, SqlParams>("INSERT INTO task_leaf_nodes (runtime_node_id, closure_id) VALUES ($leaf, $closure)").run({ leaf: leafId, closure: closureId })
-		firstLeafId ??= leafId
-	}
+	const definitionPhase = definitionPacket.definitionPhases.find(({ phase }) => phase === run.phase)
+	if (definitionPhase === undefined) throw new SqliteStateError("invalid_input", `run ${run.runId} phase ${run.phase} is absent from its execution definition`, { runId: run.runId, phase: run.phase })
+	const indexRow = queryPersistedOne(db, "SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root", { root: root.root_node_id }, NextChildIndexRowBoundary, `next runtime closure child index for ${root.root_node_id}`)
+	if (indexRow === null) throw new SqliteStateError("invalid_json", `runtime closure root ${root.root_node_id} has no child index projection`, { rootNodeId: root.root_node_id })
+	const leafId = `closure-node:${run.itemId}:${run.phase}`
+	const closureId = `closure:${run.itemId}:${run.phase}`
+	db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $index, 'leaf', $definitionKind, $definition, $definitionNode)").run({ leaf: leafId, chainId: run.chainId, root: root.root_node_id, index: indexRow.next_index, definitionKind: definitionRef.kind, definition: definitionRef.contentIdentity, definitionNode: definitionPhase.definitionNodeId })
+	db.query<never, SqlParams>("INSERT INTO task_closures (closure_id, leaf_node_id, item_row_id, phase, lifecycle, worktree_path, branch_name, base_commit, source_par_node_id, created_at, updated_at) VALUES ($closure, $leaf, $itemId, $phase, 'active', $worktree, $branch, $baseCommit, NULL, $now, $now)").run({ closure: closureId, leaf: leafId, itemId: run.itemId, phase: run.phase, worktree, branch, baseCommit, now })
+	db.query<never, SqlParams>("INSERT INTO task_leaf_nodes (runtime_node_id, closure_id) VALUES ($leaf, $closure)").run({ leaf: leafId, closure: closureId })
 	const seqExists = queryPersistedOne(db, "SELECT runtime_node_id FROM task_seq_nodes WHERE runtime_node_id = $root", { root: root.root_node_id }, RuntimeNodeIdRowBoundary, `runtime seq root ${root.root_node_id}`)
-	if (seqExists === null) db.query<never, SqlParams>("INSERT INTO task_seq_nodes (runtime_node_id, next_child_node_id) VALUES ($root, $leaf)").run({ root: root.root_node_id, leaf: firstLeafId })
+	if (seqExists === null) db.query<never, SqlParams>("INSERT INTO task_seq_nodes (runtime_node_id, next_child_node_id) VALUES ($root, $leaf)").run({ root: root.root_node_id, leaf: leafId })
 }
 
 function parseExecutionDefinitionPacket(extra: JsonObject, runId: string, errorCode: "invalid_input" | "invalid_json"): PersistedExecutionDefinitionPacket {

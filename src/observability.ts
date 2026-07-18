@@ -250,8 +250,8 @@ const ClosureReconciliationMismatchBoundary = arkType.or(
 	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(true) },
 	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(false), error: "string>0" },
 	{ kind: arkType.unit("repository-scan-failed"), surface: arkType.or(arkType.unit("branches"), arkType.unit("worktrees")), repaired: arkType.unit(false), error: "string>0" },
-	{ kind: arkType.unit("hooks-drift"), hooksPath: "string>0", repaired: arkType.unit(false) },
-	{ kind: arkType.unit("repo-config-drift"), key: "string>0", value: "string>0", repaired: arkType.unit(false) },
+	{ kind: arkType.unit("hooks-drift"), expected: "string|null", actual: "string|null", repaired: arkType.unit(false) },
+	{ kind: arkType.unit("repo-config-drift"), key: "string>0", expected: "string|null", actual: "string|null", repaired: arkType.unit(false) },
 )
 
 const ClosureConsumptionEvidenceBoundary = arkType.or(
