@@ -52,7 +52,7 @@ coder-loop doctor  <target>
 开发工作面：
 
 - **Type check**: `bun run typecheck`
-- **Unit / component tests**: `bun test` / `bun run test:unit`（目录迁移完成后统一位于 `tests/unit/**`；不得启动 coder-loop daemon、runner workflow 或 worktree 生命周期）
+- **Unit / component tests**: `bun test` / `bun run test:unit`（统一位于 `tests/unit/**`；不得启动 coder-loop daemon、runner workflow 或 worktree 生命周期）
 - **Local integration suites**: `bun run test:integration -- --log-file <path>`（依次运行 `tests/integration/cli/`、`scheduler/`、`daemon/`，每个目录内的 `*.integration.ts` 逐文件串行；`--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行）
 - **All local test layers**: `bun run test:all -- --log-file <path>`（按 unit → integration-cli → integration-scheduler → integration-daemon fail-fast；`--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行）
 - **Single batch / status**: `bun scripts/run-tests.ts --batch <name> --log-file <path>` 默认后台运行；integration 批必须传日志路径，纯 `--batch unit` 可省略日志并保持前台透传。用 `bun scripts/run-tests.ts --status [runId]` 查看 `.test-runs/` 中的进度。目录准入规则见 `docs/test-boundaries.md`。

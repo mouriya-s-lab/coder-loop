@@ -11,7 +11,7 @@
 - 不得启动 coder-loop daemon、runner workflow 或 worktree 生命周期，也不得依赖 GitHub、网络或操作员的生产 runtime。
 - 测试可以使用临时文件与进程内 SQLite，但必须自行隔离和清理状态。
 
-`bun test` 与 `bun run test:unit` 运行 Bun 默认收集到的全部 unit 测试；目录迁移完成后，unit 测试统一位于 `tests/unit/**`。
+`bun test` 与 `bun run test:unit` 运行 Bun 默认收集到的全部 unit 测试，统一位于 `tests/unit/**`。
 
 ### `tests/integration/**`
 
