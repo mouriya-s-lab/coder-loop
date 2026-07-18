@@ -31,7 +31,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 | L2 preset (`presets/<name>/`) | phase 顺序、状态词表与转移、角色 prompt、chain-action exits、post-review trigger DAG | target 项目命令、CI 配置、PR 模板细节 |
 | target | 项目命令、CI-parity 规则、PR/evidence/review 具体形式 | 引擎调度、其他 preset |
 
-engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[[phases]]` / `[[fragments]]` / `[item.fields]` 全部字段语义见 `docs/preset-authoring.md`。Engine runtime fact key count: 26.（`src/loop.test.ts` 用此计数守护 CLAUDE.md / `docs/preset-authoring.md` 与 `ENGINE_RUNTIME_BINDING_KEYS` 三处对齐；新增 engine runtime fact 时同步改本计数与 `docs/preset-authoring.md` 内嵌列表。）
+engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[[phases]]` / `[[fragments]]` / `[item.fields]` 全部字段语义见 `docs/preset-authoring.md`。Engine runtime fact key count: 26.（`tests/unit/loop/runtime-bindings.test.ts` 用此计数守护 CLAUDE.md / `docs/preset-authoring.md` 与 `ENGINE_RUNTIME_BINDING_KEYS` 三处对齐；新增 engine runtime fact 时同步改本计数与 `docs/preset-authoring.md` 内嵌列表。）
 
 ## Commands
 
@@ -52,11 +52,13 @@ coder-loop doctor  <target>
 开发工作面：
 
 - **Type check**: `bun run typecheck`
-- **Unit / component tests**: `bun test`（只收集 `*.test.ts`；不得启动 coder-loop daemon、runner workflow 或 worktree 生命周期）
-- **Local integration suites**: `bun run test:integration`（显式运行 `*.integration.ts` / `scheduler.integration-suite.ts`）
-- **All local test layers**: `bun run test:all`；边界和逐文件清单见 `docs/test-boundaries.md`。
-- **Engine integration（进程级引擎集成验收）**: `bun scripts/engine-integration.ts [flags]` — 本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-integration-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。**这不是 e2e**：runner 被确定性 stub 替换、业务负载是合成的，它只证明引擎的真实进程面（daemon/socket/spawn/准入/worktree/SQLite），不证明真实 agent 在真实 target 上的业务结果。runbook 见 `docs/engine-integration.md`。
-- **Real e2e（真实 runner + GitHub 终态）**: `bun scripts/real-e2e.ts [--preset <name>] [flags]` — 在私有 fixture repo seed 真实 issue，跑真实 runner 完成 branch / PR / review / merge / issue closure，再断言 GitHub 与 default branch 终态。默认 `real-e2e-minimal`；`--preset gh-issue-pr-iteration` 跑全保真。每轮以 UUID 隔离 fixture / checkout / chain / loop-data，不持有完整生命周期并发锁。runbook 见 `docs/real-e2e-fixture.md`。
+- **Unit / component tests**: `bun test` / `bun run test:unit`（统一位于 `tests/unit/**`；不得启动 coder-loop daemon、runner workflow 或 worktree 生命周期）
+- **Local integration suites**: `bun run test:integration -- --log-file <path>`（依次运行 `tests/integration/cli/`、`scheduler/`、`daemon/`，每个目录内的 `*.integration.ts` 逐文件串行；`--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行）
+- **All local test layers**: `bun run test:all -- --log-file <path>`（按 unit → integration-cli → integration-scheduler → integration-daemon fail-fast；`--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行）
+- **Single batch / status**: `bun scripts/run-tests.ts --batch <name> --log-file <path>` 默认后台运行；integration 批必须传日志路径，纯 `--batch unit` 可省略日志并保持前台透传。用 `bun scripts/run-tests.ts --status [runId]` 查看 `.test-runs/` 中的进度。目录准入规则见 `docs/test-boundaries.md`。
+- **Shared Bun test preload**: `tests/preload.ts`（由 `bunfig.toml` 加载）
+- **Engine integration（进程级引擎集成验收）**: `bun scripts/engine-integration.ts --log-file <path> [flags]` — `--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行。本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-integration-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。**这不是 e2e**：runner 被确定性 stub 替换、业务负载是合成的，它只证明引擎的真实进程面（daemon/socket/spawn/准入/worktree/SQLite），不证明真实 agent 在真实 target 上的业务结果。runbook 见 `docs/engine-integration.md`。
+- **Real e2e（真实 runner + GitHub 终态）**: `bun scripts/real-e2e.ts --log-file <path> [flags]` — `--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行。在私有 fixture repo seed 真实 issue，跑真实 runner 完成 branch / PR / review / merge / issue closure，再断言 GitHub 与 default branch 终态。默认 `real-e2e-minimal`；`--preset gh-issue-pr-iteration` 跑全保真。每轮以 UUID 隔离 fixture / checkout / chain / loop-data，不持有完整生命周期并发锁。runbook 见 `docs/real-e2e-fixture.md`。
 
 ### Issue 验证边界、整链路 integration 与 real E2E
 
