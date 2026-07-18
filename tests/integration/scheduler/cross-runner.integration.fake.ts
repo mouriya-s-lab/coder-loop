@@ -85,7 +85,7 @@ if (typeof response.writeStatus === "string") {
 	const chainName = stringValue(promptInput.chainName, "")
 	if (chainName === "" || issueNumber === null) process.exit(2)
 	const update = Bun.spawnSync({
-		cmd: ["bun", resolve(import.meta.dir, "loop.ts"), "item", "update", chainName, "--issue", String(issueNumber), "--status", response.writeStatus],
+		cmd: ["bun", resolve(import.meta.dir, "../../../src/loop.ts"), "item", "update", chainName, "--issue", String(issueNumber), "--status", response.writeStatus],
 		stdout: "pipe", stderr: "pipe",
 	})
 	if (update.exitCode !== 0) {

@@ -11,12 +11,12 @@ import {
 	schedulerTick,
 	type SchedulerEvent,
 	type SchedulerOptions,
-} from "./scheduler"
-import { openSqliteStateStore } from "./sqlite-state"
-import { loadPreset } from "./loop"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+} from "../../../src/scheduler"
+import { openSqliteStateStore } from "../../../src/sqlite-state"
+import { loadPreset } from "../../../src/loop"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
 
-const REPO_ROOT = resolve(import.meta.dir, "..")
+const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-worktree-tests", String(process.pid))
