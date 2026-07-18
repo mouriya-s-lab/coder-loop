@@ -5,6 +5,7 @@ import { resolve } from "node:path"
 import {
 	closureBranchName,
 	closureBranchPrefix,
+	closureResourcesBelongToEngine,
 	closureWorktreePath,
 	computeClosureReachability,
 	createRepositoryGitCoordinator,
@@ -45,11 +46,16 @@ describe("closure reachability fixed point", () => {
 
 test("closure resource identity is per closure and stays in the engine namespace", () => {
 	const root = resolve(TEST_ROOT, "identity")
-	const iteration = closureWorktreePath(root, "chain", "/repo", "closure:1:iteration")
+	const closureId = "closure:1:iteration"
+	const iteration = closureWorktreePath(root, "chain", "/repo", closureId)
 	const review = closureWorktreePath(root, "chain", "/repo", "closure:1:review")
 	expect(iteration).not.toBe(review)
-	expect(closureBranchName("chain", "closure:1:iteration")).not.toBe(closureBranchName("chain", "closure:1:review"))
-	expect(closureBranchName("chain", "closure:1:iteration")).toStartWith(closureBranchPrefix("chain"))
+	const branch = closureBranchName("chain", closureId)
+	expect(branch).not.toBe(closureBranchName("chain", "closure:1:review"))
+	expect(branch).toStartWith(closureBranchPrefix("chain"))
+	expect(closureResourcesBelongToEngine(root, "chain", "/repo", closureId, iteration, branch)).toBe(true)
+	const outsideRoot = closureWorktreePath(resolve(TEST_ROOT, "outside-engine-root"), "chain", "/repo", closureId)
+	expect(closureResourcesBelongToEngine(root, "chain", "/repo", closureId, outsideRoot, branch)).toBe(false)
 })
 
 test("par members derive their first-open base only from the persisted containing pin", () => {

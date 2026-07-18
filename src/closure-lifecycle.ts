@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto"
-import { basename, dirname, resolve } from "node:path"
+import { basename, resolve } from "node:path"
+
+import type { ClosureSnapshot, TaskNodeSnapshot, TaskTreeSnapshot } from "./task-runtime"
 
 export type ClosureReachabilitySeed =
 	| { kind: "active-run"; closureId: string }
@@ -36,6 +38,65 @@ export function computeClosureReachability(model: ClosureReachabilityModel): Rea
 	return reachable
 }
 
+export function persistedClosureReachabilityModel(
+	tree: TaskTreeSnapshot,
+	terminalItemRowIds: ReadonlySet<number>,
+): ClosureReachabilityModel {
+	const closures = collectTaskClosures(tree.root)
+	const seeds: ClosureReachabilitySeed[] = tree.activeRuns.map((run) => ({ kind: "active-run", closureId: run.closureId }))
+	const seeded = new Set(seeds.map((seed) => `${seed.kind}\0${seed.closureId}`))
+	const addSeed = (seed: ClosureReachabilitySeed): void => {
+		const identity = `${seed.kind}\0${seed.closureId}`
+		if (seeded.has(identity)) return
+		seeded.add(identity)
+		seeds.push(seed)
+	}
+	const seedClosures = (node: TaskNodeSnapshot, kind: ClosureReachabilitySeed["kind"]): void => {
+		for (const closure of collectTaskClosures(node)) {
+			if (closure.lifecycle !== "consumed") addSeed({ kind, closureId: closure.closureId })
+		}
+	}
+	const visit = (node: TaskNodeSnapshot): void => {
+		switch (node.kind) {
+			case "leaf":
+				if (node.closure.lifecycle !== "consumed" && !terminalItemRowIds.has(node.closure.itemRowId)) addSeed({ kind: "resumable-attempt", closureId: node.closure.closureId })
+				return
+			case "seq": {
+				const cursor = node.cursor
+				if (cursor.kind === "next") {
+					const cursorIndex = node.children.findIndex((child) => child.identity.runtimeNodeId === cursor.nodeId)
+					for (const child of node.children.slice(cursorIndex < 0 ? 0 : cursorIndex)) {
+						for (const closure of collectTaskClosures(child)) {
+							if (closure.lifecycle !== "consumed" && !terminalItemRowIds.has(closure.itemRowId)) addSeed({ kind: "seq-suffix", closureId: closure.closureId })
+						}
+					}
+				}
+				for (const child of node.children) visit(child)
+				return
+			}
+			case "par": {
+				if (node.state === "open") seedClosures(node, "open-par-epoch")
+				if (node.join.evaluation.kind === "decided") seedClosures(node, "decided-reopen")
+				if (node.join.evaluation.kind !== "not-evaluating" && node.join.currentVersion > node.join.evaluation.bindingVersion) seedClosures(node, "next-epoch-candidate")
+				for (const child of node.children) visit(child)
+				return
+			}
+			default: return assertNever(node)
+		}
+	}
+	visit(tree.root)
+	return { closures: closures.map((closure) => closure.closureId), seeds, edges: [] }
+}
+
+function collectTaskClosures(node: TaskNodeSnapshot): ClosureSnapshot[] {
+	if (node.kind === "leaf") return [node.closure]
+	return node.children.flatMap(collectTaskClosures)
+}
+
+function assertNever(value: never): never {
+	throw new Error(`unhandled task node ${JSON.stringify(value)}`)
+}
+
 function safeComponent(value: string): string {
 	const sanitized = value.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "")
 	return sanitized === "" || sanitized.includes("..") ? "closure" : sanitized
@@ -58,15 +119,16 @@ export function closureBranchPrefix(chainName: string): string {
 	return `refs/heads/coder-loop/closures/${safeComponent(chainName)}/`
 }
 
-export function closureResourcesBelongToEngine(repoCwd: string, closureId: string, worktreePath: string, branchName: string): boolean {
-	const branchParts = branchName.split("/")
-	const worktreeRoot = dirname(worktreePath)
-	const branchOwned = branchParts.length === 6
-		&& branchParts.slice(0, 4).join("/") === "refs/heads/coder-loop/closures"
-		&& branchParts[4] === basename(dirname(worktreeRoot))
-		&& branchParts[5] === shortHash(closureId)
-	const expectedSuffix = `-${shortHash(repoCwd)}-${shortHash(closureId)}`
-	return branchOwned && basename(worktreeRoot) === "worktrees" && basename(worktreePath).endsWith(expectedSuffix)
+export function closureResourcesBelongToEngine(
+	loopDataRoot: string,
+	chainName: string,
+	repoCwd: string,
+	closureId: string,
+	worktreePath: string,
+	branchName: string,
+): boolean {
+	return resolve(worktreePath) === closureWorktreePath(loopDataRoot, chainName, repoCwd, closureId)
+		&& branchName === closureBranchName(chainName, closureId)
 }
 
 export type PersistedParPinSource = {

@@ -53,7 +53,7 @@ import {
 	type SchedulerSpawnErrorAttribution,
 } from "./runtime-data"
 import { detectsSessionIdInvalid } from "./runners/session-id"
-import { type ChainRecord, type ClosureConsumptionEvidence, type ConsumeClosureResult, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, type ClosureConsumptionAuthority, type ClosureConsumptionEvidence, type ConsumeClosureResult, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
 	LOOP_RUN_CREDENTIAL_ENV,
@@ -72,7 +72,6 @@ import {
 	closureWorktreePath,
 	createRepositoryGitCoordinator,
 	persistedParPin,
-	type ClosureReachabilityModel,
 	type OriginFreshness,
 	type RepositoryGitCoordinator,
 	type RepositoryGitSingleflightResult,
@@ -935,7 +934,10 @@ export type ClosureReconciliationMismatch =
 	| { kind: "missing-directory"; path: string; repaired: false }
 	| { kind: "missing-branch"; branchName: string; repaired: false }
 	| { kind: "orphan-directory"; path: string; repaired: true }
+	| { kind: "orphan-directory"; path: string; repaired: false; error: string }
 	| { kind: "orphan-branch"; branchName: string; repaired: true }
+	| { kind: "orphan-branch"; branchName: string; repaired: false; error: string }
+	| { kind: "repository-scan-failed"; surface: "branches" | "worktrees"; repaired: false; error: string }
 	| { kind: "hooks-drift"; hooksPath: string; repaired: false }
 	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; value: string; repaired: false }
 
@@ -958,6 +960,8 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 	const closures = collectClosures(input.tree)
 	const registeredPaths = new Set(closures.flatMap((closure) => closure.lifecycle === "consumed" || closure.worktreePath === null ? [] : [closure.worktreePath]))
 	const branchesByRepo = new Map<string, Set<string>>()
+	const repositoryWorktrees = new Map<string, string>()
+	const worktreeScanFailed = new Set<string>()
 	for (const closure of closures) {
 		const item = items.get(closure.itemRowId)
 		if (item === undefined || closure.lifecycle === "consumed") continue
@@ -977,10 +981,19 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 			if (worktreeConfig.exitCode === 0 && worktreeConfig.stdout !== "") findings.push({ closureId: null, repoCwd, mismatch: { kind: "repo-config-drift", key: "extensions.worktreeConfig", value: worktreeConfig.stdout, repaired: false } })
 			const prefix = closureBranchPrefix(input.chain.name)
 			const listed = await git(repoCwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
-			if (listed.exitCode === 0) for (const branchName of listed.stdout.split("\n").filter((name) => name.startsWith(prefix))) {
+			if (listed.exitCode !== 0) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "branches", repaired: false, error: gitFailure("for-each-ref", listed) } })
+			else for (const branchName of listed.stdout.split("\n").filter((name) => name.startsWith(prefix))) {
 				if (branchesByRepo.get(repoCwd)?.has(branchName) === true) continue
-				if ((await git(repoCwd, ["update-ref", "-d", branchName])).exitCode === 0) findings.push({ closureId: null, repoCwd, mismatch: { kind: "orphan-branch", branchName, repaired: true } })
+				const removed = await git(repoCwd, ["update-ref", "-d", branchName])
+				findings.push({ closureId: null, repoCwd, mismatch: removed.exitCode === 0
+					? { kind: "orphan-branch", branchName, repaired: true }
+					: { kind: "orphan-branch", branchName, repaired: false, error: gitFailure("update-ref -d", removed) } })
 			}
+			const worktrees = await git(repoCwd, ["worktree", "list", "--porcelain"])
+			if (worktrees.exitCode !== 0) {
+				worktreeScanFailed.add(repoCwd)
+				findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "worktrees", repaired: false, error: gitFailure("worktree list", worktrees) } })
+			} else for (const path of gitWorktreePaths(worktrees.stdout)) repositoryWorktrees.set(path, repoCwd)
 		})
 	}
 	const worktreeRoot = resolve(resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions).chainRoot, "worktrees")
@@ -989,21 +1002,30 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 			if (!entry.isDirectory()) continue
 			const path = resolve(worktreeRoot, entry.name)
 			if (registeredPaths.has(path)) continue
-			let removedRegistration = false
-			for (const repoCwd of new Set(input.items.map((item) => item.repoCwd))) {
-				const listed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "list", "--porcelain"]))
-				if (listed.exitCode !== 0 || !gitWorktreeListOutputIncludesPath(listed.stdout, path)) continue
+			const repoCwd = repositoryWorktrees.get(path)
+			if (repoCwd !== undefined) {
 				const removed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "remove", "--force", path]))
-				if (removed.exitCode === 0) removedRegistration = true
-				break
+				findings.push({ closureId: null, repoCwd, mismatch: removed.exitCode === 0
+					? { kind: "orphan-directory", path, repaired: true }
+					: { kind: "orphan-directory", path, repaired: false, error: gitFailure("worktree remove", removed) } })
+				continue
 			}
-			if (!removedRegistration && existsSync(path)) await rm(path, { recursive: true, force: true })
-			findings.push({ closureId: null, repoCwd: input.items[0]?.repoCwd ?? "", mismatch: { kind: "orphan-directory", path, repaired: true } })
+			if (worktreeScanFailed.size > 0) continue
+			if (existsSync(path)) await rm(path, { recursive: true, force: true })
+			findings.push({ closureId: null, repoCwd: "", mismatch: { kind: "orphan-directory", path, repaired: true } })
 		}
 	} catch (error) {
 		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
 	}
 	return findings
+}
+
+function gitWorktreePaths(output: string): string[] {
+	return output.split("\n").flatMap((line) => line.startsWith("worktree ") ? [resolve(line.slice("worktree ".length))] : [])
+}
+
+function gitFailure(operation: string, result: { exitCode: number; stderr: string }): string {
+	return `${operation} failed (exit ${result.exitCode}): ${result.stderr}`
 }
 
 function collectClosures(node: TaskNodeSnapshot | null): ClosureSnapshot[] {
@@ -1013,14 +1035,14 @@ function collectClosures(node: TaskNodeSnapshot | null): ClosureSnapshot[] {
 }
 
 export async function cleanupSchedulerChainWorktrees(
-	closures: readonly { repoCwd: string; closure: ClosureSnapshot }[],
+	closures: readonly { chainName: string; repoCwd: string; closure: ClosureSnapshot; loopDataRootOptions?: LoopDataRootOptions }[],
 ): Promise<SchedulerChainWorktreeCleanup[]> {
 	const cleaned: SchedulerChainWorktreeCleanup[] = []
-	for (const { repoCwd, closure } of closures) {
+	for (const { chainName, repoCwd, closure, loopDataRootOptions } of closures) {
 		if (closure.lifecycle !== "consumed" || closure.worktreePath === null || closure.branchName === null) continue
 		const worktreePath = closure.worktreePath
 		const branchName = closure.branchName
-		if (!closureResourcesBelongToEngine(repoCwd, closure.closureId, worktreePath, branchName)) {
+		if (!closureResourcesBelongToEngine(resolveLoopDataPaths(loopDataRootOptions).root, chainName, repoCwd, closure.closureId, worktreePath, branchName)) {
 			cleaned.push({
 				repoCwd,
 				worktreePath,
@@ -1078,11 +1100,13 @@ export async function cleanupSchedulerChainWorktrees(
 
 export type ConsumeSchedulerClosureInput = {
 	chainId: number
+	chainName: string
 	repoCwd: string
 	closure: ClosureSnapshot
-	model: ClosureReachabilityModel
+	authority: ClosureConsumptionAuthority
 	evidence: ClosureConsumptionEvidence
 	updatedAt: number
+	loopDataRootOptions?: LoopDataRootOptions
 	store: Pick<SqliteStateStore, "consumeClosureIfUnreachable" | "setClosureResources">
 	emit: (event: Extract<SchedulerEvent, { type: "closure.consumed" }>) => Promise<void> | void
 }
@@ -1094,12 +1118,12 @@ export type ConsumeSchedulerClosureResult = {
 
 export async function consumeSchedulerClosure(input: ConsumeSchedulerClosureInput): Promise<ConsumeSchedulerClosureResult> {
 	const decision = input.store.consumeClosureIfUnreachable(input.closure.closureId, {
-		model: input.model,
+		authority: input.authority,
 		updatedAt: input.updatedAt,
 		evidence: input.evidence,
 	})
 	if (decision.kind !== "consumed") return { decision, cleanup: null }
-	const [cleanup] = await cleanupSchedulerChainWorktrees([{ repoCwd: input.repoCwd, closure: decision.closure }])
+	const [cleanup] = await cleanupSchedulerChainWorktrees([{ chainName: input.chainName, repoCwd: input.repoCwd, closure: decision.closure, ...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }) }])
 	input.store.setClosureResources(decision.closure.closureId, { worktreePath: null, branchName: null, updatedAt: input.updatedAt })
 	const freshness: OriginFreshness = { kind: "retained", commit: decision.closure.baseCommit }
 	await input.emit({ type: "closure.consumed", chainId: input.chainId, closureId: decision.closure.closureId, evidence: decision.evidence, freshness })
@@ -1245,7 +1269,7 @@ async function spawnSchedulerRun(
 			item,
 			runId,
 			worktreePath,
-			loopDataRootOptions: options.loopDataRootOptions,
+			...(options.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: options.loopDataRootOptions }),
 			resume: resumeDecision,
 			runner: runner.kind,
 		})
@@ -2289,7 +2313,7 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 		const completionItems = options.store.listItems(chain.id)
 		if (completionItems.length === 0) return false
 		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
-		await consumeCompletedChainClosures(options, current, completionItems)
+		if (!await consumeCompletedChainClosures(options, current, completionItems, effectiveTerminalStatuses)) return false
 		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 		await emit(options, { type: "chain.completed", chainId: current.id, chainName: current.name, ...(runId === undefined ? {} : { runId }) })
 		void updated
@@ -2299,26 +2323,33 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	}
 }
 
-async function consumeCompletedChainClosures(options: SchedulerOptions, chain: ChainRecord, items: readonly ItemRecord[]): Promise<void> {
+async function consumeCompletedChainClosures(options: SchedulerOptions, chain: ChainRecord, items: readonly ItemRecord[], terminalStatuses: readonly InternalStatus[]): Promise<boolean> {
 	const tree = options.store.getTaskTree(chain.id)
-	if (tree === null) return
+	if (tree === null) return true
 	const closures = collectClosures(tree.root)
 	const repoByItem = new Map(items.map((item) => [item.id, item.repoCwd]))
-	const model: ClosureReachabilityModel = { closures: closures.map((closure) => closure.closureId), seeds: [], edges: [] }
+	let consumable = true
 	for (const closure of closures) {
 		const repoCwd = repoByItem.get(closure.itemRowId)
-		if (repoCwd === undefined) continue
-		await consumeSchedulerClosure({
+		if (repoCwd === undefined) {
+			consumable = false
+			continue
+		}
+		const result = await consumeSchedulerClosure({
 			chainId: chain.id,
+			chainName: chain.name,
 			repoCwd,
 			closure,
-			model,
+			authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [...terminalStatuses] },
 			evidence: "unevaluable",
 			updatedAt: nowSeconds(options),
+			...(options.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: options.loopDataRootOptions }),
 			store: options.store,
 			emit: async (event) => await emit(options, event),
 		})
+		if (result.decision.kind === "retained" && result.decision.reason !== "already-consumed") consumable = false
 	}
+	return consumable
 }
 
 async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly InternalStatus[]): Promise<boolean> {

@@ -6,10 +6,12 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, rea
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { resolve } from "node:path"
 
-import { closureBranchPrefix, computeClosureReachability, createRepositoryGitCoordinator, type OriginFreshness } from "../src/closure-lifecycle"
-import { cleanupSchedulerChainWorktrees, createGitWorktreeManager, reconcileClosureResources } from "../src/scheduler"
+import { closureBranchPrefix, createRepositoryGitCoordinator, type OriginFreshness } from "../src/closure-lifecycle"
+import { cleanupSchedulerChainWorktrees, createGitWorktreeManager, consumeSchedulerClosure, reconcileClosureResources } from "../src/scheduler"
 import type { JsonObject } from "../src/loop"
-import type { TaskNodeSnapshot } from "../src/task-runtime"
+import { openSqliteStateStore } from "../src/sqlite-state"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../src/runtime-data"
+import type { TaskNodeSnapshot, TaskTreeSnapshot } from "../src/task-runtime"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -28,6 +30,7 @@ type ShimResources = { dir: string; runnerLog: string; gate: string }
 
 function fail(message: string): never { throw new Error(message) }
 function assert(value: unknown, message: string): asserts value { if (!value) fail(message) }
+function runtimeStatus(value: string) { return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "issue-560.status"), "issue-560-integration") }
 function record(value: unknown, label: string): Record<string, unknown> {
 	assert(typeof value === "object" && value !== null && !Array.isArray(value), `${label} must be an object`)
 	return value
@@ -264,6 +267,58 @@ function deleteChain(daemon: Daemon, chain: string): void {
 	command(["bun", LOOP_ENTRY, "chain", "delete", chain, "--loop-data-root", daemon.root, "--json"], { env: daemon.env })
 }
 
+async function runPersistedReachabilityCases(runtime: string, repoCwd: string): Promise<JsonObject[]> {
+	const loopDataRoot = resolve(runtime, "c05-persisted")
+	mkdirSync(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	const manager = createGitWorktreeManager({ loopDataRoot })
+	const results: JsonObject[] = []
+	type CaseKind = "materialized-seq-suffix" | "open-par-epoch" | "decided-reopen" | "next-epoch-candidate" | "sealed-seq"
+	const cases: readonly { kind: CaseKind; itemStatus: "queued" | "done"; expected: "retained" | "consumed" }[] = [
+		{ kind: "materialized-seq-suffix", itemStatus: "queued", expected: "retained" },
+		{ kind: "open-par-epoch", itemStatus: "done", expected: "retained" },
+		{ kind: "decided-reopen", itemStatus: "done", expected: "retained" },
+		{ kind: "next-epoch-candidate", itemStatus: "done", expected: "retained" },
+		{ kind: "sealed-seq", itemStatus: "done", expected: "consumed" },
+	]
+	try {
+		for (let index = 0; index < cases.length; index += 1) {
+			const spec = cases[index]!
+			const chain = store.createChain({ name: `issue560-c05-${index}-${spec.kind}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", metadata: storedChainMetadata({}) })
+			const item = store.createItem({ chainId: chain.id, itemId: `c05-${index}`, repoCwd, status: runtimeStatus(spec.itemStatus), preset: PRESET, extra: storedItemExtra({}) })
+			const phase = "iteration", closureId = `closure:c05:${index}:${phase}`
+			const resource = await manager({ chain, item, phase, closureId, repoCwd, slotKey: `c05-${index}`, existing: null })
+			assert(typeof resource !== "string", `C05 ${spec.kind} resource creation failed`)
+			const definitionRef = { kind: "chain", contentIdentity: `sha256:c05-${index}` } as const
+			const closure = { closureId, itemRowId: item.id, itemId: item.itemId, phase, lifecycle: "suspended", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: spec.kind.includes("par") || spec.kind.includes("reopen") || spec.kind.includes("epoch") ? `par-c05-${index}` : null, sessions: [] } as const
+			const leaf = { kind: "leaf", identity: { runtimeNodeId: `leaf-c05-${index}`, definitionRef, definitionNodeId: phase }, closure } as const
+			let tree: TaskTreeSnapshot
+			if (spec.kind === "open-par-epoch" || spec.kind === "decided-reopen" || spec.kind === "next-epoch-candidate") {
+				const evaluation = spec.kind === "open-par-epoch" ? { kind: "not-evaluating" } as const : { kind: "decided", epoch: 1, bindingVersion: 1 } as const
+				tree = { root: { kind: "par", identity: { runtimeNodeId: `par-c05-${index}`, definitionRef, definitionNodeId: `par-c05-${index}` }, groupId: `par-c05-${index}`, pinCommit: resource.baseCommit, state: spec.kind === "open-par-epoch" ? "open" : "completed", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation }, children: [leaf] }, activeRuns: [] }
+			} else {
+				tree = { root: { kind: "seq", identity: { runtimeNodeId: `seq-c05-${index}`, definitionRef, definitionNodeId: `seq-c05-${index}` }, cursor: spec.kind === "sealed-seq" ? { kind: "complete" } : { kind: "next", nodeId: leaf.identity.runtimeNodeId }, children: [leaf] }, activeRuns: [] }
+			}
+			store.createTaskTree(chain.id, tree)
+			if (spec.kind === "next-epoch-candidate") {
+				const db = new Database(resolve(loopDataRoot, "db.sqlite"))
+				try {
+					db.query("INSERT INTO task_join_bindings (par_node_id,version,join_kind,candidate_definition_kind,candidate_definition_content_identity,candidate_id,author_kind,author_id,authority_class,effective_from_epoch,created_at) VALUES ($par,2,'drain',NULL,NULL,NULL,'engine','issue-560','runtime',2,2)").run({ $par: `par-c05-${index}` })
+				} finally { db.close() }
+			}
+			const events: JsonObject[] = []
+			const observed = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, evidence: "unevaluable", updatedAt: 2_000_000_000 + index, loopDataRootOptions: { loopDataRoot }, store, emit: (value) => { events.push(value) } })
+			assert(observed.decision.kind === spec.expected, `C05 ${spec.kind} expected ${spec.expected}, observed ${observed.decision.kind}`)
+			results.push({ kind: spec.kind, decision: observed.decision.kind, reason: observed.decision.kind === "retained" ? observed.decision.reason : null, events })
+			if (observed.decision.kind === "retained") {
+				const cleanup = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, repoCwd, closure, authority: { kind: "chain-deletion", chainId: chain.id }, evidence: "unevaluable", updatedAt: 2_000_000_100 + index, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+				assert(cleanup.decision.kind === "consumed", `C05 ${spec.kind} cleanup did not consume`)
+			}
+		}
+		return results
+	} finally { store.close() }
+}
+
 async function main(): Promise<void> {
 	const id = randomUUID(), runtime = resolve(REPO_ROOT, ".coder-loop/runtime/issue-560", id), evidence = resolve(REPO_ROOT, ".coder-loop/evidence/issue-560", id)
 	mkdirSync(runtime, { recursive: true }); mkdirSync(evidence, { recursive: true })
@@ -322,7 +377,7 @@ async function main(): Promise<void> {
 		assert(concurrentFetchCount === 1, `C02 concurrent closure opens executed ${concurrentFetchCount} fetches`)
 		for (let index = 0; index < singleflightResources.length; index += 1) {
 			const resource = singleflightResources[index]; assert(resource !== undefined && typeof resource !== "string", "C02 singleflight resources missing")
-			await cleanupSchedulerChainWorktrees([{ repoCwd: repos.target, closure: { closureId: singleflightContexts[index]!.closureId, itemRowId: singleflightContexts[index]!.item.id, itemId: "direct", phase: singleflightContexts[index]!.phase, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: null, sessions: [] } }])
+			await cleanupSchedulerChainWorktrees([{ chainName: directChain.name, repoCwd: repos.target, closure: { closureId: singleflightContexts[index]!.closureId, itemRowId: singleflightContexts[index]!.item.id, itemId: "direct", phase: singleflightContexts[index]!.phase, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: null, sessions: [] }, loopDataRootOptions: { loopDataRoot: daemon.root } }])
 		}
 		event("C02.pass", { noOrigin: noOriginRows.map((row) => row.base_commit), badRemote: "base_fetch_failed", concurrentFetchCount })
 
@@ -357,31 +412,10 @@ async function main(): Promise<void> {
 		assert(lifecycleRows.every((row) => closureRows(daemon.root, lifecycle).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
 		event("C07.pass", { eventKinds: reconcileKinds, bytes: reconcile.length })
 
-		// C05: every present/future reachability seed protects the closure. The
-		// actual consume below is reached only through successful chain completion.
-		const candidateClosureId = lifecycleIteration.closure_id
-		const reachabilityCases = [
-			{ label: "active-run", seed: "active-run", reachable: true },
-			{ label: "terminal-with-resumable-attempt", seed: "resumable-attempt", reachable: true },
-			{ label: "budget-exhausted-with-resumable-attempt", seed: "resumable-attempt", reachable: true },
-			{ label: "cancelled-with-decided-reopen", seed: "decided-reopen", reachable: true },
-			{ label: "open-seq-suffix", seed: "seq-suffix", reachable: true },
-			{ label: "open-par-next-epoch", seed: "open-par-epoch", reachable: true },
-			{ label: "open-append-place", seed: "open-append", reachable: true },
-			{ label: "materialized-next-epoch-binding", seed: "next-epoch-candidate", reachable: true },
-			{ label: "closed-seq-scope", seed: null, reachable: false },
-			{ label: "completed-par-without-next-epoch", seed: null, reachable: false },
-			{ label: "sealed-append-place", seed: null, reachable: false },
-			{ label: "consumed-reopen-and-sealed-join-epoch", seed: null, reachable: false },
-		] as const
-		for (const reachabilityCase of reachabilityCases) {
-			const seeds = reachabilityCase.seed === null ? [] : [{ kind: reachabilityCase.seed, closureId: candidateClosureId }]
-			const reachable = computeClosureReachability({ closures: [candidateClosureId], seeds, edges: [] }).has(candidateClosureId)
-			assert(reachable === reachabilityCase.reachable, `C05 ${reachabilityCase.label} reachability mismatch`)
-		}
-		const issuerClosureId = `${candidateClosureId}:issuer`
-		const transitiveReachability = computeClosureReachability({ closures: [issuerClosureId, candidateClosureId], seeds: [{ kind: "open-append", closureId: issuerClosureId }], edges: [{ kind: "scope-target", fromClosureId: issuerClosureId, toClosureId: candidateClosureId }] })
-		assert(transitiveReachability.has(candidateClosureId), "C05 least-fixed-point scope edge did not protect target closure")
+		// C05: future-writer states not yet produced by the runtime are seeded into a
+		// separate persisted store, then consumed through the production store/scheduler/Git path.
+		// The live daemon chain below independently proves ordinary outer-completion consumption.
+		const persistedReachabilityCases = await runPersistedReachabilityCases(runtime, repos.target)
 		const resumedBeforeRelease = await until(() => observations(shims.runnerLog).filter((row) => row.chain === lifecycle && row.phase === "iteration" && row.attempt >= 3).at(-1) ?? null, (row) => row !== null && existsSync(resolve(row.cwd, ".issue560-lifecycle-entered")), "post-reconciliation resumed lifecycle attempt", 90_000)
 		assert(resumedBeforeRelease !== null, "C09 resumed lifecycle observation missing")
 		writeFileSync(resolve(resumedBeforeRelease.cwd, ".issue560-lifecycle-release"), "release\n")
@@ -397,7 +431,7 @@ async function main(): Promise<void> {
 		const resumed = resumedBeforeRelease
 		retainedRunnerObservations.push(resumed)
 		assert(resumed.attempt >= 3 && resumed.cwd === first.cwd && resumed.branch === first.branch && resumed.argv.includes(first.sessionId), "C09 daemon restart did not resume the same closure/session")
-		event("C05.pass", { reachabilityCases, transitiveReachability: [...transitiveReachability], consumed: consumedRows, evidenceVariants: ["no-work", "published", "unpublished-discarded", "unevaluable"], freshnessVariants: ["fetched", "no-origin", "retained"] })
+		event("C05.pass", { persistedReachabilityCases, consumed: consumedRows, observedEvidence: "unevaluable", observedFreshness: "retained" })
 		event("C09.pass", { first, reopened: second, resumed })
 
 		// C06/C10: direct production manager exercise for persisted par pin and concurrent repo coordination.
@@ -452,7 +486,7 @@ async function main(): Promise<void> {
 		command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
 		for (let index = 0; index < directResources.length; index += 1) {
 			const resource = directResources[index]!; if (typeof resource === "string") fail("expected typed direct resources")
-			await cleanupSchedulerChainWorktrees([{ repoCwd: repos.target, closure: { ...contexts[index]!.existing, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName } }])
+			await cleanupSchedulerChainWorktrees([{ chainName: directChain.name, repoCwd: repos.target, closure: { ...contexts[index]!.existing, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName }, loopDataRootOptions: { loopDataRoot: daemon.root } }])
 		}
 		assert(!readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").includes("gc"), "C10 explicit gc observed")
 		event("C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, driftKinds: driftFindings.map((finding) => finding.mismatch.kind), resourceStates: resourceStatesAfter })

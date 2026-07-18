@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
 import {
@@ -238,6 +239,92 @@ test("startup reconciliation removes consumed worktree registrations and branche
 	} finally { store.close() }
 })
 
+test("startup reconciliation preserves orphan directories when repository scans fail and reports the failure", async () => {
+	const root = resolve(tmpdir(), `coder-loop-reconcile-scan-failure-${process.pid}-${Date.now()}`)
+	const repoCwd = resolve(root, "not-a-git-repository")
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(repoCwd, { recursive: true })
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-scan-failure-chain")
+		const item = makeItem(store, chain, "reconcile-scan-failure", repoCwd)
+		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "orphan")
+		await mkdir(orphanPath, { recursive: true })
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		expect(findings).toContainEqual({
+			closureId: null,
+			repoCwd,
+			mismatch: expect.objectContaining({ kind: "repository-scan-failed", surface: "branches", repaired: false }),
+		})
+		expect(findings).toContainEqual({
+			closureId: null,
+			repoCwd,
+			mismatch: expect.objectContaining({ kind: "repository-scan-failed", surface: "worktrees", repaired: false }),
+		})
+		expect(existsSync(orphanPath)).toBe(true)
+	} finally {
+		store.close()
+		await rm(root, { recursive: true, force: true })
+	}
+})
+
+test("startup reconciliation attributes a registered orphan worktree to its owning repository", async () => {
+	const root = resolve(TEST_ROOT, "reconcile-multi-repo")
+	const firstRepo = resolve(root, "first-repo")
+	const secondRepo = resolve(root, "second-repo")
+	await initGitRepo(firstRepo)
+	await initGitRepo(secondRepo)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-multi-repo-chain")
+		const firstItem = makeItem(store, chain, "reconcile-first", firstRepo)
+		const secondItem = makeItem(store, chain, "reconcile-second", secondRepo)
+		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "second-repo-orphan")
+		expect(git(secondRepo, ["worktree", "add", "-b", `coder-loop/closures/${chain.name}/orphan`, orphanPath, "main"]).exitCode).toBe(0)
+		const findings = await reconcileClosureResources({ chain, items: [firstItem, secondItem], tree: null, loopDataRootOptions: { loopDataRoot } })
+		const orphan = findings.find((finding) => finding.mismatch.kind === "orphan-directory" && finding.mismatch.path === orphanPath)
+		expect(orphan?.repoCwd).toBe(secondRepo)
+		expect(orphan?.mismatch.repaired).toBe(true)
+	} finally { store.close() }
+})
+
+test("startup reconciliation reports failed orphan branch and worktree repairs without deleting residue", async () => {
+	const root = resolve(TEST_ROOT, "reconcile-repair-failure")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-repair-failure-chain")
+		const item = makeItem(store, chain, "reconcile-repair-failure", repoCwd)
+		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "locked-orphan")
+		const orphanBranch = `coder-loop/closures/${chain.name}/locked-orphan`
+		const lockedBranch = `coder-loop/closures/${chain.name}/locked-ref`
+		expect(git(repoCwd, ["worktree", "add", "-b", orphanBranch, orphanPath, "main"]).exitCode).toBe(0)
+		expect(git(repoCwd, ["worktree", "lock", orphanPath]).exitCode).toBe(0)
+		expect(git(repoCwd, ["branch", lockedBranch, "main"]).exitCode).toBe(0)
+		const lockedRef = resolve(repoCwd, ".git", "refs", "heads", ...lockedBranch.split("/"))
+		await writeFile(`${lockedRef}.lock`, "lock update-ref for the failure-path assertion\n")
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		expect(findings).toContainEqual({
+			closureId: null,
+			repoCwd,
+			mismatch: expect.objectContaining({ kind: "orphan-directory", path: orphanPath, repaired: false, error: expect.any(String) }),
+		})
+		expect(findings).toContainEqual({
+			closureId: null,
+			repoCwd,
+			mismatch: expect.objectContaining({ kind: "orphan-branch", branchName: `refs/heads/${lockedBranch}`, repaired: false, error: expect.any(String) }),
+		})
+		expect(existsSync(orphanPath)).toBe(true)
+		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${lockedBranch}`]).exitCode).toBe(0)
+	} finally { store.close() }
+})
+
 test("consumed cleanup rejects persisted resources outside the closure-derived engine namespace", async () => {
 	const root = resolve(TEST_ROOT, "cleanup-foreign-resources")
 	const repoCwd = resolve(root, "repo")
@@ -248,7 +335,7 @@ test("consumed cleanup rejects persisted resources outside the closure-derived e
 	expect(git(repoCwd, ["branch", "foreign-branch", "main"]).exitCode).toBe(0)
 	const closure = { closureId: "closure:foreign:iteration", itemRowId: 1, itemId: "foreign", phase: "iteration", lifecycle: "consumed", worktreePath: foreignPath, branchName: "refs/heads/foreign-branch", baseCommit: git(repoCwd, ["rev-parse", "main"]).stdout, sourceParNodeId: null, sessions: [] } as const
 
-	const [result] = await cleanupSchedulerChainWorktrees([{ repoCwd, closure }])
+	const [result] = await cleanupSchedulerChainWorktrees([{ chainName: "cleanup-foreign-resources", repoCwd, closure, loopDataRootOptions: { loopDataRoot: root } }])
 	expect(result).toMatchObject({ removed: false, directoryRemoved: false, pruned: false })
 	expect(result?.error).toContain("outside engine closure namespace")
 	expect(existsSync(resolve(foreignPath, "keep.txt"))).toBe(true)
@@ -271,7 +358,8 @@ test("serialized closure consumption removes only owned resources and emits evid
 		const closure = { closureId: "closure:consume:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-consume", definitionRef: { kind: "chain", contentIdentity: "sha256:consume" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
 		const events: SchedulerEvent[] = []
-		const result = await consumeSchedulerClosure({ chainId: chain.id, repoCwd, closure, model: { closures: [closure.closureId], seeds: [], edges: [] }, evidence: "unpublished-discarded", updatedAt: 1_900_000_100, store, emit: (event) => { events.push(event) } })
+		store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_900_000_099 })
+		const result = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, evidence: "unpublished-discarded", updatedAt: 1_900_000_100, loopDataRootOptions: { loopDataRoot }, store, emit: (event) => { events.push(event) } })
 		expect(result.decision.kind).toBe("consumed")
 		expect(result.cleanup).toMatchObject({ registered: true, removed: true, error: null })
 		expect(existsSync(resources.worktreePath)).toBe(false)

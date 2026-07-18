@@ -29,7 +29,7 @@ import {
 	type TaskTreeSnapshot,
 } from "./task-runtime"
 import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
-import { closureBranchName, closureWorktreePath, computeClosureReachability, type ClosureReachabilityModel } from "./closure-lifecycle"
+import { closureBranchName, closureWorktreePath, computeClosureReachability, persistedClosureReachabilityModel, type ClosureReachabilityModel } from "./closure-lifecycle"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -276,7 +276,10 @@ export type ClosureLifecycleInput =
 	| { kind: "consume"; updatedAt: number }
 export type ClosureResourcesInput = { worktreePath: string | null; branchName: string | null; updatedAt: number }
 export type ClosureConsumptionEvidence = "no-work" | "published" | "unpublished-discarded" | "unevaluable"
-export type ConsumeClosureInput = { model: ClosureReachabilityModel; updatedAt: number; evidence?: ClosureConsumptionEvidence }
+export type ClosureConsumptionAuthority =
+	| { kind: "outer-completion"; chainId: number; terminalStatuses: readonly InternalStatus[] }
+	| { kind: "chain-deletion"; chainId: number }
+export type ConsumeClosureInput = { authority: ClosureConsumptionAuthority; updatedAt: number; evidence?: ClosureConsumptionEvidence }
 export type ConsumeClosureResult =
 	| { kind: "retained"; closureId: string; reason: "reachable" | "active-run" | "already-consumed" }
 	| { kind: "consumed"; closure: ClosureSnapshot; evidence: ClosureConsumptionEvidence }
@@ -398,6 +401,8 @@ const RunRowBoundary = arkType({
 	started_at: "number", ended_at: "number|null", exit_code: "number.integer|null", extra: "string",
 	"+": "reject",
 })
+
+const ItemReachabilityStatusRowBoundary = arkType({ id: "number.integer>0", status: "string>0", "+": "reject" })
 
 type CurrentRunRow = {
 	chain_id: number
@@ -1907,7 +1912,10 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			if (current.lifecycle === "consumed") return { kind: "retained", closureId, reason: "already-consumed" }
 			const active = queryPersistedOne(db, "SELECT run_id FROM active_runs WHERE closure_id = $closureId", { closureId }, RunIdRowBoundary, `active_runs.${closureId}`)
 			if (active !== null) return { kind: "retained", closureId, reason: "active-run" }
-			if (computeClosureReachability(input.model).has(closureId)) return { kind: "retained", closureId, reason: "reachable" }
+			const tree = requireTaskTree(db, input.authority.chainId)
+			const model = closureConsumptionReachabilityModel(db, tree, input.authority)
+			if (!model.closures.includes(closureId)) throw new SqliteStateError("run_closure_mismatch", `closure ${closureId} does not belong to chain ${input.authority.chainId}`, { closureId, chainId: input.authority.chainId })
+			if (computeClosureReachability(model).has(closureId)) return { kind: "retained", closureId, reason: "reachable" }
 			db.query<never, SqlParams>("UPDATE task_closures SET lifecycle = 'consumed', updated_at = $updatedAt WHERE closure_id = $closureId").run({ closureId, updatedAt: input.updatedAt })
 			db.query<never, SqlParams>("DELETE FROM closure_sessions WHERE closure_id = $closureId").run({ closureId })
 			return { kind: "consumed", closure: requireClosureById(db, closureId), evidence: input.evidence ?? "unevaluable" }
@@ -1937,6 +1945,29 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		deleteContextEntriesForChain: (chainId) => write("delete chain context entries", () => db.query<unknown, SqlParams>("DELETE FROM context_entries WHERE chain_id=$chainId").run({chainId}).changes),
 	}
+}
+
+function closureConsumptionReachabilityModel(
+	db: Database,
+	tree: TaskTreeSnapshot,
+	authority: ClosureConsumptionAuthority,
+): ClosureReachabilityModel {
+	switch (authority.kind) {
+		case "chain-deletion":
+			return { closures: collectTaskTreeClosureIds(tree.root), seeds: tree.activeRuns.map((run) => ({ kind: "active-run", closureId: run.closureId })), edges: [] }
+		case "outer-completion": {
+			const terminal = new Set(authority.terminalStatuses)
+			const rows = queryPersistedAll(db, "SELECT id, status FROM items WHERE chain_id = $chainId ORDER BY id", { chainId: authority.chainId }, ItemReachabilityStatusRowBoundary, `closure reachability items for chain ${authority.chainId}`)
+			const terminalItemRowIds = new Set(rows.filter((row) => terminal.has(parseInternalStatus(row.status, `items.${row.id}.status`))).map((row) => row.id))
+			return persistedClosureReachabilityModel(tree, terminalItemRowIds)
+		}
+		default: return assertNever(authority)
+	}
+}
+
+function collectTaskTreeClosureIds(node: TaskNodeSnapshot): string[] {
+	if (node.kind === "leaf") return [node.closure.closureId]
+	return node.children.flatMap(collectTaskTreeClosureIds)
 }
 
 function rowToChain(row: ChainRow | null): ChainRecord | null {
