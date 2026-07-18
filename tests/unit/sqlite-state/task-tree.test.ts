@@ -77,6 +77,11 @@ describe("sqlite state store", () => {
 		const secondRun = store.recordRun({ runId: "second-definition-run", chainId: chain.id, itemId: second.id, phase: "review", startedAt: 1_800_000_206, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/second", branchName: "issue-second" }) })
 		store.setCurrentRun({ chainId: chain.id, phase: "review", runId: secondRun.runId, startedAt: secondRun.startedAt, extra: storedItemExtra({}) })
 		const definitionRef = { kind: "preset", contentIdentity: "sha256:second-definition" } as const
+		const reviewIdentity = {
+			runtimeNodeId: `closure-node:${second.id}:review`,
+			definitionRef,
+			definitionNodeId: "task:review",
+		}
 		const expectedSecondIdentities = ["review", "finalize"].map((phase) => ({
 			runtimeNodeId: `closure-node:${second.id}:${phase}`,
 			definitionRef,
@@ -85,7 +90,16 @@ describe("sqlite state store", () => {
 		try {
 			const tree = store.getTaskTree(chain.id)
 			if (tree?.root.kind !== "seq") throw new Error("expected seq root")
-			expect(tree.root.children.filter((node) => node.kind === "leaf" && node.closure.itemRowId === second.id).map((node) => node.identity)).toEqual(expectedSecondIdentities)
+			const firstOpenLeaves = tree.root.children.flatMap((node) => node.kind === "leaf" && node.closure.itemRowId === second.id ? [node] : [])
+			expect(firstOpenLeaves.map((node) => node.identity)).toEqual([reviewIdentity])
+			const finalizeRun = store.recordRun({ runId: "second-finalize-run", chainId: chain.id, itemId: second.id, phase: "finalize", startedAt: 1_800_000_207, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/finalize", branchName: "issue-finalize" }) })
+			store.setCurrentRun({ chainId: chain.id, phase: "finalize", runId: finalizeRun.runId, startedAt: finalizeRun.startedAt, extra: storedItemExtra({}) })
+			const openedTree = store.getTaskTree(chain.id)
+			if (openedTree?.root.kind !== "seq") throw new Error("expected opened seq root")
+			const secondLeaves = openedTree.root.children.flatMap((node) => node.kind === "leaf" && node.closure.itemRowId === second.id ? [node] : [])
+			expect(secondLeaves.map((node) => node.identity)).toEqual(expectedSecondIdentities)
+			expect(new Set(secondLeaves.map((node) => node.closure.worktreePath)).size).toBe(secondLeaves.length)
+			expect(new Set(secondLeaves.map((node) => node.closure.branchName)).size).toBe(secondLeaves.length)
 		} finally { store.close() }
 		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
 		try {
