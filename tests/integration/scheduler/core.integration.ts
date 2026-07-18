@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import {
-	chmod, cleanupSchedulerChainWorktrees, createChain, createDeferred, createFixture, createGitWorktreeManager,
-	createItem, existsSync, gitOutput, initGitTarget, itemExtraToJsonObject, listActiveRuns, loadPreset,
+	chmod, cleanupSchedulerChainWorktrees, closureBranchName, consumeSchedulerClosure, createChain, createDeferred, createFixture, createGitWorktreeManager,
+	createItem, existsSync, gitOutput, historicalRunExtra, initGitTarget, itemExtraToJsonObject, listActiveRuns, loadPreset,
 	loadedPresetFromDir,
 	makeChainFixture, makeItemFixture, markRunPendingRecycle, maxConcurrentRunnerEvents, mkdir,
 	persistedObservabilityOptions, presetExecutionContentIdentity, promiseSettledWithin, queryObservabilityEvents,
 	readFile, readRunnerEvents, REPO_ROOT, resolve, resolveChainRuntimePaths, resolveLoopDataPaths,
-	resolveSchedulerEventTaskIdentity, runSchedulerUntilIdle, RunStatusFixtureBoundary, runtimeStatus,
+	resolveSchedulerEventTaskIdentity, runSchedulerUntilIdle, RunStatusFixtureBoundary, runtimeStatus, sampleClosureConsumptionObservation,
 	closureWorktreePath, schedulerTick, selectNextPendingItemFromSnapshot, stopFixture, storedItemExtra,
-	writeEmptySuccessPreset, writeFile, type AgentRunnerSelection, type SchedulerEvent,
+	TEST_ROOT, writeEmptySuccessPreset, writeFile, type AgentRunnerSelection, type SchedulerEvent,
 	type SchedulerLifecycleEventPersistenceFailure, type SchedulerOptions,
 } from "./harness"
 
@@ -218,7 +218,7 @@ describe("scheduler", () => {
 			const leaf = tree.root.children[0]
 			expect(leaf?.kind).toBe("leaf")
 			if (leaf?.kind !== "leaf") throw new Error("expected fixture task tree leaf")
-			expect(leaf.closure.branchName).toBe("coder-loop/closure-branch-identity-chain-6e04712f89fa")
+			expect(leaf.closure.branchName).toBe(closureBranchName(chain.name, leaf.closure.closureId))
 			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
 		} finally { fixture.store.close() }
 	})
@@ -247,8 +247,8 @@ describe("scheduler", () => {
 				"end:181",
 			])
 			expect(maxConcurrentRunnerEvents(events)).toBe(1)
-			expect(new Set(events.map((event) => event.cwd)).size).toBe(1)
-			expect(fixture.worktreeCalls).toHaveLength(1)
+			expect(new Set(events.map((event) => event.cwd)).size).toBe(3)
+			expect(fixture.worktreeCalls).toHaveLength(3)
 			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["done", "done", "done"])
 		} finally {
 			await stopFixture(fixture)
@@ -514,7 +514,7 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("consumed closure cleanup removes a terminal chain worktree", async () => {
+	test("successful chain completion consumes and idempotently cleans closure worktrees", async () => {
 		const fixture = await createFixture("completion-cleanup-idempotent")
 		const target = resolve(fixture.loopDataRoot, "..", "target")
 		await initGitTarget(target)
@@ -533,23 +533,26 @@ describe("scheduler", () => {
 			const closure = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
 			if (closure?.kind !== "leaf") throw new Error("expected iteration closure")
 			const worktreePath = closureWorktreePath(fixture.loopDataRoot, completed.name, target, closure.closure.closureId)
+			const branchName = closureBranchName(completed.name, closure.closure.closureId)
 			expect(completed.status).toBe("completed")
-			expect(existsSync(worktreePath)).toBe(true)
-			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
+			expect(closure.closure).toMatchObject({ lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] })
+			expect(existsSync(worktreePath)).toBe(false)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
 
 			const repeated = await cleanupSchedulerChainWorktrees([{
 				chainName: completed.name,
 				repoCwd: target,
-				closure: { ...closure.closure, lifecycle: "consumed" },
+				closure: { ...closure.closure, lifecycle: "consumed", worktreePath, branchName },
 				loopDataRootOptions: { loopDataRoot: fixture.loopDataRoot },
 			}])
 			expect(repeated).toHaveLength(1)
 			expect(repeated[0]).toMatchObject({
 				repoCwd: target,
 				worktreePath,
-				registered: true,
-				removed: true,
-				pruned: true,
+				registered: false,
+				removed: false,
+				directoryRemoved: false,
+				pruned: false,
 				error: null,
 			})
 			expect(existsSync(worktreePath)).toBe(false)
@@ -557,6 +560,74 @@ describe("scheduler", () => {
 		} finally {
 			await stopFixture(fixture)
 		}
+	})
+
+	test("failed closure cleanup retains resource identity and reports an incomplete consume", async () => {
+		const fixture = await createFixture("consume-cleanup-failure")
+		try {
+			const chain = createChain(fixture.store, "consume-cleanup-failure-chain")
+			const repoCwd = resolve(fixture.loopDataRoot, "missing-repository")
+			await mkdir(repoCwd, { recursive: true })
+			await writeFile(resolve(repoCwd, ".git"), "invalid git metadata\n")
+			const item = createItem(fixture.store, chain, { issueNumber: 351_002, repoCwd, writeStatus: "done" })
+			fixture.store.recordRun({ runId: "consume-cleanup-failure-run", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1, extra: historicalRunExtra() })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("done") })
+			const tree = fixture.store.getTaskTree(chain.id)
+			const closure = tree?.root.kind === "seq" && tree.root.children[0]?.kind === "leaf" ? tree.root.children[0].closure : null
+			if (closure === null) throw new Error("expected closure")
+			const worktreePath = closureWorktreePath(fixture.loopDataRoot, chain.name, repoCwd, closure.closureId)
+			const branchName = closureBranchName(chain.name, closure.closureId)
+			fixture.store.setClosureResources(closure.closureId, { worktreePath, branchName, updatedAt: 2 })
+
+			const result = await consumeSchedulerClosure({
+				chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd,
+				closure: { ...closure, worktreePath, branchName },
+				authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] },
+				updatedAt: 3, loopDataRootOptions: { loopDataRoot: fixture.loopDataRoot }, store: fixture.store, emit: () => {},
+			})
+
+			expect(result.cleanup?.error).not.toBeNull()
+			expect(result.complete).toBe(false)
+			const persistedTree = fixture.store.getTaskTree(chain.id)
+			const persisted = persistedTree?.root.kind === "seq" ? persistedTree.root.children.find((node) => node.kind === "leaf" && node.closure.closureId === closure.closureId) : null
+			expect(persisted).toMatchObject({ closure: { lifecycle: "consumed", worktreePath, branchName } })
+		} finally { await stopFixture(fixture) }
+	})
+
+	test("closure consumption samples no-work and unpublished branch evidence with no-origin freshness", async () => {
+		const repoCwd = resolve(TEST_ROOT, "consume-observation")
+		await initGitTarget(repoCwd)
+		const baseCommit = gitOutput(repoCwd, ["rev-parse", "HEAD"])
+		const branchName = "refs/heads/coder-loop/closures/evidence/closure"
+		gitOutput(repoCwd, ["branch", branchName, baseCommit])
+		expect(await sampleClosureConsumptionObservation({ repoCwd, baseBranch: "main", branchName, baseCommit })).toEqual({
+			evidence: "no-work",
+			freshness: { kind: "no-origin", availability: "unavailable", commit: baseCommit },
+		})
+		gitOutput(repoCwd, ["switch", branchName])
+		await writeFile(resolve(repoCwd, "consume-observation.txt"), "work\n")
+		gitOutput(repoCwd, ["add", "consume-observation.txt"])
+		gitOutput(repoCwd, ["-c", "user.name=test", "-c", "user.email=test@invalid", "commit", "-m", "work"])
+		expect(await sampleClosureConsumptionObservation({ repoCwd, baseBranch: "main", branchName, baseCommit })).toEqual({
+			evidence: "unpublished-discarded",
+			freshness: { kind: "no-origin", availability: "unavailable", commit: baseCommit },
+		})
+	})
+
+	test("closure consumption is unevaluable when origin refresh fails", async () => {
+		const repoCwd = resolve(TEST_ROOT, "consume-observation-fetch-failure")
+		await initGitTarget(repoCwd)
+		const baseCommit = gitOutput(repoCwd, ["rev-parse", "HEAD"])
+		const branchName = "refs/heads/coder-loop/closures/evidence/fetch-failure"
+		gitOutput(repoCwd, ["switch", "-c", branchName.replace("refs/heads/", "")])
+		await writeFile(resolve(repoCwd, "consume-observation.txt"), "work\n")
+		gitOutput(repoCwd, ["add", "consume-observation.txt"])
+		gitOutput(repoCwd, ["-c", "user.name=test", "-c", "user.email=test@invalid", "commit", "-m", "work"])
+		gitOutput(repoCwd, ["remote", "add", "origin", resolve(repoCwd, "missing-origin.git")])
+		expect(await sampleClosureConsumptionObservation({ repoCwd, baseBranch: "main", branchName, baseCommit })).toEqual({
+			evidence: "unevaluable",
+			freshness: { kind: "retained", commit: baseCommit },
+		})
 	})
 
 	test("chain-complete trigger runs before chain completion", async () => {
@@ -576,6 +647,7 @@ describe("scheduler", () => {
 			expect(observedChainStatuses).toEqual(["active"])
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents.map((event) => event.type)).toEqual([
+				"closure.resource_prepared",
 				"agent.spawn",
 				"phase.start",
 				"recycle.pending_entered",
@@ -584,6 +656,7 @@ describe("scheduler", () => {
 				"phase.end",
 				"queue.terminal",
 				"chain.complete_trigger",
+				"closure.consumed",
 				"chain.completed",
 			])
 		} finally {

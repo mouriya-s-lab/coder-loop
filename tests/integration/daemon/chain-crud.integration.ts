@@ -650,7 +650,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("socket completed chain retains closure worktree registration and preserves audit runtime", async () => {
+	test("socket completed chain consumes closure worktrees and retains audit runtime", async () => {
 		const fixture = await startFixture("chain-complete-cleanup", { realWorktreeManager: true })
 		const target = fixture.loopDataRoot + "-target"
 		await initGitTarget(target)
@@ -676,19 +676,24 @@ describe("daemon", () => {
 			const completedItem = await readItem(fixture.loopDataRoot, chainId, 351_003)
 			if (completedItem === null || completedItem.lastRunId === null) throw new Error("expected completed item run id")
 			const paths = resolveChainRuntimePaths("complete-cleanup", { loopDataRoot: fixture.loopDataRoot })
-			const lookup = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
-			let worktreePath: string
-			try {
-				const root = lookup.getTaskTree(chainId)?.root
-				if (root?.kind !== "seq") throw new Error("expected seq task tree")
-				const iteration = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
-				if (iteration?.kind !== "leaf") throw new Error("expected iteration closure")
-				worktreePath = closureWorktreePath(fixture.loopDataRoot, storedChain.name, target, iteration.closure.closureId)
-			} finally { lookup.close() }
+			const worktreePath = closureWorktreePath(fixture.loopDataRoot, storedChain.name, target, `closure:${completedItem.id}:iteration`)
+			const reviewWorktreePath = closureWorktreePath(fixture.loopDataRoot, storedChain.name, target, `closure:${completedItem.id}:review`)
+			const taskStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			const taskRoot = taskStore.getTaskTree(chainId)?.root ?? null
+			taskStore.close()
+			if (taskRoot === null || taskRoot.kind !== "seq") throw new Error("expected completed seq task tree")
+			const phaseClosures = taskRoot.children.flatMap((node) => node.kind === "leaf" ? [node.closure] : [])
+			const iterationClosure = phaseClosures.find((closure) => closure.phase === "iteration")
+			const reviewClosure = phaseClosures.find((closure) => closure.phase === "review")
+			if (iterationClosure === undefined || reviewClosure === undefined) throw new Error("expected iteration and review closures")
 
 			expect(storedChain.status).toBe("completed")
-			expect(await pathExists(worktreePath)).toBe(true)
-			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
+			expect(await pathExists(worktreePath)).toBe(false)
+			expect(await pathExists(reviewWorktreePath)).toBe(false)
+			expect(iterationClosure).toMatchObject({ lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] })
+			expect(reviewClosure).toMatchObject({ lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] })
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(reviewWorktreePath)
 			expect(await pathExists(paths.chainRoot)).toBe(true)
 			expect(await pathExists(paths.runsDir)).toBe(true)
 			expect(await pathExists(paths.runEventsFile(completedItem.lastRunId))).toBe(false)

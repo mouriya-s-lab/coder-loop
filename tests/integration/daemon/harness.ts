@@ -503,8 +503,9 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	const schedulerEvents: SchedulerEvent[] = []
 	const configuredOnEvent = options.schedulerConfig?.onEvent
 	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd, closureId }) => {
-		await mkdir(closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId), { recursive: true })
-		return root
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
+		await mkdir(worktreePath, { recursive: true })
+		return worktreePath
 	})
 
 	const scheduler: SchedulerOptions["runner"] = {
@@ -865,7 +866,7 @@ async function pathIsSocket(path: string): Promise<boolean> {
 
 async function initGitTarget(path: string): Promise<void> {
 	await mkdir(path, { recursive: true })
-	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["init", "-q", "-b", "main"])
 	gitOutput(path, ["config", "user.email", "test@example.invalid"])
 	gitOutput(path, ["config", "user.name", "Test User"])
 	await writeFile(resolve(path, "README.md"), "test\n")
