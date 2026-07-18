@@ -15,7 +15,7 @@ import {
 	type SchedulerEvent,
 	type SchedulerOptions,
 } from "../../../src/scheduler"
-import { closureWorktreePath, createRepositoryGitCoordinator, type RepositoryGitCoordinator } from "../../../src/closure-lifecycle"
+import { closureBranchName, closureWorktreePath, createRepositoryGitCoordinator, type RepositoryGitCoordinator } from "../../../src/closure-lifecycle"
 import { openSqliteStateStore } from "../../../src/sqlite-state"
 import { loadPreset } from "../../../src/loop"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
@@ -367,6 +367,84 @@ test("consumed cleanup rejects persisted resources outside the closure-derived e
 	expect(result?.error).toContain("outside engine closure namespace")
 	expect(existsSync(resolve(foreignPath, "keep.txt"))).toBe(true)
 	expect(git(repoCwd, ["show-ref", "--verify", "refs/heads/foreign-branch"]).exitCode).toBe(0)
+})
+
+test("consumed cleanup removes an owned prunable registration after its directory disappears", async () => {
+	const root = resolve(TEST_ROOT, "cleanup-prunable-registration")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "cleanup-prunable-registration-chain")
+		const item = makeItem(store, chain, "cleanup-prunable-registration", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:cleanup-prunable:iteration", repoCwd, slotKey: "slot", existing: null })
+		if (typeof resources === "string") throw new Error("expected closure resources")
+		const closure = { closureId: "closure:cleanup-prunable:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-cleanup-prunable", definitionRef: { kind: "chain", contentIdentity: "sha256:cleanup-prunable" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
+		store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_900_000_099 })
+		await rm(resources.worktreePath, { recursive: true, force: true })
+		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).toContain(`worktree ${resources.worktreePath}`)
+
+		const result = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, updatedAt: 1_900_000_100, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+
+		expect(result.complete).toBe(true)
+		expect(result.cleanup).toMatchObject({ registered: true, removed: true, error: null })
+		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).not.toContain(resources.worktreePath)
+		expect(git(repoCwd, ["show-ref", "--verify", "--quiet", resources.branchName]).exitCode).toBe(1)
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "consumed", worktreePath: null, branchName: null } })
+	} finally { store.close() }
+})
+
+test("consumed cleanup retains resource identity while the repository is unavailable", async () => {
+	const root = resolve(TEST_ROOT, "cleanup-missing-repository")
+	const repoCwd = resolve(root, "missing-repo")
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "cleanup-missing-repository-chain")
+		const item = makeItem(store, chain, "cleanup-missing-repository", repoCwd)
+		const closureId = "closure:cleanup-missing-repository:iteration"
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
+		const branchName = closureBranchName(chain.name, closureId)
+		const closure = { closureId, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath, branchName, baseCommit: "0000000000000000000000000000000000000000", sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-cleanup-missing-repository", definitionRef: { kind: "chain", contentIdentity: "sha256:cleanup-missing-repository" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
+		store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_900_000_099 })
+
+		const result = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure, authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] }, updatedAt: 1_900_000_100, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+
+		expect(result.complete).toBe(false)
+		expect(result.cleanup?.error).toContain("repository is unavailable")
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "consumed", worktreePath, branchName } })
+	} finally { store.close() }
+})
+
+test("startup reconciliation removes an engine registration whose directory disappeared", async () => {
+	const root = resolve(TEST_ROOT, "reconcile-prunable-registration")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-prunable-registration-chain")
+		const item = makeItem(store, chain, "reconcile-prunable-registration", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile-prunable:iteration", repoCwd, slotKey: "slot", existing: null })
+		if (typeof resources === "string") throw new Error("expected closure resources")
+		const closure = { closureId: "closure:reconcile-prunable:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-prunable", definitionRef: { kind: "chain", contentIdentity: "sha256:reconcile-prunable" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
+		await rm(resources.worktreePath, { recursive: true, force: true })
+
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
+
+		expect(findings).toContainEqual({ closureId: null, repoCwd, mismatch: { kind: "orphan-directory", path: resources.worktreePath, repaired: true } })
+		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).not.toContain(resources.worktreePath)
+		expect(git(repoCwd, ["show-ref", "--verify", "--quiet", resources.branchName]).exitCode).toBe(1)
+	} finally { store.close() }
 })
 
 test("serialized closure consumption removes only owned resources and emits evidence with freshness", async () => {

@@ -8,7 +8,7 @@ import {
 	readFile, readRunnerEvents, REPO_ROOT, resolve, resolveChainRuntimePaths, resolveLoopDataPaths,
 	resolveSchedulerEventTaskIdentity, runSchedulerUntilIdle, RunStatusFixtureBoundary, runtimeStatus, sampleClosureConsumptionObservation,
 	closureWorktreePath, schedulerTick, selectNextPendingItemFromSnapshot, stopFixture, storedItemExtra,
-	TEST_ROOT, writeEmptySuccessPreset, writeFile, type AgentRunnerSelection, type SchedulerEvent,
+	TEST_ROOT, writeEmptySuccessPreset, writeFile, initializeFixtureGitWorktree, type AgentRunnerSelection, type SchedulerEvent,
 	type SchedulerLifecycleEventPersistenceFailure, type SchedulerOptions,
 } from "./harness"
 
@@ -258,9 +258,15 @@ describe("scheduler", () => {
 	test("single chain multi repo concurrent", async () => {
 		const fixture = await createFixture("multi-repo")
 		try {
+			const firstRepo = resolve(fixture.loopDataRoot, "fixture-repos", "a")
+			const secondRepo = resolve(fixture.loopDataRoot, "fixture-repos", "b")
+			await mkdir(firstRepo, { recursive: true })
+			await mkdir(secondRepo, { recursive: true })
+			initializeFixtureGitWorktree(firstRepo)
+			initializeFixtureGitWorktree(secondRepo)
 			const chain = createChain(fixture.store, "multi-repo-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: firstRepo, sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: secondRepo, sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(2)
@@ -502,8 +508,11 @@ describe("scheduler", () => {
 	test("chain completion", async () => {
 		const fixture = await createFixture("completion")
 		try {
+			const repoCwd = resolve(fixture.loopDataRoot, "fixture-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "completion-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd, writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -633,8 +642,11 @@ describe("scheduler", () => {
 	test("chain-complete trigger runs before chain completion", async () => {
 		const fixture = await createFixture("completion-trigger")
 		try {
+			const repoCwd = resolve(fixture.loopDataRoot, "fixture-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "completion-trigger-chain")
-			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd, writeStatus: "done" })
 			const observedChainStatuses: string[] = []
 
 			await runSchedulerUntilIdle(fixture.options({
@@ -667,8 +679,11 @@ describe("scheduler", () => {
 	test("chain-complete trigger does not run twice during overlapping completion ticks", async () => {
 		const fixture = await createFixture("completion-trigger-overlap")
 		try {
+			const repoCwd = resolve(fixture.loopDataRoot, "fixture-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
-			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd, writeStatus: "done" })
 			const triggerStarted = createDeferred()
 			const releaseTrigger = createDeferred()
 			let triggerCalls = 0
@@ -819,8 +834,11 @@ describe("scheduler", () => {
 	test("terminated child preserves user terminal item status", async () => {
 		const fixture = await createFixture("terminal-preserve")
 		try {
+			const repoCwd = resolve(fixture.loopDataRoot, "fixture-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "terminal-preserve-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 5_000 })
+			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd, sleepMs: 5_000 })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
@@ -1009,8 +1027,11 @@ describe("scheduler", () => {
 	test("scheduler run writes run-root artifacts", async () => {
 		const fixture = await createFixture("run-artifacts")
 		try {
+			const repoCwd = resolve(fixture.loopDataRoot, "fixture-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "run-artifacts-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd, writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 

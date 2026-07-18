@@ -160,9 +160,7 @@ describe("central chain/item CLI", () => {
 			expect(stopped.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
 			expect(stopped.alreadyStopped).toBe(false)
 
-			const stoppedStatusResponse = await sendDaemonRequest(fixture.daemon.snapshot().socketPath, daemonRequest("chain.status", { chainName: "crud-chain" }))
-			if (!stoppedStatusResponse.ok) throw new Error(`chain.status setup failed: ${stoppedStatusResponse.error.code}: ${stoppedStatusResponse.error.message}`)
-			const stoppedStatus = boundaryRecord(stoppedStatusResponse.result)
+			const stoppedStatus = expectJsonOk(await runCli(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(stoppedStatus.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
 			expect(stoppedStatus.summary).toMatchObject({ completion: { state: "stopped", completedAt: null } })
 

@@ -1009,11 +1009,20 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 		})
 	}
 	const worktreeRoot = resolve(resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions).chainRoot, "worktrees")
+	const attemptedRegisteredOrphans = new Set<string>()
+	for (const [path, repoCwd] of repositoryWorktrees) {
+		if (dirname(path) !== worktreeRoot || registeredPaths.has(path)) continue
+		attemptedRegisteredOrphans.add(path)
+		const removed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "remove", "--force", path]))
+		findings.push({ closureId: null, repoCwd, mismatch: removed.exitCode === 0
+			? { kind: "orphan-directory", path, repaired: true }
+			: { kind: "orphan-directory", path, repaired: false, error: gitFailure("worktree remove", removed) } })
+	}
 	try {
 		for (const entry of await readdir(worktreeRoot, { withFileTypes: true })) {
 			if (!entry.isDirectory()) continue
 			const path = resolve(worktreeRoot, entry.name)
-			if (registeredPaths.has(path)) continue
+			if (registeredPaths.has(path) || attemptedRegisteredOrphans.has(path)) continue
 			const repoCwd = repositoryWorktrees.get(path)
 			if (repoCwd !== undefined) {
 				const removed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "remove", "--force", path]))
@@ -1044,6 +1053,21 @@ function gitWorktreePathForBranch(output: string, branchName: string): string | 
 		return worktree === undefined ? null : resolve(worktree.slice("worktree ".length))
 	}
 	return null
+}
+
+function gitWorktreeBranchForPath(output: string, worktreePath: string): string | null {
+	for (const record of output.split("\n\n")) {
+		const lines = record.split("\n")
+		const worktree = lines.find((line) => line.startsWith("worktree "))
+		if (worktree === undefined || !worktreePathsMatch(worktree.slice("worktree ".length), worktreePath)) continue
+		const branch = lines.find((line) => line.startsWith("branch "))
+		return branch === undefined ? null : branch.slice("branch ".length)
+	}
+	return null
+}
+
+function worktreePathsMatch(left: string, right: string): boolean {
+	return resolve(left) === resolve(right) || realpathForComparison(left) === realpathForComparison(right)
 }
 
 type RepositoryGitContract = {
@@ -1136,17 +1160,15 @@ export async function cleanupSchedulerChainWorktrees(
 			continue
 		}
 		if (!existsSync(repoCwd)) {
-			let directoryRemoved = false
-			let error: string | null = null
-			if (existsSync(worktreePath)) {
-				try {
-					await rm(worktreePath, { recursive: true, force: true })
-					directoryRemoved = true
-				} catch (cleanupError) {
-					error = `worktree directory remove failed: ${errorMessage(cleanupError)}`
-				}
-			}
-			cleaned.push({ repoCwd, worktreePath, registered: false, removed: false, directoryRemoved, pruned: false, error })
+			cleaned.push({
+				repoCwd,
+				worktreePath,
+				registered: false,
+				removed: false,
+				directoryRemoved: false,
+				pruned: false,
+				error: `repository is unavailable; closure Git resources cannot be verified or removed: ${repoCwd}`,
+			})
 			continue
 		}
 		const result = await repositoryGitCoordinator.run(repoCwd, async (): Promise<SchedulerChainWorktreeCleanup> => {
@@ -1164,29 +1186,68 @@ export async function cleanupSchedulerChainWorktrees(
 			}
 
 			const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
+			const registeredBranchPath = gitWorktreePathForBranch(listResult.stdout, branchName)
+			const registeredPathBranch = gitWorktreeBranchForPath(listResult.stdout, worktreePath)
+			if (registeredBranchPath !== null && !worktreePathsMatch(registeredBranchPath, worktreePath)) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `closure branch ${branchName} is registered at unexpected worktree ${registeredBranchPath}`,
+				}
+			}
+			if (registeredPathBranch !== null && registeredPathBranch !== branchName) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `closure worktree ${worktreePath} is registered to unexpected branch ${registeredPathBranch}`,
+				}
+			}
 			let removed = false
 			let directoryRemoved = false
-			let error: string | null = null
-			if (registered && existsSync(worktreePath)) {
+			if (registered) {
 				const removeResult = await git(repoCwd, ["worktree", "remove", "--force", worktreePath])
 				removed = removeResult.exitCode === 0
-				if (!removed) error = `git worktree remove failed (exit ${removeResult.exitCode}): ${removeResult.stderr}`
+				if (!removed) {
+					return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("worktree remove", removeResult) }
+				}
 			}
 			if ((removed || !registered) && existsSync(worktreePath)) {
 				try {
 					await rm(worktreePath, { recursive: true, force: true })
 					directoryRemoved = true
 				} catch (cleanupError) {
-					const directoryError = `worktree directory remove failed: ${errorMessage(cleanupError)}`
-					error = error === null ? directoryError : `${error}; ${directoryError}`
+					return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: `worktree directory remove failed: ${errorMessage(cleanupError)}` }
 				}
 			}
 
+			const verifyWorktrees = await git(repoCwd, ["worktree", "list", "--porcelain"])
+			if (verifyWorktrees.exitCode !== 0) {
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("worktree list verification", verifyWorktrees) }
+			}
+			if (gitWorktreeListOutputIncludesPath(verifyWorktrees.stdout, worktreePath) || gitWorktreePathForBranch(verifyWorktrees.stdout, branchName) !== null) {
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: "closure worktree registration remains after cleanup" }
+			}
 			const deleteBranchResult = await git(repoCwd, ["update-ref", "-d", branchName])
-			const pruned = false
-			if (deleteBranchResult.exitCode !== 0) error = `git update-ref failed (exit ${deleteBranchResult.exitCode}): ${deleteBranchResult.stderr}`
+			if (deleteBranchResult.exitCode !== 0) {
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("update-ref -d", deleteBranchResult) }
+			}
+			const verifyBranch = await git(repoCwd, ["show-ref", "--verify", "--quiet", branchName])
+			if (verifyBranch.exitCode !== 1) {
+				const error = verifyBranch.exitCode === 0
+					? `closure branch ${branchName} remains after cleanup`
+					: gitFailure("show-ref verification", verifyBranch)
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error }
+			}
 
-			return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned, error }
+			return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: null }
 		})
 		cleaned.push(result)
 	}
