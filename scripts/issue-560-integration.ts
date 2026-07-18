@@ -420,7 +420,12 @@ async function main(): Promise<void> {
 		assert(resumedBeforeRelease !== null, "C09 resumed lifecycle observation missing")
 		writeFileSync(resolve(resumedBeforeRelease.cwd, ".issue560-lifecycle-release"), "release\n")
 		await until(() => statusDone(daemon, lifecycle, repos.target), Boolean, "lifecycle chain item completion", 90_000)
-		const consumedRows = await until(() => closureRows(daemon.root, lifecycle), (current) => current.length === 2 && current.every((row) => row.lifecycle === "consumed"), "normal chain closure consumption", 90_000)
+		const consumedRows = await until(
+			() => closureRows(daemon.root, lifecycle),
+			(current) => current.length === 2 && current.every((row) => row.lifecycle === "consumed" && row.worktree_path === null && row.branch_name === null),
+			"normal chain closure consumption",
+			90_000,
+		)
 		assert(consumedRows.every((row) => row.worktree_path === null && row.branch_name === null), "C05 normal consume retained resource identities")
 		for (const row of lifecycleRows) {
 			assert(row.worktree_path !== null && row.branch_name !== null, "C05 pre-consume resource identity missing")
