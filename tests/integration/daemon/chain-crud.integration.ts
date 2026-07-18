@@ -1,4 +1,4 @@
-import { REPO_ROOT, describe, expect, expectChainDeleted, expectChainNotActive, expectConflict, expectInvalid, expectInvalidDetails, expectOk, expectTooLarge, gitOutput, initGitTarget, nestedMetadata, numberValue, openSqliteStateStore, pathExists, queryObservabilityEvents, readChain, readChainStatus, readFile, readItem, record, request, resolveChainRuntimePaths, resolveLoopDataPaths, runtimeStatus, schedulerSlotWorktreePath, startCoderLoopDaemon, startFixture, storedChainMetadata, storedItemExtra, test, waitFor } from "./harness"
+import { REPO_ROOT, closureWorktreePath, describe, expect, expectChainDeleted, expectChainNotActive, expectConflict, expectInvalid, expectInvalidDetails, expectOk, expectTooLarge, gitOutput, initGitTarget, nestedMetadata, numberValue, openSqliteStateStore, pathExists, queryObservabilityEvents, readChain, readChainStatus, readFile, readItem, record, request, resolveChainRuntimePaths, resolveLoopDataPaths, runtimeStatus, startCoderLoopDaemon, startFixture, storedChainMetadata, storedItemExtra, test, waitFor } from "./harness"
 import type { SchedulerEvent } from "./harness"
 
 describe("daemon", () => {
@@ -617,7 +617,15 @@ describe("daemon", () => {
 			const storedChain = await readChain(fixture.loopDataRoot, chainId)
 			if (storedChain === null) throw new Error("expected chain record")
 			const paths = resolveChainRuntimePaths("delete-cleanup", { loopDataRoot: fixture.loopDataRoot })
-			const worktreePath = schedulerSlotWorktreePath(storedChain, target, { loopDataRoot: fixture.loopDataRoot })
+			const lookup = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			let worktreePath: string
+			try {
+				const root = lookup.getTaskTree(chainId)?.root
+				if (root?.kind !== "seq") throw new Error("expected seq task tree")
+				const iteration = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+				if (iteration?.kind !== "leaf") throw new Error("expected iteration closure")
+				worktreePath = closureWorktreePath(fixture.loopDataRoot, storedChain.name, target, iteration.closure.closureId)
+			} finally { lookup.close() }
 			expect(await pathExists(worktreePath)).toBe(true)
 			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
 
@@ -642,7 +650,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("socket completed chain removes scheduler worktree registration and preserves audit runtime", async () => {
+	test("socket completed chain retains closure worktree registration and preserves audit runtime", async () => {
 		const fixture = await startFixture("chain-complete-cleanup", { realWorktreeManager: true })
 		const target = fixture.loopDataRoot + "-target"
 		await initGitTarget(target)
@@ -668,11 +676,19 @@ describe("daemon", () => {
 			const completedItem = await readItem(fixture.loopDataRoot, chainId, 351_003)
 			if (completedItem === null || completedItem.lastRunId === null) throw new Error("expected completed item run id")
 			const paths = resolveChainRuntimePaths("complete-cleanup", { loopDataRoot: fixture.loopDataRoot })
-			const worktreePath = schedulerSlotWorktreePath(storedChain, target, { loopDataRoot: fixture.loopDataRoot })
+			const lookup = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			let worktreePath: string
+			try {
+				const root = lookup.getTaskTree(chainId)?.root
+				if (root?.kind !== "seq") throw new Error("expected seq task tree")
+				const iteration = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+				if (iteration?.kind !== "leaf") throw new Error("expected iteration closure")
+				worktreePath = closureWorktreePath(fixture.loopDataRoot, storedChain.name, target, iteration.closure.closureId)
+			} finally { lookup.close() }
 
 			expect(storedChain.status).toBe("completed")
-			expect(await pathExists(worktreePath)).toBe(false)
-			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+			expect(await pathExists(worktreePath)).toBe(true)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
 			expect(await pathExists(paths.chainRoot)).toBe(true)
 			expect(await pathExists(paths.runsDir)).toBe(true)
 			expect(await pathExists(paths.runEventsFile(completedItem.lastRunId))).toBe(false)
@@ -822,7 +838,15 @@ describe("daemon", () => {
 
 			const currentChain = await readChain(fixture.loopDataRoot, chainId)
 			if (currentChain === null) throw new Error("expected chain")
-			const worktreePath = schedulerSlotWorktreePath(currentChain, REPO_ROOT, { loopDataRoot: fixture.loopDataRoot })
+			const lookup = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			let worktreePath: string
+			try {
+				const root = lookup.getTaskTree(chainId)?.root
+				if (root?.kind !== "seq") throw new Error("expected seq task tree")
+				const iteration = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+				if (iteration?.kind !== "leaf") throw new Error("expected iteration closure")
+				worktreePath = closureWorktreePath(fixture.loopDataRoot, currentChain.name, REPO_ROOT, iteration.closure.closureId)
+			} finally { lookup.close() }
 			const stopped = record(expectOk(await request(fixture, "chain.stop", { chainId })))
 
 			expect(record(stopped.chain).status).toBe("stopped")

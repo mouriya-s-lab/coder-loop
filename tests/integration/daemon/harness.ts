@@ -24,11 +24,11 @@ import {
 import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type JsonObject, type JsonValue } from "../../../src/loop"
 import {
 	createGitWorktreeManager,
-	schedulerSlotWorktreePath,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "../../../src/scheduler"
+import { closureWorktreePath } from "../../../src/closure-lifecycle"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "../../../src/runtime-paths"
 import { openSqliteStateStore } from "../../../src/sqlite-state"
 import { makeObservabilityEvent, ObservabilityEventBoundary, queryObservabilityEvents } from "../../../src/observability"
@@ -298,8 +298,8 @@ exit 0
 	await chmod(fakeClaude, 0o755)
 
 	const schedulerEvents: SchedulerEvent[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		return worktreePath
 	}
@@ -502,8 +502,8 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 
 	const schedulerEvents: SchedulerEvent[] = []
 	const configuredOnEvent = options.schedulerConfig?.onEvent
-	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd }) => {
-		await mkdir(schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot }), { recursive: true })
+	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd, closureId }) => {
+		await mkdir(closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId), { recursive: true })
 		return root
 	})
 
@@ -1027,7 +1027,7 @@ export {
 	buildCoderLoopStatusSnapshot,
 	loadPreset,
 	createGitWorktreeManager,
-	schedulerSlotWorktreePath,
+	closureWorktreePath,
 	resolveChainRuntimePaths,
 	resolveLoopDataPaths,
 	openSqliteStateStore,

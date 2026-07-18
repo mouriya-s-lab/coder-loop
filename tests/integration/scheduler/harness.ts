@@ -16,7 +16,6 @@ import {
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	runSchedulerUntilIdle,
-	schedulerSlotWorktreePath,
 	schedulerTick,
 	selectNextPendingItemFromSnapshot,
 	type SchedulerEvent,
@@ -26,6 +25,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "../../../src/scheduler"
+import { closureWorktreePath } from "../../../src/closure-lifecycle"
 import { resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent, startCoderLoopDaemon, type CoderLoopDaemon } from "../../../src/daemon"
 import {
 	buildRunnerFilesystemAuthorization,
@@ -416,8 +416,8 @@ export async function createFixture(name: string): Promise<Fixture> {
 	const defaultPresetDir = fixturePresetDir
 	const defaultLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
 	if (defaultLoadedPreset.preset.phases.find((phase) => phase.name === "iteration")?.exits.length === 0) throw new Error("scheduler fixture preset did not declare iteration exits")
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
@@ -922,8 +922,8 @@ export async function createPresetPromptIntegrationFixture(name: string): Promis
 	const state = createSchedulerState()
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeCalls: string[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
@@ -995,7 +995,7 @@ export {
 	chmod, cp, mkdir, readFile, rm, writeFile, existsSync, resolve, arkType,
 	cleanupSchedulerChainWorktrees, createGitWorktreeManager, createSchedulerState, DEFAULT_MAX_ITEM_ATTEMPTS,
 	listActiveRuns, makeRunId, markRunPendingRecycle, presetExecutionContentIdentity, renderSchedulerSpawnPrompt,
-	resumeDecisionForItem, runSchedulerUntilIdle, schedulerSlotWorktreePath, schedulerTick,
+	resumeDecisionForItem, runSchedulerUntilIdle, schedulerTick, closureWorktreePath,
 	selectNextPendingItemFromSnapshot,
 	resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent, startCoderLoopDaemon,
 	buildRunnerFilesystemAuthorization, buildRunnerInvocation, loadPreset, resolvePhaseRunnerFromChain,

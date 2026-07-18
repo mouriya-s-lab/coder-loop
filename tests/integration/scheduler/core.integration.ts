@@ -7,7 +7,7 @@ import {
 	persistedObservabilityOptions, presetExecutionContentIdentity, promiseSettledWithin, queryObservabilityEvents,
 	readFile, readRunnerEvents, REPO_ROOT, resolve, resolveChainRuntimePaths, resolveLoopDataPaths,
 	resolveSchedulerEventTaskIdentity, runSchedulerUntilIdle, RunStatusFixtureBoundary, runtimeStatus,
-	schedulerSlotWorktreePath, schedulerTick, selectNextPendingItemFromSnapshot, stopFixture, storedItemExtra,
+	closureWorktreePath, schedulerTick, selectNextPendingItemFromSnapshot, stopFixture, storedItemExtra,
 	writeEmptySuccessPreset, writeFile, type AgentRunnerSelection, type SchedulerEvent,
 	type SchedulerLifecycleEventPersistenceFailure, type SchedulerOptions,
 } from "./harness"
@@ -514,7 +514,7 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("completed chain worktree cleanup is idempotent after prior removal", async () => {
+	test("consumed closure cleanup removes a terminal chain worktree", async () => {
 		const fixture = await createFixture("completion-cleanup-idempotent")
 		const target = resolve(fixture.loopDataRoot, "..", "target")
 		await initGitTarget(target)
@@ -528,18 +528,27 @@ describe("scheduler", () => {
 
 			const completed = fixture.store.getChain(chain.id)
 			if (completed === null) throw new Error("expected completed chain")
-			const worktreePath = schedulerSlotWorktreePath(completed, target, { loopDataRoot: fixture.loopDataRoot })
+			const root = fixture.store.getTaskTree(completed.id)?.root
+			if (root?.kind !== "seq") throw new Error("expected seq task tree")
+			const closure = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+			if (closure?.kind !== "leaf") throw new Error("expected iteration closure")
+			const worktreePath = closureWorktreePath(fixture.loopDataRoot, completed.name, target, closure.closure.closureId)
 			expect(completed.status).toBe("completed")
-			expect(existsSync(worktreePath)).toBe(false)
-			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+			expect(existsSync(worktreePath)).toBe(true)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
 
-			const repeated = cleanupSchedulerChainWorktrees(completed, [target], { loopDataRoot: fixture.loopDataRoot })
+			const repeated = await cleanupSchedulerChainWorktrees([{
+				chainName: completed.name,
+				repoCwd: target,
+				closure: { ...closure.closure, lifecycle: "consumed" },
+				loopDataRootOptions: { loopDataRoot: fixture.loopDataRoot },
+			}])
 			expect(repeated).toHaveLength(1)
 			expect(repeated[0]).toMatchObject({
 				repoCwd: target,
 				worktreePath,
-				registered: false,
-				removed: false,
+				registered: true,
+				removed: true,
 				pruned: true,
 				error: null,
 			})

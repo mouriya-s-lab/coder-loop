@@ -9,7 +9,7 @@ import { resolve } from "node:path"
 import { closureBranchPrefix, createRepositoryGitCoordinator, type OriginFreshness } from "../src/closure-lifecycle"
 import { cleanupSchedulerChainWorktrees, createGitWorktreeManager, consumeSchedulerClosure, reconcileClosureResources } from "../src/scheduler"
 import type { JsonObject } from "../src/loop"
-import { openSqliteStateStore } from "../src/sqlite-state"
+import { openSqliteStateStore, type ChainRecord, type ItemRecord } from "../src/sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../src/runtime-data"
 import type { TaskNodeSnapshot, TaskTreeSnapshot } from "../src/task-runtime"
 
@@ -30,10 +30,10 @@ type ShimResources = { dir: string; runnerLog: string; gate: string }
 
 function fail(message: string): never { throw new Error(message) }
 function assert(value: unknown, message: string): asserts value { if (!value) fail(message) }
-function runtimeStatus(value: string) { return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "issue-560.status"), "issue-560-integration") }
+function runtimeStatus(value: string) { return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "issue-560.status"), "test") }
 function record(value: unknown, label: string): Record<string, unknown> {
 	assert(typeof value === "object" && value !== null && !Array.isArray(value), `${label} must be an object`)
-	return value
+	return value as Record<string, unknown>
 }
 function stringField(value: Record<string, unknown>, key: string, label: string): string {
 	const field = value[key]; assert(typeof field === "string", `${label}.${key} must be a string`); return field
@@ -340,7 +340,7 @@ async function main(): Promise<void> {
 	const retainedRunnerObservations: RunnerObservation[] = []
 	let completed = false
 	try {
-		await ready(daemon); event("ready", { id, sourceSha, pid: daemon.child.pid, socket: resolve(daemon.root, "daemon.sock") })
+		await ready(daemon); event("ready", { id, sourceSha, pid: daemon.child.pid ?? 0, socket: resolve(daemon.root, "daemon.sock") })
 
 		// C01-C03/C08: block the daemon's real fetch child while its socket remains responsive.
 		const blocked = `issue560-blocked-${id}`; chains.push(blocked); writeFileSync(shims.gate, "fetch\n"); createChain(daemon, blocked, repos.target)
@@ -374,8 +374,8 @@ async function main(): Promise<void> {
 		await until(() => command(["bun", LOOP_ENTRY, "logs", repos.badRemote, "--json", "--type", "closure.git_failed", "--chain", bad, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout.includes("base_fetch_failed"), Boolean, "typed fetch failure")
 		const coordinator = createRepositoryGitCoordinator()
 		const manager = createGitWorktreeManager({ loopDataRoot: daemon.root }, coordinator)
-		const directChain = { id: 999_560, name: `issue560-direct-${id}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", status: "active", metadata: {}, createdAt: 0, updatedAt: 0 } as const
-		const directItem = { id: 999_561, chainId: directChain.id, itemId: "direct", repoCwd: repos.target, status: "queued", phase: null, runner: null, attempts: 0, lastRunId: null, agentCwd: null, extra: {}, position: 0, createdAt: 0, updatedAt: 0 } as const
+		const directChain: ChainRecord = { id: 999_560, name: `issue560-direct-${id}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", status: "active", metadata: storedChainMetadata({}), createdAt: 0, updatedAt: 0 }
+		const directItem: ItemRecord = { id: 999_561, chainId: directChain.id, itemId: "direct", repoCwd: repos.target, status: runtimeStatus("queued"), phase: null, runner: null, attempts: 0, lastRunId: null, agentCwd: null, extra: storedItemExtra({}), position: 0, title: null, priority: null, sessionIds: {}, issueFile: null, evidenceDir: null, preset: null, presetPath: null, createdAt: 0, updatedAt: 0, statusUpdatedAt: 0 }
 		const gitLogBeforeSingleflight = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8")
 		const singleflightContexts = ["singleflight-a", "singleflight-b"].map((phase, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, existing: null }))
 		const singleflightResources = await Promise.all(singleflightContexts.map((context) => manager(context)))
