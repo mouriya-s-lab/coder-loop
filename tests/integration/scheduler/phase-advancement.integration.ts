@@ -875,6 +875,13 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				exitCode: 0,
 				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
+			const historicalTree = fixture.store.getTaskTree(chain.id)
+			const historicalIteration = historicalTree?.root.kind === "seq"
+				? historicalTree.root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+				: undefined
+			if (historicalIteration?.kind !== "leaf") throw new Error("expected historical iteration closure")
+			fixture.store.setClosureLifecycle(historicalIteration.closure.closureId, { kind: "consume", updatedAt: 1_800_005_951 })
+			fixture.store.setClosureResources(historicalIteration.closure.closureId, { worktreePath: null, branchName: null, updatedAt: 1_800_005_951 })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
 				phase: "iteration",
