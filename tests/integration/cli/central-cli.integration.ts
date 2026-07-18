@@ -177,13 +177,24 @@ describe("central chain/item CLI", () => {
 	test("chain delete and recreate CLI", async () => {
 		const fixture = await startFixture("chain-delete-recreate")
 		try {
-			const created = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const socketPath = fixture.daemon.snapshot().socketPath
+			const createdResponse = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+				name: "crud-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				preset: "gh-issue-pr-iteration",
+			}))
+			if (!createdResponse.ok) throw new Error(`chain.create setup failed: ${createdResponse.error.code}: ${createdResponse.error.message}`)
+			const created = boundaryRecord(createdResponse.result)
 			expect(created.chain).toMatchObject({ name: "crud-chain", status: "active" })
 
-			const stopped = expectJsonOk(await runCli(["chain", "stop", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const stoppedResponse = await sendDaemonRequest(socketPath, daemonRequest("chain.stop", { chainName: "crud-chain" }))
+			if (!stoppedResponse.ok) throw new Error(`chain.stop setup failed: ${stoppedResponse.error.code}: ${stoppedResponse.error.message}`)
+			const stopped = boundaryRecord(stoppedResponse.result)
 			expect(stopped.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
 
-			const resumed = expectJsonOk(await runCli(["chain", "resume", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const resumedResponse = await sendDaemonRequest(socketPath, daemonRequest("chain.resume", { chainName: "crud-chain" }))
+			if (!resumedResponse.ok) throw new Error(`chain.resume setup failed: ${resumedResponse.error.code}: ${resumedResponse.error.message}`)
+			const resumed = boundaryRecord(resumedResponse.result)
 			expect(resumed.chain).toMatchObject({ name: "crud-chain", status: "active" })
 
 			const deleted = expectJsonOk(await runCli(["chain", "delete", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
