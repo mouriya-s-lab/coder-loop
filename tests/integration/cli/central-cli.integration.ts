@@ -232,7 +232,7 @@ describe("central chain/item CLI", () => {
 	test("item CRUD CLI", async () => {
 		const fixture = await startFixture("item-crud")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "items-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			await seedItemCliChain(fixture, "gh-issue-pr-iteration")
 			const added = expectJsonOk(await runCli([
 				"item",
 				"add",
@@ -256,13 +256,42 @@ describe("central chain/item CLI", () => {
 				status: "queued",
 				title: "feat: 引入 chain-item-daemon CLI 命令族",
 			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("item list CLI", async () => {
+		const fixture = await startFixture("item-list")
+		try {
+			await seedItemCliFixture(fixture)
 
 			const listed = expectJsonOk(await runCli(["item", "list", "items-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(listed.items).toHaveLength(1)
 			expect(listed.items[0]).toMatchObject({ itemId: "181", status: "queued" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("item update CLI", async () => {
+		const fixture = await startFixture("item-update")
+		try {
+			await seedItemCliFixture(fixture)
 
 			const updated = expectJsonOk(await runCli(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--field-json", "{\"pr\":191}", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(updated.item).toMatchObject({ itemId: "181", status: "done", extra: { pr: 191 } })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("item audit logs CLI", async () => {
+		const fixture = await startFixture("item-audit-logs")
+		try {
+			const itemRowId = await seedItemCliFixture(fixture)
+			const updated = await sendDaemonRequest(fixture.daemon.snapshot().socketPath, daemonRequest("item.update", { itemId: itemRowId, fields: { status: "done" } }))
+			if (!updated.ok) throw new Error(`item.update setup failed: ${updated.error.code}: ${updated.error.message}`)
 
 			// #406 row 4 — operator path: no env credential, no claim flags → audit subject is
 			// `{kind: "operator"}`. Pre-#406 this test also asserted an agent-attributed update via
@@ -280,7 +309,14 @@ describe("central chain/item CLI", () => {
 				// #419: audit payload retired `issueNumber: int`; new shape is `rowId` + `itemId: string`.
 				payload: { itemId: "181", fromStatus: "queued", toStatus: "done" },
 			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 
+	test("item update rejects caller-claimed agent identity", async () => {
+		const fixture = await startFixture("item-claimed-agent")
+		try {
 			// #406 retire-claim: pre-existing CLI flag `--agent-run-id` is no longer accepted —
 			// cmd-ts rejects it as an unknown flag. This is the operator-side visible signal that
 			// agent attribution moved off CLI claims onto engine-bound env credentials.
@@ -301,7 +337,15 @@ describe("central chain/item CLI", () => {
 				"--json",
 			])
 			expect(claimedAgentRetry.exitCode).not.toBe(0)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 
+	test("item update rejects an unknown agent credential", async () => {
+		const fixture = await startFixture("item-unknown-credential")
+		try {
+			await seedItemCliFixture(fixture)
 			// #406 unknown-credential rejection: an env-borne credential value that does not map
 			// to any active run gets rejected at the daemon's caller-admission gate. Operator
 			// invocations only see this if the env is mis-set; agents would never hit it during a
@@ -663,41 +707,27 @@ attemptTimeoutSeconds = 3600
 	})
 
 	test("daemon up ignores reload/debug signals and SIGQUIT shuts down gracefully", async () => {
-		const loopDataRoot = await makeLoopDataRoot("daemon-signal-policy")
-		const daemonProcess = spawnDaemonUp(loopDataRoot)
-		try {
-			await waitForDaemonFiles(loopDataRoot)
-			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
+		await exerciseIgnoredDaemonSignal("SIGUSR1")
+	})
 
-			for (const signal of ["SIGUSR1", "SIGHUP", "SIGPIPE", "SIGUSR2"] as const) {
-				process.kill(daemonPid, signal)
-				await sleep(100)
-				expect(isPidAlive(daemonPid), `${signal} should not stop daemon up`).toBe(true)
-				expectJsonOk(await runCli(["chain", "list", "--loop-data-root", loopDataRoot, "--json"]))
-			}
+	test("daemon up ignores SIGHUP and SIGQUIT shuts down gracefully", async () => {
+		await exerciseIgnoredDaemonSignal("SIGHUP")
+	})
 
-			process.kill(daemonPid, "SIGQUIT")
-			expect(await daemonProcess.exited).toBe(0)
-			await waitForDaemonSocketRemoval(loopDataRoot)
-		} finally {
-			daemonProcess.kill()
-			await daemonProcess.exited.catch(() => undefined)
-		}
+	test("daemon up ignores SIGPIPE and SIGQUIT shuts down gracefully", async () => {
+		await exerciseIgnoredDaemonSignal("SIGPIPE")
+	})
 
-		for (const signal of ["SIGTERM", "SIGINT"] as const) {
-			const shutdownLoopDataRoot = await makeLoopDataRoot(`daemon-${signal.toLowerCase()}-policy`)
-			const shutdownProcess = spawnDaemonUp(shutdownLoopDataRoot)
-			try {
-				await waitForDaemonFiles(shutdownLoopDataRoot)
-				const shutdownPid = Number((await readFile(resolve(shutdownLoopDataRoot, "daemon.pid"), "utf-8")).trim())
-				process.kill(shutdownPid, signal)
-				expect(await shutdownProcess.exited).toBe(0)
-				await waitForDaemonSocketRemoval(shutdownLoopDataRoot)
-			} finally {
-				shutdownProcess.kill()
-				await shutdownProcess.exited.catch(() => undefined)
-			}
-		}
+	test("daemon up ignores SIGUSR2 and SIGQUIT shuts down gracefully", async () => {
+		await exerciseIgnoredDaemonSignal("SIGUSR2")
+	})
+
+	test("daemon up shuts down gracefully on SIGTERM", async () => {
+		await exerciseDaemonShutdownSignal("SIGTERM")
+	})
+
+	test("daemon up shuts down gracefully on SIGINT", async () => {
+		await exerciseDaemonShutdownSignal("SIGINT")
 	})
 
 	test("daemon shutdown cleans runtime after background rejection", async () => {
@@ -1280,6 +1310,71 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 		},
 	})
 	return { daemon, loopDataRoot }
+}
+
+async function seedItemCliFixture(fixture: Fixture): Promise<number> {
+	const socketPath = fixture.daemon.snapshot().socketPath
+	const chainId = await seedItemCliChain(fixture, "engine-integration")
+	const addedItem = await sendDaemonRequest(socketPath, daemonRequest("item.add", {
+		chainId,
+		itemId: "181",
+		repoCwd: REPO_ROOT,
+		preset: "engine-integration",
+		title: "feat: 引入 chain-item-daemon CLI 命令族",
+	}))
+	if (!addedItem.ok) throw new Error(`item.add setup failed: ${addedItem.error.code}: ${addedItem.error.message}`)
+	const item = boundaryRecord(addedItem.result.item)
+	if (typeof item.id !== "number") throw new Error("item.add setup returned no numeric item id")
+	return item.id
+}
+
+async function seedItemCliChain(fixture: Fixture, preset: "gh-issue-pr-iteration" | "engine-integration"): Promise<number> {
+	const createdChain = await sendDaemonRequest(fixture.daemon.snapshot().socketPath, daemonRequest("chain.create", {
+		name: "items-chain",
+		repository: "mouriya-s-lab/coder-loop",
+		preset,
+	}))
+	if (!createdChain.ok) throw new Error(`chain.create setup failed: ${createdChain.error.code}: ${createdChain.error.message}`)
+	const chain = boundaryRecord(createdChain.result.chain)
+	if (typeof chain.id !== "number") throw new Error("chain.create setup returned no numeric chain id")
+	return chain.id
+}
+
+type IgnoredDaemonSignal = "SIGUSR1" | "SIGHUP" | "SIGPIPE" | "SIGUSR2"
+
+async function exerciseIgnoredDaemonSignal(signal: IgnoredDaemonSignal): Promise<void> {
+	const loopDataRoot = await makeLoopDataRoot(`daemon-${signal.toLowerCase()}-policy`)
+	const daemonProcess = spawnDaemonUp(loopDataRoot)
+	try {
+		await waitForDaemonFiles(loopDataRoot)
+		const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
+		process.kill(daemonPid, signal)
+		await sleep(100)
+		expect(isPidAlive(daemonPid), `${signal} should not stop daemon up`).toBe(true)
+		const response = await sendDaemonRequest(resolve(loopDataRoot, "daemon.sock"), daemonRequest("chain.list"))
+		expect(response.ok).toBe(true)
+		process.kill(daemonPid, "SIGQUIT")
+		expect(await daemonProcess.exited).toBe(0)
+		await waitForDaemonSocketRemoval(loopDataRoot)
+	} finally {
+		daemonProcess.kill()
+		await daemonProcess.exited.catch(() => undefined)
+	}
+}
+
+async function exerciseDaemonShutdownSignal(signal: "SIGTERM" | "SIGINT"): Promise<void> {
+	const loopDataRoot = await makeLoopDataRoot(`daemon-${signal.toLowerCase()}-policy`)
+	const daemonProcess = spawnDaemonUp(loopDataRoot)
+	try {
+		await waitForDaemonFiles(loopDataRoot)
+		const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
+		process.kill(daemonPid, signal)
+		expect(await daemonProcess.exited).toBe(0)
+		await waitForDaemonSocketRemoval(loopDataRoot)
+	} finally {
+		daemonProcess.kill()
+		await daemonProcess.exited.catch(() => undefined)
+	}
 }
 
 async function makeLoopDataRoot(name: string): Promise<string> {
