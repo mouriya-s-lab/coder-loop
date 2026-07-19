@@ -497,6 +497,9 @@ async function main(): Promise<void> {
 		const reconcileKinds = ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift", "repo-config-drift"]
 		const reconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", lifecycle, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => reconcileKinds.every((kind) => text.includes(kind)), "reconciliation events")
 		const registrationReconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", registration, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => text.includes("registration-mismatch") && text.includes(registrationRow.closure_id), "registration mismatch reconciliation event")
+		// Keep the interrupted lifecycle retry paused while the remaining C07 fixtures
+		// deliberately restart the daemon. Resume it once those restarts are complete.
+		command(["bun", LOOP_ENTRY, "chain", "stop", lifecycle, "--loop-data-root", daemon.root, "--json"], { env })
 		assert(command([REAL_GIT, "symbolic-ref", "HEAD"], { cwd: registrationRow.worktree_path }).stdout.trim() === `refs/heads/${foreignRegistrationBranch}`, "C07 reconciliation changed the mismatched worktree branch")
 		assert(readFileSync(resolve(registrationRow.worktree_path, ".issue560-registration-wip"), "utf8") === "registration mismatch survives\n", "C07 reconciliation changed mismatched worktree WIP")
 		command([REAL_GIT, "switch", "-q", registrationRow.branch_name.replace(/^refs\/heads\//, "")], { cwd: registrationRow.worktree_path })
@@ -514,7 +517,7 @@ async function main(): Promise<void> {
 		await stopDaemon(daemon)
 		command([REAL_GIT, "worktree", "remove", "--force", missingDir], { cwd: repos.target, allowFail: true })
 		command([REAL_GIT, "update-ref", missingBranch, missingBranchTip], { cwd: repos.target })
-		command([REAL_GIT, "worktree", "add", missingDir, missingBranch], { cwd: repos.target })
+		command([REAL_GIT, "worktree", "add", missingDir, missingBranch.replace(/^refs\/heads\//, "")], { cwd: repos.target })
 		daemon = startDaemon(runtime, env); await ready(daemon)
 
 		// A stopped chain whose repository disappears must not abort daemon startup or
@@ -539,6 +542,7 @@ async function main(): Promise<void> {
 			if (existsSync(unavailableRepoOffline) && !existsSync(unavailableRepo)) renameSync(unavailableRepoOffline, unavailableRepo)
 		}
 		daemon = startDaemon(runtime, env); await ready(daemon)
+		command(["bun", LOOP_ENTRY, "chain", "resume", lifecycle, "--loop-data-root", daemon.root, "--json"], { env })
 		event("C07.pass", { eventKinds: [...reconcileKinds, "registration-mismatch", "repository-scan-failed:git-contract"], bytes: reconcile.length + registrationReconcile.length + unavailableReconcile.length, registrationClosureId: registrationRow.closure_id, unavailableRepo })
 
 		// C05: future-writer states not yet produced by the runtime are seeded into a
