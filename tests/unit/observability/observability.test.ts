@@ -72,6 +72,28 @@ describe("observability", () => {
 		expect(renderObservabilityEvent(event)).toContain("mismatch=registration-mismatch repaired=false")
 	})
 
+	test("closure reconciliation preserves retired resource repair identity", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.reconciled",
+			chain: "retired-resource-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: "closure:retired:iteration",
+				repoCwd: "/repo/retired",
+				mismatch: {
+					kind: "retired-resource",
+					path: "/worktrees/retired-slot",
+					branchName: "coder-loop/retired-resource-chain-a1b2c3d4e5f6",
+					resourcesRemoved: true,
+					repaired: true,
+				},
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("mismatch=retired-resource repaired=true")
+	})
+
 	test("task event identity is an exact all-or-none triple", () => {
 		const event = makeObservabilityEvent({ kind: "lifecycle", type: "daemon.stop", subject: { kind: "engine" }, payload: { pid: 10 } })
 		expect(parseObservabilityEvent({ ...event, runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event" }, definitionNodeId: "definition-leaf" }).runtimeNodeId).toBe("runtime-leaf")

@@ -2390,7 +2390,7 @@ export class CoderLoopDaemon {
 
 			await this.reconcileOrphanedRuns(chain)
 			const tree = store.getTaskTree(chain.id)
-			for (const finding of await reconcileClosureResources({ chain, items: store.listItems(chain.id), tree: tree?.root ?? null, loopDataRootOptions: { loopDataRoot: this.paths.root } })) {
+			for (const finding of await reconcileClosureResources({ chain, items: store.listItems(chain.id), tree: tree?.root ?? null, loopDataRootOptions: { loopDataRoot: this.paths.root }, store })) {
 				const event: SchedulerEvent = { type: "closure.reconciled", chainId: chain.id, ...finding }
 				await this.recordObservabilityEventIfChainNameIsValid(chain, schedulerEventToObservabilityEvent(chain, event))
 			}

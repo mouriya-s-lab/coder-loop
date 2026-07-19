@@ -129,6 +129,34 @@ export function closureResourcesBelongToEngine(
 		&& branchName === closureBranchName(chainName, closureId)
 }
 
+export type ClosureResourceOwnership =
+	| { kind: "closure"; branchRef: string }
+	| { kind: "retired-slot"; branchRef: string }
+	| { kind: "foreign" }
+
+export function classifyClosureResourceOwnership(input: {
+	loopDataRoot: string
+	chainName: string
+	repoCwd: string
+	closureId: string
+	worktreePath: string
+	branchName: string
+}): ClosureResourceOwnership {
+	if (closureResourcesBelongToEngine(input.loopDataRoot, input.chainName, input.repoCwd, input.closureId, input.worktreePath, input.branchName)) {
+		return { kind: "closure", branchRef: input.branchName }
+	}
+	const repoHash = createHash("sha256").update(input.repoCwd).digest("hex")
+	const rawRepoLabel = basename(input.repoCwd) || "repo"
+	const sanitizedRepoLabel = rawRepoLabel.replace(/[^A-Za-z0-9._-]/g, "_")
+	const repoLabel = sanitizedRepoLabel === "" || sanitizedRepoLabel === "." || sanitizedRepoLabel.includes("..") ? "repo" : sanitizedRepoLabel
+	const sanitizedChain = input.chainName.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "") || "chain"
+	const retiredWorktreePath = resolve(input.loopDataRoot, "chains", input.chainName, "worktrees", `${repoLabel}-${repoHash.slice(0, 16)}`)
+	const retiredBranchName = `coder-loop/${sanitizedChain}-${repoHash.slice(0, 12)}`
+	return resolve(input.worktreePath) === retiredWorktreePath && input.branchName === retiredBranchName
+		? { kind: "retired-slot", branchRef: `refs/heads/${retiredBranchName}` }
+		: { kind: "foreign" }
+}
+
 export type PersistedParPinSource = {
 	sourceParNodeId: string | null
 	baseCommit: string

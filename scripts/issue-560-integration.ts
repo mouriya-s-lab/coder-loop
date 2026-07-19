@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 
 import { Database } from "bun:sqlite"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 
 import { closureBranchPrefix, createRepositoryGitCoordinator, type OriginFreshness } from "../src/closure-lifecycle"
 import { cleanupSchedulerChainWorktrees, createGitWorktreeManager, consumeSchedulerClosure, reconcileClosureResources, sampleClosureConsumptionObservation } from "../src/scheduler"
@@ -27,6 +27,7 @@ type CommandOptions = { cwd?: string; env?: NodeJS.ProcessEnv; allowFail?: boole
 type AsyncCommandOptions = { cwd?: string; env?: NodeJS.ProcessEnv }
 type PreparedRepositories = { target: string; noOrigin: string; badRemote: string; origin: string; advanced: string }
 type ShimResources = { dir: string; runnerLog: string; gate: string }
+type RetiredResourceTuple = { worktreePath: string; branchName: string; branchRef: string }
 
 function fail(message: string): never { throw new Error(message) }
 function assert(value: unknown, message: string): asserts value { if (!value) fail(message) }
@@ -46,6 +47,20 @@ function parseRunnerObservation(value: unknown): RunnerObservation {
 }
 function event(type: string, payload: JsonObject = {}): void {
 	process.stdout.write(`${JSON.stringify({ ts: new Date().toISOString(), type, ...payload })}\n`)
+}
+
+function retiredResourceTuple(loopDataRoot: string, chainName: string, repoCwd: string): RetiredResourceTuple {
+	const rawRepoLabel = basename(repoCwd) || "repo"
+	const sanitizedRepoLabel = rawRepoLabel.replace(/[^A-Za-z0-9._-]/g, "_")
+	const repoLabel = sanitizedRepoLabel === "" || sanitizedRepoLabel === "." || sanitizedRepoLabel.includes("..") ? "repo" : sanitizedRepoLabel
+	const repoHash = createHash("sha256").update(repoCwd).digest("hex")
+	const safeChain = chainName.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "") || "chain"
+	const branchName = `coder-loop/${safeChain}-${repoHash.slice(0, 12)}`
+	return {
+		worktreePath: resolve(loopDataRoot, "chains", chainName, "worktrees", `${repoLabel}-${repoHash.slice(0, 16)}`),
+		branchName,
+		branchRef: `refs/heads/${branchName}`,
+	}
 }
 
 function cleanEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -343,6 +358,41 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 				assert(cleanup.decision.kind === "consumed", `C05 ${spec.kind} cleanup did not consume`)
 			}
 		}
+		const retiredChain = store.createChain({ name: "issue560-retired-shared", preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", metadata: storedChainMetadata({}) })
+		const retiredFirstItem = store.createItem({ chainId: retiredChain.id, itemId: "retired-first", repoCwd, status: runtimeStatus("done"), preset: PRESET, extra: storedItemExtra({}) })
+		const retiredSecondItem = store.createItem({ chainId: retiredChain.id, itemId: "retired-second", repoCwd, status: runtimeStatus("done"), preset: PRESET, extra: storedItemExtra({}) })
+		const retired = retiredResourceTuple(loopDataRoot, retiredChain.name, repoCwd)
+		command([REAL_GIT, "worktree", "add", "-b", retired.branchName, retired.worktreePath, "main"], { cwd: repoCwd })
+		const retiredBase = command([REAL_GIT, "rev-parse", "main"], { cwd: repoCwd }).stdout.trim()
+		const retiredDefinition = { kind: "chain", contentIdentity: "sha256:issue560-retired-shared" } as const
+		const retiredFirst = { closureId: "closure:issue560:retired:first", itemRowId: retiredFirstItem.id, itemId: retiredFirstItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit: retiredBase, sourceParNodeId: null, sessions: [] } as const
+		const retiredSecond = { closureId: "closure:issue560:retired:second", itemRowId: retiredSecondItem.id, itemId: retiredSecondItem.itemId, phase: "review", lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit: retiredBase, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(retiredChain.id, { root: { kind: "seq", identity: { runtimeNodeId: "seq-issue560-retired", definitionRef: retiredDefinition, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: "leaf-issue560-retired-first" }, children: [
+			{ kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-first", definitionRef: retiredDefinition, definitionNodeId: "iteration" }, closure: retiredFirst },
+			{ kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-second", definitionRef: retiredDefinition, definitionNodeId: "review" }, closure: retiredSecond },
+		] }, activeRuns: [] })
+		const firstRetired = await consumeSchedulerClosure({ chainId: retiredChain.id, chainName: retiredChain.name, baseBranch: retiredChain.baseBranch, repoCwd, closure: retiredFirst, authority: { kind: "chain-deletion", chainId: retiredChain.id }, updatedAt: 2_000_000_200, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+		assert(firstRetired.complete && firstRetired.cleanup === null && existsSync(retired.worktreePath), "C05 retired shared reference removed a live sibling resource")
+		const retiredTree = store.getTaskTree(retiredChain.id)
+		assert(retiredTree?.root.kind === "seq" && retiredTree.root.children[1]?.kind === "leaf", "C05 retired shared fixture lost its second closure")
+		const retiredSecondSnapshot = retiredTree.root.children[1].closure
+		const secondRetired = await consumeSchedulerClosure({ chainId: retiredChain.id, chainName: retiredChain.name, baseBranch: retiredChain.baseBranch, repoCwd, closure: retiredSecondSnapshot, authority: { kind: "chain-deletion", chainId: retiredChain.id }, updatedAt: 2_000_000_201, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+		assert(secondRetired.complete && secondRetired.cleanup?.error === null && !existsSync(retired.worktreePath), "C05 final retired consumer did not remove the old resource")
+		assert(command([REAL_GIT, "show-ref", "--verify", "--quiet", retired.branchRef], { cwd: repoCwd, allowFail: true }).exitCode === 1, "C05 final retired consumer retained the old branch")
+		results.push({ kind: "retired-slot-shared-consumption", firstReferenceRetired: true, liveSiblingPreserved: true, finalResourcesRemoved: true })
+
+		const reconcileChain = store.createChain({ name: "issue560-retired-reconcile", preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", metadata: storedChainMetadata({}) })
+		const reconcileItem = store.createItem({ chainId: reconcileChain.id, itemId: "retired-reconcile", repoCwd, status: runtimeStatus("done"), preset: PRESET, extra: storedItemExtra({}) })
+		const reconcileRetired = retiredResourceTuple(loopDataRoot, reconcileChain.name, repoCwd)
+		command([REAL_GIT, "worktree", "add", "-b", reconcileRetired.branchName, reconcileRetired.worktreePath, "main"], { cwd: repoCwd })
+		const reconcileClosure = { closureId: "closure:issue560:retired:reconcile", itemRowId: reconcileItem.id, itemId: reconcileItem.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: reconcileRetired.worktreePath, branchName: reconcileRetired.branchName, baseCommit: retiredBase, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(reconcileChain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-reconcile", definitionRef: { kind: "chain", contentIdentity: "sha256:issue560-retired-reconcile" }, definitionNodeId: "iteration" }, closure: reconcileClosure }, activeRuns: [] })
+		const retiredFindings = await reconcileClosureResources({ chain: reconcileChain, items: [reconcileItem], tree: store.getTaskTree(reconcileChain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
+		assert(retiredFindings.some((finding) => finding.closureId === reconcileClosure.closureId && finding.mismatch.kind === "retired-resource" && finding.mismatch.repaired && finding.mismatch.resourcesRemoved), "C07 reconciliation did not retire the consumed base-era tuple")
+		const reconciledTree = store.getTaskTree(reconcileChain.id)
+		assert(reconciledTree?.root.kind === "leaf" && reconciledTree.root.closure.worktreePath === null, "C07 reconciliation did not clear the consumed base-era tuple")
+		assert(!existsSync(reconcileRetired.worktreePath) && command([REAL_GIT, "show-ref", "--verify", "--quiet", reconcileRetired.branchRef], { cwd: repoCwd, allowFail: true }).exitCode === 1, "C07 reconciliation retained base-era Git resources")
+		results.push({ kind: "retired-slot-startup-reconciliation", persistedTupleCleared: true, resourcesRemoved: true })
 		return results
 	} finally { store.close() }
 }
@@ -534,8 +584,13 @@ async function main(): Promise<void> {
 		const directTree: TaskNodeSnapshot = { kind: "seq", identity: { runtimeNodeId: `seq-${directChain.name}`, definitionRef: { kind: "chain", contentIdentity: "sha256:issue-560-direct" }, definitionNodeId: "root" }, cursor: { kind: "complete" }, children: directLeaves }
 		command([REAL_GIT, "config", "core.hooksPath", ".issue560-live-hooks"], { cwd: repos.target })
 		command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
-		const driftFindings = await reconcileClosureResources({ chain: directChain, items: contexts.map((context) => context.item), tree: directTree, loopDataRootOptions: { loopDataRoot: daemon.root } })
-		assert(driftFindings.some((finding) => finding.mismatch.kind === "hooks-drift") && driftFindings.some((finding) => finding.mismatch.kind === "repo-config-drift"), "C10 live-resource config/hooks drift was not audited")
+		const reconciliationStore = openSqliteStateStore({ loopDataRoot: daemon.root })
+		let driftKinds: string[]
+		try {
+			const driftFindings = await reconcileClosureResources({ chain: directChain, items: contexts.map((context) => context.item), tree: directTree, loopDataRootOptions: { loopDataRoot: daemon.root }, store: reconciliationStore })
+			assert(driftFindings.some((finding) => finding.mismatch.kind === "hooks-drift") && driftFindings.some((finding) => finding.mismatch.kind === "repo-config-drift"), "C10 live-resource config/hooks drift was not audited")
+			driftKinds = driftFindings.map((finding) => finding.mismatch.kind)
+		} finally { reconciliationStore.close() }
 		const resourceStatesAfter = directResources.map((resource) => {
 			if (typeof resource === "string") fail("expected typed direct resources")
 			return { baseCommit: resource.baseCommit, head: command([REAL_GIT, "rev-parse", "HEAD"], { cwd: resource.worktreePath }).stdout.trim(), index: command([REAL_GIT, "ls-files", "--stage"], { cwd: resource.worktreePath }).stdout, status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: resource.worktreePath }).stdout }
@@ -557,7 +612,7 @@ async function main(): Promise<void> {
 			await cleanupSchedulerChainWorktrees([{ chainName: directChain.name, repoCwd: repos.target, closure: { ...contexts[index]!.existing, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName }, loopDataRootOptions: { loopDataRoot: daemon.root } }])
 		}
 		assert(!readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").includes("gc"), "C10 explicit gc observed")
-		event("C05.C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, publicationEvidence: [publishedObservation.evidence, deletedPublicationObservation.evidence], driftKinds: driftFindings.map((finding) => finding.mismatch.kind), detachedCleanupRejected: true, resourceStates: resourceStatesAfter })
+		event("C05.C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, publicationEvidence: [publishedObservation.evidence, deletedPublicationObservation.evidence], driftKinds, detachedCleanupRejected: true, resourceStates: resourceStatesAfter })
 
 		// C05/C07 cleanup recovery: deletion first seals the active chain against
 		// resume, then an unavailable repository leaves only runtime cleanup retryable.

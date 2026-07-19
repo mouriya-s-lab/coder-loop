@@ -1,9 +1,10 @@
 import { afterAll, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 
 import {
 	cleanupSchedulerChainWorktrees,
@@ -86,6 +87,18 @@ function makeItem(store: ReturnType<typeof openSqliteStateStore>, chain: ReturnT
 	return store.createItem({ chainId: chain.id, itemId, repoCwd, status: runtimeStatus("queued"), attempts: 0, extra: storedItemExtra({}) })
 }
 
+function retiredResourceTuple(loopDataRoot: string, chainName: string, repoCwd: string): { worktreePath: string; branchName: string; branchRef: string } {
+	const repoLabel = (basename(repoCwd) || "repo").replace(/[^A-Za-z0-9._-]/g, "_")
+	const repoHash = createHash("sha256").update(repoCwd).digest("hex")
+	const safeChain = chainName.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "") || "chain"
+	const branchName = `coder-loop/${safeChain}-${repoHash.slice(0, 12)}`
+	return {
+		worktreePath: resolve(loopDataRoot, "chains", chainName, "worktrees", `${repoLabel}-${repoHash.slice(0, 16)}`),
+		branchName,
+		branchRef: `refs/heads/${branchName}`,
+	}
+}
+
 test("killed-run slot worktree holding the slot branch is self-healed from a new loop-data root", async () => {
 	const root = resolve(TEST_ROOT, "stale-slot-branch")
 	const repoCwd = resolve(root, "repo")
@@ -138,11 +151,11 @@ test("reconciliation compares repository Git config with its captured baseline",
 		const item = makeItem(store, chain, "contract", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
 		await manager({ chain, item, phase: "iteration", closureId: "closure:contract:iteration", repoCwd, slotKey: "slot", existing: null })
-		const baseline = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		const baseline = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot }, store })
 		expect(baseline.filter((finding) => finding.mismatch.kind === "hooks-drift" || finding.mismatch.kind === "repo-config-drift")).toEqual([])
 		expect(git(repoCwd, ["config", "core.hooksPath", ".changed-hooks"]).exitCode).toBe(0)
 		expect(git(repoCwd, ["config", "extensions.worktreeConfig", "false"]).exitCode).toBe(0)
-		const drift = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		const drift = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot }, store })
 		expect(drift.map((finding) => finding.mismatch).filter((mismatch) => mismatch.kind === "hooks-drift" || mismatch.kind === "repo-config-drift")).toEqual([
 			{ kind: "hooks-drift", expected: ".preexisting-hooks", actual: ".changed-hooks", repaired: false },
 			{ kind: "repo-config-drift", key: "extensions.worktreeConfig", expected: "true", actual: "false", repaired: false },
@@ -267,7 +280,7 @@ test("startup reconciliation audits persisted worktree registration pairs withou
 			activeRuns: [],
 		})
 
-		const findings = await reconcileClosureResources({ chain, items: [wrongBranchItem, unregisteredItem], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
+		const findings = await reconcileClosureResources({ chain, items: [wrongBranchItem, unregisteredItem], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
 
 		expect(findings).toContainEqual({ closureId: "closure:wrong-branch:iteration", repoCwd, mismatch: { kind: "registration-mismatch", path: wrongBranch.worktreePath, expectedBranchName: wrongBranch.branchName, actualBranchName: "refs/heads/foreign-reconcile-branch", repaired: false } })
 		expect(findings).toContainEqual({ closureId: "closure:unregistered:iteration", repoCwd, mismatch: { kind: "registration-mismatch", path: unregistered.worktreePath, expectedBranchName: unregistered.branchName, actualBranchName: null, repaired: false } })
@@ -299,7 +312,7 @@ test("startup reconciliation audits missing resources and repairs only orphaned 
 		expect(git(repoCwd, ["branch", orphanBranch, "main"]).exitCode).toBe(0)
 		expect(git(repoCwd, ["config", "core.hooksPath", ".unexpected-hooks"]).exitCode).toBe(0)
 		expect(git(repoCwd, ["config", "extensions.worktreeConfig", "true"]).exitCode).toBe(0)
-		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
 		expect(findings.map((finding) => finding.mismatch.kind).sort()).toEqual(["hooks-drift", "missing-branch", "missing-directory", "orphan-branch", "orphan-directory", "registration-mismatch", "repo-config-drift"])
 		expect(existsSync(orphanPath)).toBe(false)
 		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${orphanBranch}`]).exitCode).not.toBe(0)
@@ -324,11 +337,39 @@ test("startup reconciliation removes consumed worktree registrations and branche
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-consumed", definitionRef, definitionNodeId: "iteration" }, closure: { closureId: "closure:reconcile-consumed:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
 		store.setClosureLifecycle("closure:reconcile-consumed:iteration", { kind: "consume", updatedAt: 1_900_000_200 })
 
-		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
 		expect(findings.map((finding) => finding.mismatch.kind).filter((kind) => kind.startsWith("orphan-")).sort()).toEqual(["orphan-branch", "orphan-directory"])
 		expect(existsSync(resources.worktreePath)).toBe(false)
 		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).not.toContain(resources.worktreePath)
 		expect(git(repoCwd, ["show-ref", "--verify", resources.branchName]).exitCode).not.toBe(0)
+	} finally { store.close() }
+})
+
+test("startup reconciliation retires a consumed base-era resource tuple", async () => {
+	const root = resolve(TEST_ROOT, "reconcile-retired-resource")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-retired-resource-chain")
+		const item = makeItem(store, chain, "reconcile-retired-resource", repoCwd)
+		const retired = retiredResourceTuple(loopDataRoot, chain.name, repoCwd)
+		expect(git(repoCwd, ["worktree", "add", "-b", retired.branchName, retired.worktreePath, "main"]).exitCode).toBe(0)
+		const closure = { closureId: "closure:reconcile-retired:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit: git(repoCwd, ["rev-parse", "main"]).stdout, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-retired", definitionRef: { kind: "chain", contentIdentity: "sha256:reconcile-retired" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
+
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
+
+		expect(findings).toContainEqual({
+			closureId: closure.closureId,
+			repoCwd,
+			mismatch: { kind: "retired-resource", path: retired.worktreePath, branchName: retired.branchName, resourcesRemoved: true, repaired: true },
+		})
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "consumed", worktreePath: null, branchName: null } })
+		expect(existsSync(retired.worktreePath)).toBe(false)
+		expect(git(repoCwd, ["show-ref", "--verify", "--quiet", retired.branchRef]).exitCode).toBe(1)
 	} finally { store.close() }
 })
 
@@ -344,7 +385,7 @@ test("startup reconciliation preserves orphan directories when repository scans 
 		const item = makeItem(store, chain, "reconcile-scan-failure", repoCwd)
 		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "orphan")
 		await mkdir(orphanPath, { recursive: true })
-		const findings = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot }, store })
 		expect(findings).toContainEqual({
 			closureId: null,
 			repoCwd,
@@ -377,7 +418,7 @@ test("startup reconciliation attributes a registered orphan worktree to its owni
 		const secondItem = makeItem(store, chain, "reconcile-second", secondRepo)
 		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "second-repo-orphan")
 		expect(git(secondRepo, ["worktree", "add", "-b", `coder-loop/closures/${chain.name}/orphan`, orphanPath, "main"]).exitCode).toBe(0)
-		const findings = await reconcileClosureResources({ chain, items: [firstItem, secondItem], tree: null, loopDataRootOptions: { loopDataRoot } })
+		const findings = await reconcileClosureResources({ chain, items: [firstItem, secondItem], tree: null, loopDataRootOptions: { loopDataRoot }, store })
 		const orphan = findings.find((finding) => finding.mismatch.kind === "orphan-directory" && finding.mismatch.path === orphanPath)
 		expect(orphan?.repoCwd).toBe(secondRepo)
 		expect(orphan?.mismatch.repaired).toBe(true)
@@ -402,7 +443,7 @@ test("startup reconciliation reports failed orphan branch and worktree repairs w
 		expect(git(repoCwd, ["branch", lockedBranch, "main"]).exitCode).toBe(0)
 		const lockedRef = resolve(repoCwd, ".git", "refs", "heads", ...lockedBranch.split("/"))
 		await writeFile(`${lockedRef}.lock`, "lock update-ref for the failure-path assertion\n")
-		const findings = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot } })
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot }, store })
 		expect(findings).toContainEqual({
 			closureId: null,
 			repoCwd,
@@ -433,6 +474,50 @@ test("consumed cleanup rejects persisted resources outside the closure-derived e
 	expect(result?.error).toContain("outside engine closure namespace")
 	expect(existsSync(resolve(foreignPath, "keep.txt"))).toBe(true)
 	expect(git(repoCwd, ["show-ref", "--verify", "refs/heads/foreign-branch"]).exitCode).toBe(0)
+})
+
+test("consumption retires shared base-era tuples without deleting a live sibling resource", async () => {
+	const root = resolve(TEST_ROOT, "consume-retired-shared-resource")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "consume-retired-shared-chain")
+		const firstItem = makeItem(store, chain, "retired-first", repoCwd)
+		const secondItem = makeItem(store, chain, "retired-second", repoCwd)
+		const retired = retiredResourceTuple(loopDataRoot, chain.name, repoCwd)
+		expect(git(repoCwd, ["worktree", "add", "-b", retired.branchName, retired.worktreePath, "main"]).exitCode).toBe(0)
+		const baseCommit = git(repoCwd, ["rev-parse", "main"]).stdout.trim()
+		const definitionRef = { kind: "chain", contentIdentity: "sha256:consume-retired-shared" } as const
+		const first = { closureId: "closure:retired:first", itemRowId: firstItem.id, itemId: firstItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit, sourceParNodeId: null, sessions: [] } as const
+		const second = { closureId: "closure:retired:second", itemRowId: secondItem.id, itemId: secondItem.itemId, phase: "review", lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, {
+			root: { kind: "seq", identity: { runtimeNodeId: "seq-consume-retired", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: "leaf-retired-first" }, children: [
+				{ kind: "leaf", identity: { runtimeNodeId: "leaf-retired-first", definitionRef, definitionNodeId: "iteration" }, closure: first },
+				{ kind: "leaf", identity: { runtimeNodeId: "leaf-retired-second", definitionRef, definitionNodeId: "review" }, closure: second },
+			] },
+			activeRuns: [],
+		})
+
+		const firstResult = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure: first, authority: { kind: "chain-deletion", chainId: chain.id }, updatedAt: 1_900_000_100, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+		expect(firstResult.complete).toBe(true)
+		expect(firstResult.cleanup).toBeNull()
+		expect(existsSync(retired.worktreePath)).toBe(true)
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ children: [
+			{ closure: { lifecycle: "consumed", worktreePath: null, branchName: null } },
+			{ closure: { lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: retired.branchName } },
+		] })
+
+		const secondSnapshot = store.getTaskTree(chain.id)?.root
+		if (secondSnapshot?.kind !== "seq" || secondSnapshot.children[1]?.kind !== "leaf") throw new Error("expected second retired closure")
+		const secondResult = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure: secondSnapshot.children[1].closure, authority: { kind: "chain-deletion", chainId: chain.id }, updatedAt: 1_900_000_101, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+		expect(secondResult.complete).toBe(true)
+		expect(secondResult.cleanup).toMatchObject({ registered: true, removed: true, error: null })
+		expect(existsSync(retired.worktreePath)).toBe(false)
+		expect(git(repoCwd, ["show-ref", "--verify", "--quiet", retired.branchRef]).exitCode).toBe(1)
+	} finally { store.close() }
 })
 
 test("consumed cleanup rejects a detached registration at the owned closure path", async () => {
@@ -537,7 +622,7 @@ test("startup reconciliation removes an engine registration whose directory disa
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-prunable", definitionRef: { kind: "chain", contentIdentity: "sha256:reconcile-prunable" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
 		await rm(resources.worktreePath, { recursive: true, force: true })
 
-		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
 
 		expect(findings).toContainEqual({ closureId: null, repoCwd, mismatch: { kind: "orphan-directory", path: resources.worktreePath, repaired: true } })
 		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).not.toContain(resources.worktreePath)
