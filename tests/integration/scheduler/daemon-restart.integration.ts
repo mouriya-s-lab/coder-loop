@@ -316,7 +316,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 	}
 })
 
-test("completed chain consumes its real closure worktree registration and local directory", async () => {
+test("completed chain removes its real git worktree registration and local directory", async () => {
 	const root = resolve(TEST_ROOT, "completed-worktree-cleanup")
 	const loopDataRoot = resolve(root, "loop-data")
 	const target = resolve(root, "target")

@@ -86,7 +86,7 @@ function makeItem(store: ReturnType<typeof openSqliteStateStore>, chain: ReturnT
 	return store.createItem({ chainId: chain.id, itemId, repoCwd, status: runtimeStatus("queued"), attempts: 0, extra: storedItemExtra({}) })
 }
 
-test("the same closure recovers its branch from a stale loop-data-root worktree", async () => {
+test("killed-run slot worktree holding the slot branch is self-healed from a new loop-data root", async () => {
 	const root = resolve(TEST_ROOT, "stale-slot-branch")
 	const repoCwd = resolve(root, "repo")
 	await initGitRepo(repoCwd)

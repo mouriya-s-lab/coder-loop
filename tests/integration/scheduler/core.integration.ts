@@ -525,7 +525,7 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("successful chain completion consumes and idempotently cleans closure worktrees", async () => {
+	test("completed chain worktree cleanup is idempotent after prior removal", async () => {
 		const fixture = await createFixture("completion-cleanup-idempotent")
 		const target = resolve(fixture.loopDataRoot, "..", "target")
 		await initGitTarget(target)

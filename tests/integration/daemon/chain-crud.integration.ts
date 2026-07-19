@@ -743,7 +743,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("socket completed chain consumes closure worktrees and retains audit runtime", async () => {
+	test("socket completed chain removes scheduler worktree registration and preserves audit runtime", async () => {
 		const fixture = await startFixture("chain-complete-cleanup", { realWorktreeManager: true })
 		const target = fixture.loopDataRoot + "-target"
 		await initGitTarget(target)

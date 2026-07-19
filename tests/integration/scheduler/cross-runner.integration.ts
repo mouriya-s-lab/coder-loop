@@ -33,7 +33,7 @@ afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
 })
 
-test("cross-runner happy path stores phase sessions until successful completion consumes them", async () => {
+test("cross-runner happy path stores iteration/codex and review/claude session ids independently", async () => {
 	const fixture = await createCrossRunnerFixture("happy-path", [
 		{
 			runner: "codex",
