@@ -143,7 +143,7 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
 		try {
 			const db = new Database(fixture.dbFile)
-			try { expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(17) } finally { db.close() }
+			try { expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16) } finally { db.close() }
 			const tree = migrated.getTaskTree(chain.id)
 			expect(tree?.root.kind).toBe("seq")
 			if (tree?.root.kind !== "seq") throw new Error("expected migrated seq")

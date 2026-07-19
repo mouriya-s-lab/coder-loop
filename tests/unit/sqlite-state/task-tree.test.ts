@@ -92,7 +92,7 @@ describe("sqlite state store", () => {
 		openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }).close()
 		const migrated = new Database(fixture.dbFile)
 		try {
-			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(17)
+			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16)
 			expect(migrated.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name='closure_consumption_intents'").get()?.name).toBe("closure_consumption_intents")
 			migrated.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,'decided-reopen'),($chain,$closure,'next-epoch-candidate')").run({ $chain: chain.id, $closure: closureId })
 			expect(migrated.query<{ kind: string }, []>("SELECT kind FROM closure_reachability_seeds ORDER BY kind").all().map((row) => row.kind)).toEqual([

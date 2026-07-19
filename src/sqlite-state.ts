@@ -794,9 +794,8 @@ ${STATE_INDEXES_SQL}
 // the rebuild, and rows being copied through the new schema satisfy the new constraint (existing
 // runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
 // main independently used v14 for context_entries after #558 had used v14 for the
-// normalized v3 runtime tables. v15 is the first schema that requires both shapes. v17 adds the
-// closure consumption intent outbox so evidence/freshness survives cleanup failure and restart.
-const STATE_SCHEMA_VERSION = 17
+// normalized v3 runtime tables. v15 is the first schema that requires both shapes.
+const STATE_SCHEMA_VERSION = 16
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
