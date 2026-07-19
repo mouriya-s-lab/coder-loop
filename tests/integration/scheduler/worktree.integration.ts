@@ -210,6 +210,72 @@ test("worktree registered but directory missing is pruned and recreated", async 
 	}
 })
 
+test("reopen rejects a persisted worktree registered to another branch without mutating it", async () => {
+	const root = resolve(TEST_ROOT, "reopen-registration-mismatch")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reopen-registration-mismatch-chain")
+		const item = makeItem(store, chain, "reopen-registration-mismatch", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reopen-registration-mismatch:iteration", repoCwd, slotKey: "slot", existing: null })
+		if (typeof resources === "string") throw new Error("expected closure resources")
+		await writeFile(resolve(resources.worktreePath, ".reopen-wip"), "must survive\n")
+		expect(git(resources.worktreePath, ["switch", "-c", "foreign-reopen-branch"]).exitCode).toBe(0)
+		const existing = { closureId: "closure:reopen-registration-mismatch:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "suspended", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
+
+		await expect(manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", existing })).rejects.toThrow("registered to unexpected branch")
+
+		expect(git(resources.worktreePath, ["symbolic-ref", "HEAD"]).stdout.trim()).toBe("refs/heads/foreign-reopen-branch")
+		expect(await Bun.file(resolve(resources.worktreePath, ".reopen-wip")).text()).toBe("must survive\n")
+	} finally { store.close() }
+})
+
+test("startup reconciliation audits persisted worktree registration pairs without repairing them", async () => {
+	const root = resolve(TEST_ROOT, "reconcile-registration-mismatch")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-registration-mismatch-chain")
+		const wrongBranchItem = makeItem(store, chain, "wrong-branch", repoCwd)
+		const unregisteredItem = makeItem(store, chain, "unregistered", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const wrongBranch = await manager({ chain, item: wrongBranchItem, phase: "iteration", closureId: "closure:wrong-branch:iteration", repoCwd, slotKey: "wrong", existing: null })
+		const unregistered = await manager({ chain, item: unregisteredItem, phase: "iteration", closureId: "closure:unregistered:iteration", repoCwd, slotKey: "unregistered", existing: null })
+		if (typeof wrongBranch === "string" || typeof unregistered === "string") throw new Error("expected closure resources")
+		expect(git(wrongBranch.worktreePath, ["switch", "-c", "foreign-reconcile-branch"]).exitCode).toBe(0)
+		expect(git(repoCwd, ["worktree", "remove", "--force", unregistered.worktreePath]).exitCode).toBe(0)
+		await mkdir(unregistered.worktreePath, { recursive: true })
+		await writeFile(resolve(unregistered.worktreePath, ".unregistered-wip"), "must survive\n")
+		const definitionRef = { kind: "chain", contentIdentity: "sha256:registration-mismatch" } as const
+		store.createTaskTree(chain.id, {
+			root: {
+				kind: "seq",
+				identity: { runtimeNodeId: "registration-mismatch-seq", definitionRef, definitionNodeId: "seq" },
+				cursor: { kind: "next", nodeId: "wrong-branch-leaf" },
+				children: [
+					{ kind: "leaf", identity: { runtimeNodeId: "wrong-branch-leaf", definitionRef, definitionNodeId: "wrong" }, closure: { closureId: "closure:wrong-branch:iteration", itemRowId: wrongBranchItem.id, itemId: wrongBranchItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: wrongBranch.worktreePath, branchName: wrongBranch.branchName, baseCommit: wrongBranch.baseCommit, sourceParNodeId: null, sessions: [] } },
+					{ kind: "leaf", identity: { runtimeNodeId: "unregistered-leaf", definitionRef, definitionNodeId: "unregistered" }, closure: { closureId: "closure:unregistered:iteration", itemRowId: unregisteredItem.id, itemId: unregisteredItem.itemId, phase: "iteration", lifecycle: "suspended", worktreePath: unregistered.worktreePath, branchName: unregistered.branchName, baseCommit: unregistered.baseCommit, sourceParNodeId: null, sessions: [] } },
+				],
+			},
+			activeRuns: [],
+		})
+
+		const findings = await reconcileClosureResources({ chain, items: [wrongBranchItem, unregisteredItem], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
+
+		expect(findings).toContainEqual({ closureId: "closure:wrong-branch:iteration", repoCwd, mismatch: { kind: "registration-mismatch", path: wrongBranch.worktreePath, expectedBranchName: wrongBranch.branchName, actualBranchName: "refs/heads/foreign-reconcile-branch", repaired: false } })
+		expect(findings).toContainEqual({ closureId: "closure:unregistered:iteration", repoCwd, mismatch: { kind: "registration-mismatch", path: unregistered.worktreePath, expectedBranchName: unregistered.branchName, actualBranchName: null, repaired: false } })
+		expect(git(wrongBranch.worktreePath, ["symbolic-ref", "HEAD"]).stdout.trim()).toBe("refs/heads/foreign-reconcile-branch")
+		expect(await Bun.file(resolve(unregistered.worktreePath, ".unregistered-wip")).text()).toBe("must survive\n")
+	} finally { store.close() }
+})
+
 test("startup reconciliation audits missing resources and repairs only orphaned engine namespace", async () => {
 	const root = resolve(TEST_ROOT, "reconcile")
 	const repoCwd = resolve(root, "repo")
@@ -234,7 +300,7 @@ test("startup reconciliation audits missing resources and repairs only orphaned 
 		expect(git(repoCwd, ["config", "core.hooksPath", ".unexpected-hooks"]).exitCode).toBe(0)
 		expect(git(repoCwd, ["config", "extensions.worktreeConfig", "true"]).exitCode).toBe(0)
 		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
-		expect(findings.map((finding) => finding.mismatch.kind).sort()).toEqual(["hooks-drift", "missing-branch", "missing-directory", "orphan-branch", "orphan-directory", "repo-config-drift"])
+		expect(findings.map((finding) => finding.mismatch.kind).sort()).toEqual(["hooks-drift", "missing-branch", "missing-directory", "orphan-branch", "orphan-directory", "registration-mismatch", "repo-config-drift"])
 		expect(existsSync(orphanPath)).toBe(false)
 		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${orphanBranch}`]).exitCode).not.toBe(0)
 		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "active" } })

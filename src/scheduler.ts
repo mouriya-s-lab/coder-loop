@@ -900,7 +900,13 @@ export function createGitWorktreeManager(
 		return await coordinator.run(context.repoCwd, async () => {
 			await loadOrCaptureRepositoryGitContract(context.chain.name, context.repoCwd, options)
 			await mkdir(dirname(worktreePath), { recursive: true })
-			if (await gitWorktreeListIncludesPath(context.repoCwd, worktreePath)) {
+			const listed = await git(context.repoCwd, ["worktree", "list", "--porcelain"])
+			if (listed.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to inspect closure worktrees for ${context.closureId}: ${listed.stderr}`)
+			if (gitWorktreeListOutputIncludesPath(listed.stdout, worktreePath)) {
+				const registeredBranch = gitWorktreeBranchForPath(listed.stdout, worktreePath)
+				if (registeredBranch !== branchName) {
+					throw new SchedulerError("worktree_create_failed", `closure worktree ${worktreePath} is registered to unexpected branch ${registeredBranch ?? "(detached)"}; expected ${branchName}`)
+				}
 				if (!existsSync(worktreePath)) {
 					const remove = await git(context.repoCwd, ["worktree", "remove", "--force", worktreePath])
 					if (remove.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to remove stale closure worktree registration ${worktreePath}: ${remove.stderr}`)
@@ -913,8 +919,6 @@ export function createGitWorktreeManager(
 			const shortBranch = branchName.replace(/^refs\/heads\//, "")
 			const branchExists = (await git(context.repoCwd, ["show-ref", "--verify", "--quiet", branchName])).exitCode === 0
 			if (branchExists) {
-				const listed = await git(context.repoCwd, ["worktree", "list", "--porcelain"])
-				if (listed.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to inspect closure worktrees for ${context.closureId}: ${listed.stderr}`)
 				const registeredPath = gitWorktreePathForBranch(listed.stdout, branchName)
 				if (registeredPath !== null && registeredPath !== worktreePath) {
 					const suffix = closureWorktreePath("/", context.chain.name, context.repoCwd, context.closureId)
@@ -945,6 +949,7 @@ export type SchedulerChainWorktreeCleanup = {
 export type ClosureReconciliationMismatch =
 	| { kind: "missing-directory"; path: string; repaired: false }
 	| { kind: "missing-branch"; branchName: string; repaired: false }
+	| { kind: "registration-mismatch"; path: string; expectedBranchName: string; actualBranchName: string | null; repaired: false }
 	| { kind: "orphan-directory"; path: string; repaired: true }
 	| { kind: "orphan-directory"; path: string; repaired: false; error: string }
 	| { kind: "orphan-branch"; branchName: string; repaired: true }
@@ -973,6 +978,7 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 	const registeredPaths = new Set(closures.flatMap((closure) => closure.lifecycle === "consumed" || closure.worktreePath === null ? [] : [closure.worktreePath]))
 	const branchesByRepo = new Map<string, Set<string>>()
 	const repositoryWorktrees = new Map<string, string>()
+	const repositoryWorktreeBranches = new Map<string, string | null>()
 	const worktreeScanFailed = new Set<string>()
 	for (const closure of closures) {
 		const item = items.get(closure.itemRowId)
@@ -1005,8 +1011,23 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 			if (worktrees.exitCode !== 0) {
 				worktreeScanFailed.add(repoCwd)
 				findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "worktrees", repaired: false, error: gitFailure("worktree list", worktrees) } })
-			} else for (const path of gitWorktreePaths(worktrees.stdout)) repositoryWorktrees.set(path, repoCwd)
+			} else for (const registration of gitWorktreeRegistrations(worktrees.stdout)) {
+				repositoryWorktrees.set(registration.path, repoCwd)
+				repositoryWorktreeBranches.set(registration.path, registration.branchName)
+			}
 		})
+	}
+	for (const closure of closures) {
+		const item = items.get(closure.itemRowId)
+		if (item === undefined || closure.lifecycle === "consumed" || closure.worktreePath === null || closure.branchName === null || worktreeScanFailed.has(item.repoCwd)) continue
+		const actualBranchName = repositoryWorktreeBranches.get(resolve(closure.worktreePath)) ?? null
+		if (actualBranchName !== closure.branchName) {
+			findings.push({
+				closureId: closure.closureId,
+				repoCwd: item.repoCwd,
+				mismatch: { kind: "registration-mismatch", path: closure.worktreePath, expectedBranchName: closure.branchName, actualBranchName, repaired: false },
+			})
+		}
 	}
 	const worktreeRoot = resolve(resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions).chainRoot, "worktrees")
 	const attemptedRegisteredOrphans = new Set<string>()
@@ -1041,8 +1062,14 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 	return findings
 }
 
-function gitWorktreePaths(output: string): string[] {
-	return output.split("\n").flatMap((line) => line.startsWith("worktree ") ? [resolve(line.slice("worktree ".length))] : [])
+function gitWorktreeRegistrations(output: string): { path: string; branchName: string | null }[] {
+	return output.split("\n\n").flatMap((record) => {
+		const lines = record.split("\n")
+		const worktree = lines.find((line) => line.startsWith("worktree "))
+		if (worktree === undefined) return []
+		const branch = lines.find((line) => line.startsWith("branch "))
+		return [{ path: resolve(worktree.slice("worktree ".length)), branchName: branch?.slice("branch ".length) ?? null }]
+	})
 }
 
 function gitWorktreePathForBranch(output: string, branchName: string): string | null {
@@ -3194,12 +3221,6 @@ async function requireGitCommit(cwd: string, ref: string, code: "closure_head_un
 	const result = await git(cwd, ["rev-parse", "--verify", ref])
 	if (result.exitCode !== 0 || result.stdout === "") throw new SchedulerError(code, `git could not resolve ${ref}: ${result.stderr}`)
 	return result.stdout
-}
-
-async function gitWorktreeListIncludesPath(repoCwd: string, expectedPath: string): Promise<boolean> {
-	const result = await git(repoCwd, ["worktree", "list", "--porcelain"])
-	if (result.exitCode !== 0) return false
-	return gitWorktreeListOutputIncludesPath(result.stdout, expectedPath)
 }
 
 function gitWorktreeListOutputIncludesPath(stdout: string, expectedPath: string): boolean {

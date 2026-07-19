@@ -50,6 +50,28 @@ describe("observability", () => {
 		expect(renderObservabilityEvent(event)).toContain("evidence=unpublished-discarded freshness=retained")
 	})
 
+	test("closure reconciliation preserves worktree registration mismatch identity", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.reconciled",
+			chain: "registration-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: "closure:registration:iteration",
+				repoCwd: "/repo/registration",
+				mismatch: {
+					kind: "registration-mismatch",
+					path: "/worktrees/registration",
+					expectedBranchName: "refs/heads/coder-loop/closures/registration/expected",
+					actualBranchName: "refs/heads/foreign",
+					repaired: false,
+				},
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("mismatch=registration-mismatch repaired=false")
+	})
+
 	test("task event identity is an exact all-or-none triple", () => {
 		const event = makeObservabilityEvent({ kind: "lifecycle", type: "daemon.stop", subject: { kind: "engine" }, payload: { pid: 10 } })
 		expect(parseObservabilityEvent({ ...event, runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event" }, definitionNodeId: "definition-leaf" }).runtimeNodeId).toBe("runtime-leaf")

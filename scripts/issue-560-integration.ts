@@ -2,7 +2,7 @@
 
 import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { resolve } from "node:path"
 
@@ -152,6 +152,10 @@ if(f.chain.includes("lifecycle")&&f.phase==="iteration"&&attempt>1){
   writeFileSync(resolve(process.cwd(),".issue560-lifecycle-entered"),String(attempt)+"\\n")
   while(!existsSync(resolve(process.cwd(),".issue560-lifecycle-release"))) await Bun.sleep(25)
 }
+if(f.chain.includes("registration")&&f.phase==="iteration"){
+  writeFileSync(resolve(process.cwd(),".issue560-registration-entered"),"ready\\n")
+  while(!existsSync(resolve(process.cwd(),".issue560-registration-release"))) await Bun.sleep(25)
+}
 if(f.chain.includes("lifecycle")&&f.phase==="review"&&attempt===1){
   const u=spawnSync("coder-loop",["item","update",f.chain,"--issue",f.item,"--status","changes_requested","--json"],{stdio:"inherit"})
   process.exit(u.status??1)
@@ -247,6 +251,14 @@ function observations(path: string): RunnerObservation[] {
 function closureRows(root: string, chain: string): ClosureRow[] {
 	const db = new Database(resolve(root, "db.sqlite"), { readonly: true })
 	try { return db.query<ClosureRow, { $chain: string }>("SELECT tc.closure_id,tc.phase,tc.lifecycle,tc.worktree_path,tc.branch_name,tc.base_commit,tc.source_par_node_id FROM task_closures tc JOIN items i ON i.id=tc.item_row_id JOIN chains c ON c.id=i.chain_id WHERE c.name=$chain ORDER BY tc.phase").all({ $chain: chain }) } finally { db.close() }
+}
+
+function chainStatus(root: string, chain: string): string | null {
+	const db = new Database(resolve(root, "db.sqlite"), { readonly: true })
+	try {
+		const row = db.query<{ status: string }, { $chain: string }>("SELECT status FROM chains WHERE name=$chain").get({ $chain: chain })
+		return row?.status ?? null
+	} finally { db.close() }
 }
 
 function closureSnapshot(root: string, closureId: string, worktree: string): string {
@@ -409,15 +421,30 @@ async function main(): Promise<void> {
 		event("C04.pass", { closureId: lifecycleIteration.closure_id, worktree: lifecycleIteration.worktree_path, sessionId: first.sessionId, reopenedAttempt: second.attempt })
 
 		// C07: restart reconciliation reports all contradiction kinds and repairs only orphans.
+		const registration = `issue560-registration-${id}`
+		createChain(daemon, registration, repos.target)
+		const registrationObservation = await until(() => observations(shims.runnerLog).find((row) => row.chain === registration && row.phase === "iteration") ?? null, (row) => row !== null && existsSync(resolve(row.cwd, ".issue560-registration-entered")), "registration mismatch fixture readiness")
+		assert(registrationObservation !== null, "C07 registration fixture observation missing")
+		command(["bun", LOOP_ENTRY, "chain", "stop", registration, "--loop-data-root", daemon.root, "--json"], { env })
+		const registrationRow = closureRows(daemon.root, registration).find((row) => row.phase === "iteration")
+		assert(registrationRow?.worktree_path !== null && registrationRow?.worktree_path !== undefined && registrationRow.branch_name !== null, "C07 registration fixture resources missing")
+		writeFileSync(resolve(registrationRow.worktree_path, ".issue560-registration-wip"), "registration mismatch survives\n")
+		const foreignRegistrationBranch = `issue560-foreign-registration-${id}`
+		command([REAL_GIT, "switch", "-q", "-c", foreignRegistrationBranch], { cwd: registrationRow.worktree_path })
 		await stopDaemon(daemon)
 		const missingDir = lifecycleReview.worktree_path, missingBranch = lifecycleReview.branch_name; assert(missingBranch !== null, "C07 review branch missing"); rmSync(missingDir, { recursive: true, force: true }); command([REAL_GIT, "update-ref", "-d", missingBranch], { cwd: repos.target })
 		const orphanDir = resolve(daemon.root, "chains", lifecycle, "worktrees", "orphan"); mkdirSync(orphanDir, { recursive: true }); const orphanBranch = `${closureBranchPrefix(lifecycle)}orphan`; command([REAL_GIT, "branch", orphanBranch.replace("refs/heads/", ""), "main"], { cwd: repos.target }); command([REAL_GIT, "config", "core.hooksPath", ".issue560-hooks"], { cwd: repos.target }); command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
 		daemon = startDaemon(runtime, env); await ready(daemon)
 		const reconcileKinds = ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift", "repo-config-drift"]
 		const reconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", lifecycle, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => reconcileKinds.every((kind) => text.includes(kind)), "reconciliation events")
+		const registrationReconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", registration, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => text.includes("registration-mismatch") && text.includes(registrationRow.closure_id), "registration mismatch reconciliation event")
+		assert(command([REAL_GIT, "symbolic-ref", "HEAD"], { cwd: registrationRow.worktree_path }).stdout.trim() === `refs/heads/${foreignRegistrationBranch}`, "C07 reconciliation changed the mismatched worktree branch")
+		assert(readFileSync(resolve(registrationRow.worktree_path, ".issue560-registration-wip"), "utf8") === "registration mismatch survives\n", "C07 reconciliation changed mismatched worktree WIP")
+		command([REAL_GIT, "switch", "-q", registrationRow.branch_name.replace(/^refs\/heads\//, "")], { cwd: registrationRow.worktree_path })
+		command([REAL_GIT, "branch", "-D", foreignRegistrationBranch], { cwd: repos.target })
 		assert(!existsSync(orphanDir) && command([REAL_GIT, "show-ref", "--verify", orphanBranch], { cwd: repos.target, allowFail: true }).exitCode !== 0, "C07 orphan repair failed"); command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target }); command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
 		assert(lifecycleRows.every((row) => closureRows(daemon.root, lifecycle).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
-		event("C07.pass", { eventKinds: reconcileKinds, bytes: reconcile.length })
+		event("C07.pass", { eventKinds: [...reconcileKinds, "registration-mismatch"], bytes: reconcile.length + registrationReconcile.length, registrationClosureId: registrationRow.closure_id })
 
 		// C05: future-writer states not yet produced by the runtime are seeded into a
 		// separate persisted store, then consumed through the production store/scheduler/Git path.
@@ -502,6 +529,25 @@ async function main(): Promise<void> {
 		}
 		assert(!readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").includes("gc"), "C10 explicit gc observed")
 		event("C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, driftKinds: driftFindings.map((finding) => finding.mismatch.kind), resourceStates: resourceStatesAfter })
+
+		// C05/C07 cleanup recovery: an unavailable repository makes deletion incomplete.
+		// The daemon retains the stopped chain's runtime and resource identity, then
+		// completes deletion after the exact repository path is restored.
+		const unavailableTarget = `${repos.target}-unavailable`
+		const registrationChainRoot = resolve(daemon.root, "chains", registration)
+		renameSync(repos.target, unavailableTarget)
+		try {
+			const incompleteDelete = command(["bun", LOOP_ENTRY, "chain", "delete", registration, "--loop-data-root", daemon.root, "--json"], { env, allowFail: true })
+			assert(incompleteDelete.exitCode !== 0 && `${incompleteDelete.stdout}\n${incompleteDelete.stderr}`.includes("runtime_cleanup_incomplete"), "C05/C07 unavailable-repository delete did not return runtime_cleanup_incomplete")
+			assert(chainStatus(daemon.root, registration) === "stopped", "C05/C07 incomplete delete changed chain status")
+			assert(existsSync(registrationChainRoot) && existsSync(registrationRow.worktree_path), "C05/C07 incomplete delete destroyed recovery state")
+		} finally {
+			if (existsSync(unavailableTarget) && !existsSync(repos.target)) renameSync(unavailableTarget, repos.target)
+		}
+		deleteChain(daemon, registration)
+		assert(chainStatus(daemon.root, registration) === "deleted" && !existsSync(registrationChainRoot), "C05/C07 delete retry did not remove the restored runtime")
+		assert(command([REAL_GIT, "show-ref", "--verify", "--quiet", registrationRow.branch_name], { cwd: repos.target, allowFail: true }).exitCode === 1, "C05/C07 delete retry retained the closure branch")
+		event("C05.C07.delete-retry.pass", { chain: registration, firstError: "runtime_cleanup_incomplete", retryStatus: "deleted", chainRootRemoved: true })
 
 		for (const chain of chains) deleteChain(daemon, chain)
 		await stopDaemon(daemon)

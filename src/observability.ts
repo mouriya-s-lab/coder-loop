@@ -245,6 +245,7 @@ const OriginFreshnessBoundary = arkType.or(
 const ClosureReconciliationMismatchBoundary = arkType.or(
 	{ kind: arkType.unit("missing-directory"), path: "string>0", repaired: arkType.unit(false) },
 	{ kind: arkType.unit("missing-branch"), branchName: "string>0", repaired: arkType.unit(false) },
+	{ kind: arkType.unit("registration-mismatch"), path: "string>0", expectedBranchName: "string>0", actualBranchName: "string|null", repaired: arkType.unit(false) },
 	{ kind: arkType.unit("orphan-directory"), path: "string>0", repaired: arkType.unit(true) },
 	{ kind: arkType.unit("orphan-directory"), path: "string>0", repaired: arkType.unit(false), error: "string>0" },
 	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(true) },

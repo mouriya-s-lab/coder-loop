@@ -1,3 +1,5 @@
+import { rename } from "node:fs/promises"
+
 import { REPO_ROOT, closureWorktreePath, describe, expect, expectChainDeleted, expectChainNotActive, expectConflict, expectInvalid, expectInvalidDetails, expectOk, expectTooLarge, gitOutput, initGitTarget, nestedMetadata, numberValue, openSqliteStateStore, pathExists, queryObservabilityEvents, readChain, readChainStatus, readFile, readItem, record, request, resolveChainRuntimePaths, resolveLoopDataPaths, runtimeStatus, startCoderLoopDaemon, startFixture, storedChainMetadata, storedItemExtra, test, waitFor } from "./harness"
 import type { SchedulerEvent } from "./harness"
 
@@ -646,6 +648,57 @@ describe("daemon", () => {
 				await restarted.stop()
 			}
 		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.delete retains recovery state until incomplete closure cleanup can be retried", async () => {
+		const fixture = await startFixture("chain-delete-incomplete-cleanup", { realWorktreeManager: true })
+		const target = fixture.loopDataRoot + "-target"
+		const unavailableTarget = target + "-unavailable"
+		await initGitTarget(target)
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "delete-incomplete-cleanup",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", { chainId, itemId: "560-delete-retry", repoCwd: target, extra: { sleepMs: 5_000 } })
+			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+			expectOk(await request(fixture, "chain.stop", { chainId }))
+			const paths = resolveChainRuntimePaths("delete-incomplete-cleanup", { loopDataRoot: fixture.loopDataRoot })
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			let worktreePath: string
+			let branchName: string
+			try {
+				const root = store.getTaskTree(chainId)?.root
+				if (root?.kind !== "seq") throw new Error("expected seq task tree")
+				const closure = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+				if (closure?.kind !== "leaf" || closure.closure.worktreePath === null || closure.closure.branchName === null) throw new Error("expected persisted iteration resources")
+				worktreePath = closure.closure.worktreePath
+				branchName = closure.closure.branchName
+			} finally { store.close() }
+			await rename(target, unavailableTarget)
+
+			const failed = await request(fixture, "chain.delete", { chainId })
+
+			expect(failed.ok).toBe(false)
+			if (!failed.ok) {
+				expect(failed.error.code).toBe("runtime_cleanup_incomplete")
+				expect(record(failed.error.details)).toMatchObject({ chainRoot: paths.chainRoot, chainRootRemoved: false })
+			}
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("stopped")
+			expect(await pathExists(paths.chainRoot)).toBe(true)
+			expect(await pathExists(worktreePath)).toBe(true)
+
+			await rename(unavailableTarget, target)
+			const retried = expectOk(await request(fixture, "chain.delete", { chainId }))
+			expect(retried).toMatchObject({ alreadyDeleted: false, chain: { status: "deleted" }, cleanup: { chainRootRemoved: true } })
+			expect(await pathExists(paths.chainRoot)).toBe(false)
+			expect(Bun.spawnSync({ cmd: ["git", "show-ref", "--verify", "--quiet", branchName], cwd: target, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(1)
+		} finally {
+			if (await pathExists(unavailableTarget)) await rename(unavailableTarget, target)
 			await fixture.daemon.stop()
 		}
 	})

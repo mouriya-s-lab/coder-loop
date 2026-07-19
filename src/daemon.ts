@@ -801,6 +801,10 @@ export class DaemonError extends Error {
 	}
 }
 
+type ChainRuntimeCleanupResult =
+	| { kind: "complete"; details: JsonObject }
+	| { kind: "incomplete"; details: JsonObject }
+
 function schedulerEventRunId(event: SchedulerEvent): string | null {
 	if (event.type === "slot.busy") return event.activeRunId
 	if ("runId" in event) return event.runId ?? null
@@ -2511,6 +2515,9 @@ export class CoderLoopDaemon {
 		try {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
+			if (cleanup.kind === "incomplete") {
+				throw new DaemonError("runtime_cleanup_incomplete", `chain ${chain.name} runtime cleanup is incomplete and can be retried`, cleanup.details)
+			}
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
 			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
 			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
@@ -2519,7 +2526,7 @@ export class CoderLoopDaemon {
 				chain: chainToJson(updated),
 				alreadyDeleted: false,
 				terminatedRuns: terminatedRuns.map(completedRunToJson),
-				cleanup,
+				cleanup: cleanup.details,
 				invalidatedContextAppendSessions,
 				deletedContextEntries,
 			}
@@ -2827,7 +2834,7 @@ export class CoderLoopDaemon {
 		return settled.filter((run): run is SchedulerCompletedRun => run !== null)
 	}
 
-	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {
+	private async cleanupChainRuntime(chain: ChainRecord): Promise<ChainRuntimeCleanupResult> {
 		const store = this.requireStore()
 		const items = new Map(store.listItems(chain.id).map((item) => [item.id, item]))
 		const tree = store.getTaskTree(chain.id)
@@ -2836,11 +2843,13 @@ export class CoderLoopDaemon {
 			return item === undefined ? [] : [{ repoCwd: item.repoCwd, closure }]
 		})
 		const worktrees: SchedulerChainWorktreeCleanup[] = []
+		const incompleteClosures: JsonObject[] = []
 		for (const { repoCwd, closure } of closures) {
 			if (closure.lifecycle === "consumed") {
 				const cleanup = await cleanupSchedulerChainWorktrees([{ chainName: chain.name, repoCwd, closure, loopDataRootOptions: { loopDataRoot: this.paths.root } }])
 				worktrees.push(...cleanup)
 				if (cleanup.every((result) => result.error === null)) store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: unixSeconds() })
+				else incompleteClosures.push({ closureId: closure.closureId, reason: "worktree-cleanup-failed" })
 				continue
 			}
 			const consumed = await consumeSchedulerClosure({
@@ -2856,21 +2865,23 @@ export class CoderLoopDaemon {
 				emit: async (event) => await this.recordObservabilityEventIfChainNameIsValid(chain, schedulerEventToObservabilityEvent(chain, event)),
 			})
 			if (consumed.cleanup !== null) worktrees.push(consumed.cleanup)
+			if (!consumed.complete) incompleteClosures.push({ closureId: closure.closureId, reason: "closure-consumption-incomplete" })
 		}
 		try {
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
+			const worktreeDetails = schedulerWorktreeCleanupsToJson(worktrees)
+			if (incompleteClosures.length > 0) {
+				return { kind: "incomplete", details: { chainRoot: paths.chainRoot, chainRootRemoved: false, worktrees: worktreeDetails, incompleteClosures } }
+			}
 			await rm(paths.chainRoot, { recursive: true, force: true })
-			return { chainRoot: paths.chainRoot, chainRootRemoved: true, worktrees: schedulerWorktreeCleanupsToJson(worktrees) }
+			return { kind: "complete", details: { chainRoot: paths.chainRoot, chainRootRemoved: true, worktrees: worktreeDetails } }
 		} catch (error) {
 			if (isInvalidChainNameError(error)) {
-				return {
-					chainRoot: null,
-					chainRootRemoved: false,
-					worktrees: schedulerWorktreeCleanupsToJson(worktrees),
-					error: errorMessage(error),
-				}
+				return { kind: "incomplete", details: { chainRoot: null, chainRootRemoved: false, worktrees: schedulerWorktreeCleanupsToJson(worktrees), error: errorMessage(error) } }
 			}
-			throw error
+			let chainRoot: string | null = null
+			try { chainRoot = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root }).chainRoot } catch { /* reported by the original error */ }
+			return { kind: "incomplete", details: { chainRoot, chainRootRemoved: false, worktrees: schedulerWorktreeCleanupsToJson(worktrees), error: errorMessage(error) } }
 		}
 	}
 
