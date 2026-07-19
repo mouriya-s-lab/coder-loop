@@ -72,6 +72,7 @@ import {
 	closureWorktreePath,
 	createRepositoryGitCoordinator,
 	persistedParPin,
+	type ClosureResourceOwnership,
 	type OriginFreshness,
 	type RepositoryGitCoordinator,
 	type RepositoryGitSingleflightResult,
@@ -976,12 +977,11 @@ export type ClosureReconciliationFinding = {
 	mismatch: ClosureReconciliationMismatch
 }
 
-type RetiredResourceGroup = {
-	repoCwd: string
-	worktreePath: string
-	branchName: string
-	closures: ClosureSnapshot[]
-}
+type RetiredResourceGroup =
+	| { kind: "retired-slot"; repoCwd: string; worktreePath: string; branchName: string; closures: RetiredResourceClosure[] }
+	| { kind: "migrated-legacy"; repoCwd: string; worktreePath: string; closures: RetiredResourceClosure[] }
+
+type RetiredResourceClosure = { snapshot: ClosureSnapshot; branchName: string }
 
 export async function reconcileClosureResources(input: ReconcileClosureResourcesInput): Promise<ClosureReconciliationFinding[]> {
 	const findings: ClosureReconciliationFinding[] = []
@@ -994,23 +994,32 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 		const item = items.get(closure.itemRowId)
 		if (item === undefined || closure.lifecycle !== "consumed" || closure.worktreePath === null || closure.branchName === null) continue
 		const ownership = classifyClosureResourceOwnership({ loopDataRoot, chainName: input.chain.name, repoCwd: item.repoCwd, closureId: closure.closureId, worktreePath: closure.worktreePath, branchName: closure.branchName })
-		if (ownership.kind !== "retired-slot") continue
-		const key = `${item.repoCwd}\0${closure.worktreePath}\0${closure.branchName}`
-		const group = retiredGroups.get(key) ?? { repoCwd: item.repoCwd, worktreePath: closure.worktreePath, branchName: closure.branchName, closures: [] }
-		group.closures.push(closure)
-		retiredGroups.set(key, group)
+		if (ownership.kind !== "retired-slot" && ownership.kind !== "migrated-legacy") continue
+		const key = ownership.kind === "retired-slot"
+			? `retired-slot\0${item.repoCwd}\0${closure.worktreePath}\0${closure.branchName}`
+			: `migrated-legacy\0${item.repoCwd}\0${closure.worktreePath}`
+		const existing = retiredGroups.get(key)
+		if (existing !== undefined) {
+			existing.closures.push({ snapshot: closure, branchName: closure.branchName })
+			continue
+		}
+		retiredGroups.set(key, ownership.kind === "retired-slot"
+			? { kind: "retired-slot", repoCwd: item.repoCwd, worktreePath: closure.worktreePath, branchName: closure.branchName, closures: [{ snapshot: closure, branchName: closure.branchName }] }
+			: { kind: "migrated-legacy", repoCwd: item.repoCwd, worktreePath: closure.worktreePath, closures: [{ snapshot: closure, branchName: closure.branchName }] })
 	}
 	for (const group of retiredGroups.values()) {
-		const hasLiveReference = closures.some((closure) => closure.lifecycle !== "consumed" && closure.worktreePath === group.worktreePath && closure.branchName === group.branchName)
+		const hasLiveReference = closures.some((closure) => closure.lifecycle !== "consumed"
+			&& closure.worktreePath === group.worktreePath
+			&& (group.kind === "migrated-legacy" || closure.branchName === group.branchName))
 		if (hasLiveReference) {
 			preservedRetiredPaths.add(group.worktreePath)
 			for (const closure of group.closures) {
-				input.store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: Math.floor(Date.now() / 1000) })
-				findings.push({ closureId: closure.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: group.branchName, resourcesRemoved: false, repaired: true } })
+				input.store.setClosureResources(closure.snapshot.closureId, { worktreePath: null, branchName: null, updatedAt: Math.floor(Date.now() / 1000) })
+				findings.push({ closureId: closure.snapshot.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: closure.branchName, resourcesRemoved: false, repaired: true } })
 			}
 			continue
 		}
-		const representative = group.closures[0]
+		const representative = group.closures[0]?.snapshot
 		if (representative === undefined) continue
 		const [cleanup] = await cleanupSchedulerChainWorktrees([{
 			chainName: input.chain.name,
@@ -1021,12 +1030,12 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 		if (cleanup === undefined || cleanup.error !== null) {
 			preservedRetiredPaths.add(group.worktreePath)
 			const error = cleanup?.error ?? "retired resource cleanup produced no result"
-			for (const closure of group.closures) findings.push({ closureId: closure.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: group.branchName, resourcesRemoved: false, repaired: false, error } })
+			for (const closure of group.closures) findings.push({ closureId: closure.snapshot.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: closure.branchName, resourcesRemoved: false, repaired: false, error } })
 			continue
 		}
 		for (const closure of group.closures) {
-			input.store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: Math.floor(Date.now() / 1000) })
-			findings.push({ closureId: closure.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: group.branchName, resourcesRemoved: true, repaired: true } })
+			input.store.setClosureResources(closure.snapshot.closureId, { worktreePath: null, branchName: null, updatedAt: Math.floor(Date.now() / 1000) })
+			findings.push({ closureId: closure.snapshot.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: closure.branchName, resourcesRemoved: group.kind === "retired-slot", repaired: true } })
 		}
 	}
 	const registeredPaths = new Set([...preservedRetiredPaths, ...closures.flatMap((closure) => closure.lifecycle === "consumed" || closure.worktreePath === null ? [] : [closure.worktreePath])])
@@ -1235,7 +1244,8 @@ export async function cleanupSchedulerChainWorktrees(
 		const worktreePath = closure.worktreePath
 		const branchName = closure.branchName
 		const ownership = classifyClosureResourceOwnership({ loopDataRoot: resolveLoopDataPaths(loopDataRootOptions).root, chainName, repoCwd, closureId: closure.closureId, worktreePath, branchName })
-		if (ownership.kind === "foreign") {
+		const cleanupTarget = closureResourceCleanupTarget(ownership)
+		if (cleanupTarget.kind === "reject") {
 			cleaned.push({
 				repoCwd,
 				worktreePath,
@@ -1247,7 +1257,11 @@ export async function cleanupSchedulerChainWorktrees(
 			})
 			continue
 		}
-		const branchRef = ownership.branchRef
+		if (cleanupTarget.kind === "none") {
+			cleaned.push({ repoCwd, worktreePath, registered: false, removed: false, directoryRemoved: false, pruned: false, error: null })
+			continue
+		}
+		const branchRef = cleanupTarget.kind === "worktree-and-branch" ? cleanupTarget.branchRef : null
 		if (!existsSync(repoCwd)) {
 			cleaned.push({
 				repoCwd,
@@ -1275,9 +1289,9 @@ export async function cleanupSchedulerChainWorktrees(
 			}
 
 			const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
-			const registeredBranchPath = gitWorktreePathForBranch(listResult.stdout, branchRef)
+			const registeredBranchPath = branchRef === null ? null : gitWorktreePathForBranch(listResult.stdout, branchRef)
 			const registeredPathBranch = gitWorktreeBranchForPath(listResult.stdout, worktreePath)
-			if (registeredBranchPath !== null && !worktreePathsMatch(registeredBranchPath, worktreePath)) {
+			if (branchRef !== null && registeredBranchPath !== null && !worktreePathsMatch(registeredBranchPath, worktreePath)) {
 				return {
 					repoCwd,
 					worktreePath,
@@ -1288,7 +1302,7 @@ export async function cleanupSchedulerChainWorktrees(
 					error: `closure branch ${branchName} is registered at unexpected worktree ${registeredBranchPath}`,
 				}
 			}
-			if (registered && registeredPathBranch === null) {
+			if (branchRef !== null && registered && registeredPathBranch === null) {
 				return {
 					repoCwd,
 					worktreePath,
@@ -1299,7 +1313,7 @@ export async function cleanupSchedulerChainWorktrees(
 					error: `closure worktree ${worktreePath} is detached instead of registered to expected branch ${branchName}`,
 				}
 			}
-			if (registeredPathBranch !== null && registeredPathBranch !== branchRef) {
+			if (branchRef !== null && registeredPathBranch !== null && registeredPathBranch !== branchRef) {
 				return {
 					repoCwd,
 					worktreePath,
@@ -1332,9 +1346,10 @@ export async function cleanupSchedulerChainWorktrees(
 			if (verifyWorktrees.exitCode !== 0) {
 				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("worktree list verification", verifyWorktrees) }
 			}
-			if (gitWorktreeListOutputIncludesPath(verifyWorktrees.stdout, worktreePath) || gitWorktreePathForBranch(verifyWorktrees.stdout, branchRef) !== null) {
+			if (gitWorktreeListOutputIncludesPath(verifyWorktrees.stdout, worktreePath) || (branchRef !== null && gitWorktreePathForBranch(verifyWorktrees.stdout, branchRef) !== null)) {
 				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: "closure worktree registration remains after cleanup" }
 			}
+			if (branchRef === null) return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: null }
 			const deleteBranchResult = await git(repoCwd, ["update-ref", "-d", branchRef])
 			if (deleteBranchResult.exitCode !== 0) {
 				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("update-ref -d", deleteBranchResult) }
@@ -1352,6 +1367,21 @@ export async function cleanupSchedulerChainWorktrees(
 		cleaned.push(result)
 	}
 	return cleaned
+}
+
+type ClosureResourceCleanupTarget =
+	| { kind: "worktree-and-branch"; branchRef: string }
+	| { kind: "worktree-only" }
+	| { kind: "none" }
+	| { kind: "reject" }
+
+function closureResourceCleanupTarget(ownership: ClosureResourceOwnership): ClosureResourceCleanupTarget {
+	switch (ownership.kind) {
+		case "closure": return { kind: "worktree-and-branch", branchRef: ownership.branchRef }
+		case "retired-slot": return { kind: "worktree-and-branch", branchRef: ownership.branchRef }
+		case "migrated-legacy": return ownership.worktree.kind === "retired-slot" ? { kind: "worktree-only" } : { kind: "none" }
+		case "foreign": return { kind: "reject" }
+	}
 }
 
 export type ConsumeSchedulerClosureInput = {
@@ -1435,10 +1465,10 @@ export async function consumeSchedulerClosure(input: ConsumeSchedulerClosureInpu
 	if (closure.worktreePath !== null && closure.branchName !== null) {
 		const ownership = classifyClosureResourceOwnership({ loopDataRoot: resolveLoopDataPaths(input.loopDataRootOptions).root, chainName: input.chainName, repoCwd: input.repoCwd, closureId: closure.closureId, worktreePath: closure.worktreePath, branchName: closure.branchName })
 		const tree = input.store.getTaskTree(input.chainId)
-		const sharedRetiredResource = ownership.kind === "retired-slot" && tree !== null && collectClosures(tree.root).some((candidate) => candidate.closureId !== closure.closureId
+		const sharedRetiredResource = tree !== null && collectClosures(tree.root).some((candidate) => candidate.closureId !== closure.closureId
 			&& candidate.lifecycle !== "consumed"
 			&& candidate.worktreePath === closure.worktreePath
-			&& candidate.branchName === closure.branchName)
+			&& (ownership.kind === "migrated-legacy" ? ownership.worktree.kind === "retired-slot" : ownership.kind === "retired-slot" && candidate.branchName === closure.branchName))
 		if (!sharedRetiredResource) {
 			const [cleanupResult] = await cleanupSchedulerChainWorktrees([{ chainName: input.chainName, repoCwd: input.repoCwd, closure, ...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }) }])
 			cleanup = cleanupResult ?? null

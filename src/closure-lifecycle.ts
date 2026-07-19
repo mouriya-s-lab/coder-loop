@@ -132,6 +132,7 @@ export function closureResourcesBelongToEngine(
 export type ClosureResourceOwnership =
 	| { kind: "closure"; branchRef: string }
 	| { kind: "retired-slot"; branchRef: string }
+	| { kind: "migrated-legacy"; worktree: { kind: "retired-slot" } | { kind: "foreign" }; branchRef: string }
 	| { kind: "foreign" }
 
 export function classifyClosureResourceOwnership(input: {
@@ -152,9 +153,17 @@ export function classifyClosureResourceOwnership(input: {
 	const sanitizedChain = input.chainName.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "") || "chain"
 	const retiredWorktreePath = resolve(input.loopDataRoot, "chains", input.chainName, "worktrees", `${repoLabel}-${repoHash.slice(0, 16)}`)
 	const retiredBranchName = `coder-loop/${sanitizedChain}-${repoHash.slice(0, 12)}`
-	return resolve(input.worktreePath) === retiredWorktreePath && input.branchName === retiredBranchName
-		? { kind: "retired-slot", branchRef: `refs/heads/${retiredBranchName}` }
-		: { kind: "foreign" }
+	if (resolve(input.worktreePath) === retiredWorktreePath && input.branchName === retiredBranchName) {
+		return { kind: "retired-slot", branchRef: `refs/heads/${retiredBranchName}` }
+	}
+	if (input.closureId.startsWith("legacy-v13:closure:")) {
+		return {
+			kind: "migrated-legacy",
+			worktree: resolve(input.worktreePath) === retiredWorktreePath ? { kind: "retired-slot" } : { kind: "foreign" },
+			branchRef: input.branchName.startsWith("refs/") ? input.branchName : `refs/heads/${input.branchName}`,
+		}
+	}
+	return { kind: "foreign" }
 }
 
 export type PersistedParPinSource = {

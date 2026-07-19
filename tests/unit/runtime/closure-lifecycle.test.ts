@@ -7,6 +7,7 @@ import {
 	closureBranchPrefix,
 	closureResourcesBelongToEngine,
 	closureWorktreePath,
+	classifyClosureResourceOwnership,
 	computeClosureReachability,
 	createRepositoryGitCoordinator,
 	persistedClosureReachabilityModel,
@@ -129,6 +130,25 @@ test("closure resource identity is per closure and stays in the engine namespace
 	expect(closureResourcesBelongToEngine(root, "chain", "/repo", closureId, iteration, branch)).toBe(true)
 	const outsideRoot = closureWorktreePath(resolve(TEST_ROOT, "outside-engine-root"), "chain", "/repo", closureId)
 	expect(closureResourcesBelongToEngine(root, "chain", "/repo", closureId, outsideRoot, branch)).toBe(false)
+})
+
+test("v13 migration provenance distinguishes an ambiguous historical tuple from arbitrary foreign state", () => {
+	expect(classifyClosureResourceOwnership({
+		loopDataRoot: "/loop-data",
+		chainName: "chain",
+		repoCwd: "/repo",
+		closureId: "legacy-v13:closure:12:iteration",
+		worktreePath: "/repo",
+		branchName: "historical-pr-branch",
+	})).toEqual({ kind: "migrated-legacy", worktree: { kind: "foreign" }, branchRef: "refs/heads/historical-pr-branch" })
+	expect(classifyClosureResourceOwnership({
+		loopDataRoot: "/loop-data",
+		chainName: "chain",
+		repoCwd: "/repo",
+		closureId: "closure:12:iteration",
+		worktreePath: "/repo",
+		branchName: "historical-pr-branch",
+	})).toEqual({ kind: "foreign" })
 })
 
 test("par members derive their first-open base only from the persisted containing pin", () => {

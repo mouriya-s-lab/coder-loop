@@ -476,6 +476,114 @@ test("consumed cleanup rejects persisted resources outside the closure-derived e
 	expect(git(repoCwd, ["show-ref", "--verify", "refs/heads/foreign-branch"]).exitCode).toBe(0)
 })
 
+test("consumption retires a migrated repository-path tuple without deleting foreign resources", async () => {
+	const root = resolve(TEST_ROOT, "consume-migrated-repository-tuple")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "consume-migrated-repository-chain")
+		const item = makeItem(store, chain, "migrated-repository", repoCwd)
+		const closure = { closureId: `legacy-v13:closure:${item.id}:iteration`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: repoCwd, branchName: "main", baseCommit: git(repoCwd, ["rev-parse", "main"]).stdout.trim(), sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${item.id}:phase:iteration`, definitionRef: { kind: "chain", contentIdentity: "sha256:consume-migrated-repository" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
+
+		const result = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure, authority: { kind: "chain-deletion", chainId: chain.id }, updatedAt: 1_900_000_300, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+
+		expect(result.complete).toBe(true)
+		expect(result.cleanup).toMatchObject({ registered: false, removed: false, directoryRemoved: false, error: null })
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "consumed", worktreePath: null, branchName: null } })
+		expect(existsSync(repoCwd)).toBe(true)
+		expect(git(repoCwd, ["show-ref", "--verify", "refs/heads/main"]).exitCode).toBe(0)
+	} finally { store.close() }
+})
+
+test("consumption preserves a shared migrated slot path then removes only the path after the final closure", async () => {
+	const root = resolve(TEST_ROOT, "consume-migrated-slot-tuple")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "consume-migrated-slot-chain")
+		const firstItem = makeItem(store, chain, "migrated-slot-first", repoCwd)
+		const secondItem = makeItem(store, chain, "migrated-slot-second", repoCwd)
+		const retired = retiredResourceTuple(loopDataRoot, chain.name, repoCwd)
+		const firstBranch = "historical-candidate"
+		const secondBranch = "historical-review"
+		expect(git(repoCwd, ["worktree", "add", "-b", firstBranch, retired.worktreePath, "main"]).exitCode).toBe(0)
+		expect(git(repoCwd, ["branch", secondBranch, "main"]).exitCode).toBe(0)
+		const baseCommit = git(repoCwd, ["rev-parse", "main"]).stdout.trim()
+		const definitionRef = { kind: "chain", contentIdentity: "sha256:consume-migrated-slot" } as const
+		const first = { closureId: `legacy-v13:closure:${firstItem.id}:iteration`, itemRowId: firstItem.id, itemId: firstItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: retired.worktreePath, branchName: firstBranch, baseCommit, sourceParNodeId: null, sessions: [] } as const
+		const second = { closureId: `legacy-v13:closure:${secondItem.id}:review`, itemRowId: secondItem.id, itemId: secondItem.itemId, phase: "review", lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: secondBranch, baseCommit, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "seq", identity: { runtimeNodeId: "legacy-v13:chain:consume-slot:root", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: `legacy-v13:item:${firstItem.id}:phase:iteration` }, children: [
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${firstItem.id}:phase:iteration`, definitionRef, definitionNodeId: "iteration" }, closure: first },
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${secondItem.id}:phase:review`, definitionRef, definitionNodeId: "review" }, closure: second },
+		] }, activeRuns: [] })
+
+		const firstResult = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure: first, authority: { kind: "chain-deletion", chainId: chain.id }, updatedAt: 1_900_000_301, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+
+		expect(firstResult.complete).toBe(true)
+		expect(firstResult.cleanup).toBeNull()
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ children: [
+			{ closure: { lifecycle: "consumed", worktreePath: null, branchName: null } },
+			{ closure: { lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: secondBranch } },
+		] })
+		expect(existsSync(retired.worktreePath)).toBe(true)
+
+		const secondSnapshot = store.getTaskTree(chain.id)?.root
+		if (secondSnapshot?.kind !== "seq" || secondSnapshot.children[1]?.kind !== "leaf") throw new Error("expected second migrated closure")
+		const secondResult = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure: secondSnapshot.children[1].closure, authority: { kind: "chain-deletion", chainId: chain.id }, updatedAt: 1_900_000_302, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
+
+		expect(secondResult.complete).toBe(true)
+		expect(secondResult.cleanup).toMatchObject({ registered: true, removed: true, error: null })
+		expect(existsSync(retired.worktreePath)).toBe(false)
+		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${firstBranch}`]).exitCode).toBe(0)
+		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${secondBranch}`]).exitCode).toBe(0)
+	} finally { store.close() }
+})
+
+test("startup reconciliation retires migrated tuples while preserving historical branches and repository paths", async () => {
+	const root = resolve(TEST_ROOT, "reconcile-migrated-tuples")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-migrated-tuples-chain")
+		const slotItem = makeItem(store, chain, "migrated-slot", repoCwd)
+		const repoItem = makeItem(store, chain, "migrated-repository", repoCwd)
+		const retired = retiredResourceTuple(loopDataRoot, chain.name, repoCwd)
+		const historicalBranch = "historical-reconcile-candidate"
+		expect(git(repoCwd, ["worktree", "add", "-b", historicalBranch, retired.worktreePath, "main"]).exitCode).toBe(0)
+		const baseCommit = git(repoCwd, ["rev-parse", "main"]).stdout.trim()
+		const definitionRef = { kind: "chain", contentIdentity: "sha256:reconcile-migrated-tuples" } as const
+		const slotClosure = { closureId: `legacy-v13:closure:${slotItem.id}:iteration`, itemRowId: slotItem.id, itemId: slotItem.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: retired.worktreePath, branchName: historicalBranch, baseCommit, sourceParNodeId: null, sessions: [] } as const
+		const repoClosure = { closureId: `legacy-v13:closure:${repoItem.id}:iteration`, itemRowId: repoItem.id, itemId: repoItem.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: repoCwd, branchName: "main", baseCommit, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "seq", identity: { runtimeNodeId: "legacy-v13:chain:reconcile:root", definitionRef, definitionNodeId: "root" }, cursor: { kind: "complete" }, children: [
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${slotItem.id}:phase:iteration`, definitionRef, definitionNodeId: "slot" }, closure: slotClosure },
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${repoItem.id}:phase:iteration`, definitionRef, definitionNodeId: "repo" }, closure: repoClosure },
+		] }, activeRuns: [] })
+
+		const findings = await reconcileClosureResources({ chain, items: [slotItem, repoItem], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
+
+		expect(findings).toContainEqual({ closureId: slotClosure.closureId, repoCwd, mismatch: { kind: "retired-resource", path: retired.worktreePath, branchName: historicalBranch, resourcesRemoved: false, repaired: true } })
+		expect(findings).toContainEqual({ closureId: repoClosure.closureId, repoCwd, mismatch: { kind: "retired-resource", path: repoCwd, branchName: "main", resourcesRemoved: false, repaired: true } })
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ children: [
+			{ closure: { lifecycle: "consumed", worktreePath: null, branchName: null } },
+			{ closure: { lifecycle: "consumed", worktreePath: null, branchName: null } },
+		] })
+		expect(existsSync(retired.worktreePath)).toBe(false)
+		expect(existsSync(repoCwd)).toBe(true)
+		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${historicalBranch}`]).exitCode).toBe(0)
+		expect(git(repoCwd, ["show-ref", "--verify", "refs/heads/main"]).exitCode).toBe(0)
+	} finally { store.close() }
+})
+
 test("consumption retires shared base-era tuples without deleting a live sibling resource", async () => {
 	const root = resolve(TEST_ROOT, "consume-retired-shared-resource")
 	const repoCwd = resolve(root, "repo")
