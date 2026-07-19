@@ -32,6 +32,12 @@ coder-loop v2 仍只负责加载 preset、spawn phase、接收声明过的 exit 
 | `quality/honesty.md`：claim 与 observation 对照，禁止弱化失败 | `quality/honesty.md`，增加 passed/failed/inconclusive 对照 | 实验失败也是有效结果，最大风险是换口径把 failed 包装成 passed | review 对照 acceptance matrix逐项核验；失败结论可接受，伪装失败不可接受 |
 | `quality/cleanup.md`：所有副作用进入 cleanup ledger | `quality/cleanup.md`，内容由实验仓 `run-state.md.cleanup obligations`、`down.sh` 和 restore child 决定 | gh 的本地进程清理不足以覆盖共享 VM、dataset、容器和 IaC baseline | restore 未核清时 review 不得 merge/close；无法还原时停 chain并留下 operator recovery |
 
+#### 2.1.1 packet currentness 规则
+
+packet 是纯业务合同。它绑定假设、环境身份、命令序、验收矩阵、evidence/cleanup 义务和设计落点，**不得**复制 volatile live 状态——run head、next mode/phase、child/PR 的 live 状态各自的唯一权威是 git、引擎和 live GitHub；packet 里的 commit 引用只是 provenance，不构成 currentness 断言。
+
+失效判定只有两条：更新的 valid packet 显式 supersede，或 live 事实与上述业务字段之一矛盾。设计书 §2.2 要求每个 phase commit evidence 并更新 PR handoff，因此 run 自身的预期推进（run branch 前进、ordered path 上的 phase handoff、引擎 phase 推进、linked children 的声明内生命周期变化）**永不**使 packet 失效；producer、stage gate 和 review 都不得把这类推进当 staleness 证据，producer 也不为追踪进度编辑或重发 packet。这保证"阶段必须提交"与"stale 必须拒绝"不构成循环：正常推进不产生 false retry，真正的业务矛盾仍回 contract enrichment。
+
 ### 2.2 iteration 的拆分
 
 gh preset 的 `iteration` 是“完成一个候选交付物”的统一工位；实验仓已经把一次实验强制拆成六个 mode，因此 iteration 的职责按已有 mode 拆到六个普通 phase，而不是在一个 agent session 里跑完整实验。
