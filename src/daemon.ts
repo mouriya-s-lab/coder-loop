@@ -2518,11 +2518,14 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
-			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
-			const cleanup = await this.cleanupChainRuntime(updated)
+			const cleanupOwner = chain.status === "active"
+				? this.requireStore().updateChain(chain.id, { status: "stopped" })
+				: chain
+			const cleanup = await this.cleanupChainRuntime(cleanupOwner)
 			if (cleanup.kind === "incomplete") {
 				throw new DaemonError("runtime_cleanup_incomplete", `chain ${chain.name} runtime cleanup is incomplete and can be retried`, cleanup.details)
 			}
+			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
 			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
 			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })

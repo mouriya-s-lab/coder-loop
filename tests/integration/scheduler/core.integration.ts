@@ -414,6 +414,8 @@ describe("scheduler", () => {
 				attribution: { kind: "phase", phase: "iteration" },
 				message: "chain runner parse failed",
 			})
+			expect(fixture.worktreeCalls).toHaveLength(1)
+			expect(fixture.worktreeCalls[0]).toContain("chain-healthy")
 		} finally {
 			await stopFixture(fixture)
 		}
@@ -637,6 +639,29 @@ describe("scheduler", () => {
 			evidence: "unevaluable",
 			freshness: { kind: "retained", commit: baseCommit },
 		})
+	})
+
+	test("closure publication sampling prunes a remotely deleted branch before containment", async () => {
+		const repoCwd = resolve(TEST_ROOT, "consume-observation-stale-tracking")
+		const origin = resolve(TEST_ROOT, "consume-observation-stale-tracking.git")
+		await initGitTarget(repoCwd)
+		await mkdir(origin, { recursive: true })
+		gitOutput(origin, ["init", "--bare"])
+		gitOutput(repoCwd, ["remote", "add", "origin", origin])
+		gitOutput(repoCwd, ["push", "-u", "origin", "main"])
+		const baseCommit = gitOutput(repoCwd, ["rev-parse", "HEAD"])
+		const shortBranch = "coder-loop/closures/evidence/stale-tracking"
+		const branchName = `refs/heads/${shortBranch}`
+		gitOutput(repoCwd, ["switch", "-c", shortBranch])
+		await writeFile(resolve(repoCwd, "published-work.txt"), "published then deleted\n")
+		gitOutput(repoCwd, ["add", "published-work.txt"])
+		gitOutput(repoCwd, ["-c", "user.name=test", "-c", "user.email=test@invalid", "commit", "-m", "published work"])
+		gitOutput(repoCwd, ["push", "-u", "origin", shortBranch])
+
+		expect(await sampleClosureConsumptionObservation({ repoCwd, baseBranch: "main", branchName, baseCommit })).toMatchObject({ evidence: "published" })
+		gitOutput(origin, ["update-ref", "-d", branchName])
+		expect(gitOutput(repoCwd, ["show-ref", "--verify", `refs/remotes/origin/${shortBranch}`])).not.toBe("")
+		expect(await sampleClosureConsumptionObservation({ repoCwd, baseBranch: "main", branchName, baseCommit })).toMatchObject({ evidence: "unpublished-discarded" })
 	})
 
 	test("chain-complete trigger runs before chain completion", async () => {

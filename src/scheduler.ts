@@ -1341,9 +1341,18 @@ export async function sampleClosureConsumptionObservation(input: {
 		}
 		if (branch.stdout === input.baseCommit) return { evidence: "no-work", freshness }
 		if (freshness.kind === "fetched") {
+			const refreshed = await git(input.repoCwd, ["fetch", "--no-tags", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+			if (refreshed.exitCode !== 0) return { evidence: "unevaluable", freshness }
+			const publicationFreshness: OriginFreshness = {
+				kind: "fetched",
+				remote: freshness.remote,
+				commit: freshness.commit,
+				observedAt: new Date().toISOString(),
+			}
 			const remoteContains = await git(input.repoCwd, ["for-each-ref", "--contains", branch.stdout, "--format=%(refname)", "refs/remotes/origin/"])
-			if (remoteContains.exitCode !== 0) return { evidence: "unevaluable", freshness }
-			if (remoteContains.stdout.split("\n").some((ref) => ref.startsWith("refs/remotes/origin/"))) return { evidence: "published", freshness }
+			if (remoteContains.exitCode !== 0) return { evidence: "unevaluable", freshness: publicationFreshness }
+			if (remoteContains.stdout.split("\n").some((ref) => ref.startsWith("refs/remotes/origin/"))) return { evidence: "published", freshness: publicationFreshness }
+			return { evidence: "unpublished-discarded", freshness: publicationFreshness }
 		}
 		return { evidence: "unpublished-discarded", freshness }
 	})
@@ -1423,6 +1432,14 @@ async function spawnSchedulerRun(
 	try {
 		const existingClosure = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, phase)
 		closureId = existingClosure?.closureId ?? closureId
+		const runner = await resolvePhaseRunner(options, { chain, item, phase })
+		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
+		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
+		const persistedSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
+		const resumeDecision: ResumeDecision = persistedSessionId === null ? freshResume() : { kind: "resume", sessionId: persistedSessionId }
+		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
+		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
+		startedAt = nowSeconds(options)
 		const managed = await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, existing: existingClosure })
 		const resources = typeof managed === "string"
 			? {
@@ -1434,16 +1451,6 @@ async function spawnSchedulerRun(
 			: managed
 		worktreePath = resources.worktreePath
 		const branchName = resources.branchName
-		await emit(options, { type: "closure.resource_prepared", chainId: chain.id, itemId: item.id, phase, closureId, worktreePath, branchName, baseCommit: resources.baseCommit, freshness: resources.freshness })
-
-		const runner = await resolvePhaseRunner(options, { chain, item, phase })
-		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
-		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
-		const persistedSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
-		const resumeDecision: ResumeDecision = persistedSessionId === null ? freshResume() : { kind: "resume", sessionId: persistedSessionId }
-		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
-		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
-		startedAt = nowSeconds(options)
 		options.store.recordRun({
 			runId,
 			chainId: chain.id,
@@ -1474,6 +1481,7 @@ async function spawnSchedulerRun(
 			branchName: resources.branchName,
 			updatedAt: startedAt,
 		})
+		await emit(options, { type: "closure.resource_prepared", chainId: chain.id, itemId: item.id, phase, closureId, worktreePath, branchName, baseCommit: resources.baseCommit, freshness: resources.freshness })
 		await enterClosurePhase(options, chain, item, phase, closureId, startedAt)
 		options.store.setCurrentRun({
 			chainId: chain.id,

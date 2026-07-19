@@ -1,6 +1,6 @@
 import { rename } from "node:fs/promises"
 
-import { REPO_ROOT, closureWorktreePath, describe, expect, expectChainDeleted, expectChainNotActive, expectConflict, expectInvalid, expectInvalidDetails, expectOk, expectTooLarge, gitOutput, initGitTarget, nestedMetadata, numberValue, openSqliteStateStore, pathExists, queryObservabilityEvents, readChain, readChainStatus, readFile, readItem, record, request, resolveChainRuntimePaths, resolveLoopDataPaths, runtimeStatus, startCoderLoopDaemon, startFixture, storedChainMetadata, storedItemExtra, test, waitFor } from "./harness"
+import { REPO_ROOT, closureWorktreePath, daemonRequest, describe, expect, expectChainDeleted, expectChainNotActive, expectConflict, expectInvalid, expectInvalidDetails, expectOk, expectTooLarge, gitOutput, initGitTarget, nestedMetadata, numberValue, openSqliteStateStore, pathExists, queryObservabilityEvents, readChain, readChainStatus, readFile, readItem, record, request, resolveChainRuntimePaths, resolveLoopDataPaths, runtimeStatus, sendDaemonRequest, startCoderLoopDaemon, startFixture, storedChainMetadata, storedItemExtra, test, waitFor } from "./harness"
 import type { SchedulerEvent } from "./harness"
 
 describe("daemon", () => {
@@ -692,7 +692,7 @@ describe("daemon", () => {
 				expect(failed.error.code).toBe("runtime_cleanup_incomplete")
 				expect(record(failed.error.details)).toMatchObject({ chainRoot: paths.chainRoot, chainRootRemoved: false })
 			}
-			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("deleted")
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("stopped")
 			expect(await pathExists(paths.chainRoot)).toBe(true)
 			expect(await pathExists(worktreePath)).toBe(true)
 			for (let index = 0; index < 3; index += 1) expectOk(await request(fixture, "daemon.status"))
@@ -707,10 +707,24 @@ describe("daemon", () => {
 			} finally { failedStore.close() }
 
 			await rename(unavailableTarget, target)
-			const retried = expectOk(await request(fixture, "chain.delete", { chainId }))
-			expect(retried).toMatchObject({ alreadyDeleted: true, chain: { status: "deleted" }, cleanup: { chainRootRemoved: true } })
-			expect(await pathExists(paths.chainRoot)).toBe(false)
-			expect(Bun.spawnSync({ cmd: ["git", "show-ref", "--verify", "--quiet", branchName], cwd: target, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(1)
+			await fixture.daemon.stop()
+			const restarted = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+			try {
+				const reconciliation = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+					chain: "delete-incomplete-cleanup",
+					type: "closure.reconciled",
+				})
+				expect(reconciliation.events.some((event) => JSON.stringify(event).includes("orphan-directory"))).toBe(true)
+				expect(reconciliation.events.some((event) => JSON.stringify(event).includes("orphan-branch"))).toBe(true)
+				expect(await pathExists(worktreePath)).toBe(false)
+				expect(Bun.spawnSync({ cmd: ["git", "show-ref", "--verify", "--quiet", branchName], cwd: target, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(1)
+
+				const retried = expectOk(await sendDaemonRequest(restarted.snapshot().socketPath, daemonRequest("chain.delete", { chainId })))
+				expect(retried).toMatchObject({ alreadyDeleted: false, chain: { status: "deleted" }, cleanup: { chainRootRemoved: true } })
+				expect(await pathExists(paths.chainRoot)).toBe(false)
+			} finally {
+				await restarted.stop()
+			}
 		} finally {
 			if (await pathExists(unavailableTarget)) await rename(unavailableTarget, target)
 			await fixture.daemon.stop()

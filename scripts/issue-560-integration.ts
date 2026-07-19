@@ -7,7 +7,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { resolve } from "node:path"
 
 import { closureBranchPrefix, createRepositoryGitCoordinator, type OriginFreshness } from "../src/closure-lifecycle"
-import { cleanupSchedulerChainWorktrees, createGitWorktreeManager, consumeSchedulerClosure, reconcileClosureResources } from "../src/scheduler"
+import { cleanupSchedulerChainWorktrees, createGitWorktreeManager, consumeSchedulerClosure, reconcileClosureResources, sampleClosureConsumptionObservation } from "../src/scheduler"
 import type { JsonObject } from "../src/loop"
 import { openSqliteStateStore, type ChainRecord, type ItemRecord } from "../src/sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../src/runtime-data"
@@ -511,6 +511,14 @@ async function main(): Promise<void> {
 			await coordinator.run(repos.target, async () => await commandAsync([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-m", `issue-560 concurrent ${index}`], { cwd: resource.worktreePath }))
 			await coordinator.run(repos.target, async () => await commandAsync([REAL_GIT, "push", "-q", "origin", `HEAD:${resource.branchName}`], { cwd: resource.worktreePath }))
 		}))
+		const publicationResource = directResources[1]
+		if (publicationResource === undefined || typeof publicationResource === "string") fail("expected publication resource")
+		const publishedObservation = await sampleClosureConsumptionObservation({ repoCwd: repos.target, baseBranch: "main", branchName: publicationResource.branchName, baseCommit: publicationResource.baseCommit })
+		assert(publishedObservation.evidence === "published", "C05 live origin branch was not observed as published")
+		command([REAL_GIT, "--git-dir", repos.origin, "update-ref", "-d", publicationResource.branchName])
+		assert(command([REAL_GIT, "show-ref", "--verify", publicationResource.branchName.replace("refs/heads/", "refs/remotes/origin/")], { cwd: repos.target }).exitCode === 0, "C05 stale tracking fixture was not retained locally before sampling")
+		const deletedPublicationObservation = await sampleClosureConsumptionObservation({ repoCwd: repos.target, baseBranch: "main", branchName: publicationResource.branchName, baseCommit: publicationResource.baseCommit })
+		assert(deletedPublicationObservation.evidence === "unpublished-discarded", "C05 deleted live origin branch remained a published witness")
 		const resourceStatesBefore = directResources.map((resource, index) => {
 			if (typeof resource === "string") fail("expected typed direct resources")
 			writeFileSync(resolve(resource.worktreePath, `.wip-${index}`), `wip-${index}\n`)
@@ -549,7 +557,7 @@ async function main(): Promise<void> {
 			await cleanupSchedulerChainWorktrees([{ chainName: directChain.name, repoCwd: repos.target, closure: { ...contexts[index]!.existing, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName }, loopDataRootOptions: { loopDataRoot: daemon.root } }])
 		}
 		assert(!readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").includes("gc"), "C10 explicit gc observed")
-		event("C05.C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, driftKinds: driftFindings.map((finding) => finding.mismatch.kind), detachedCleanupRejected: true, resourceStates: resourceStatesAfter })
+		event("C05.C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, publicationEvidence: [publishedObservation.evidence, deletedPublicationObservation.evidence], driftKinds: driftFindings.map((finding) => finding.mismatch.kind), detachedCleanupRejected: true, resourceStates: resourceStatesAfter })
 
 		// C05/C07 cleanup recovery: deletion first seals the active chain against
 		// resume, then an unavailable repository leaves only runtime cleanup retryable.
@@ -560,7 +568,7 @@ async function main(): Promise<void> {
 		try {
 			const incompleteDelete = command(["bun", LOOP_ENTRY, "chain", "delete", registration, "--loop-data-root", daemon.root, "--json"], { env, allowFail: true })
 			assert(incompleteDelete.exitCode !== 0 && `${incompleteDelete.stdout}\n${incompleteDelete.stderr}`.includes("runtime_cleanup_incomplete"), "C05/C07 unavailable-repository delete did not return runtime_cleanup_incomplete")
-			assert(chainStatus(daemon.root, registration) === "deleted", "C05/C07 incomplete delete did not seal the chain")
+			assert(chainStatus(daemon.root, registration) === "stopped", "C05/C07 incomplete delete did not leave the chain stopped for startup recovery")
 			assert(existsSync(registrationChainRoot) && existsSync(registrationRow.worktree_path), "C05/C07 incomplete delete destroyed recovery state")
 			const retainedRegistration = closureRows(daemon.root, registration).find((row) => row.closure_id === registrationRow.closure_id)
 			assert(retainedRegistration?.lifecycle === "consumed" && retainedRegistration.worktree_path === registrationRow.worktree_path && retainedRegistration.branch_name === registrationRow.branch_name, "C05/C07 incomplete delete lost consumed resource identity")
@@ -569,12 +577,20 @@ async function main(): Promise<void> {
 		} finally {
 			if (existsSync(unavailableTarget) && !existsSync(repos.target)) renameSync(unavailableTarget, repos.target)
 		}
+		await stopDaemon(daemon)
+		daemon = startDaemon(runtime, env); await ready(daemon)
+		const deletionReconcile = await until(
+			() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", registration, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout,
+			(text) => text.includes("orphan-directory") && text.includes("orphan-branch"),
+			"incomplete deletion restart reconciliation",
+		)
+		assert(!existsSync(registrationRow.worktree_path) && command([REAL_GIT, "show-ref", "--verify", "--quiet", registrationRow.branch_name], { cwd: repos.target, allowFail: true }).exitCode === 1, "C05/C07 restart reconciliation retained consumed Git residue")
 		const retriedDelete = command(["bun", LOOP_ENTRY, "chain", "delete", registration, "--loop-data-root", daemon.root, "--json"], { env })
 		const retriedDeleteBody = record(JSON.parse(retriedDelete.stdout), "retried chain deletion")
-		assert(retriedDeleteBody.alreadyDeleted === true, "C05/C07 cleanup retry did not use the already-deleted path")
+		assert(retriedDeleteBody.alreadyDeleted === false, "C05/C07 cleanup retry did not finalize the stopped chain")
 		assert(chainStatus(daemon.root, registration) === "deleted" && !existsSync(registrationChainRoot), "C05/C07 delete retry did not remove the restored runtime")
 		assert(command([REAL_GIT, "show-ref", "--verify", "--quiet", registrationRow.branch_name], { cwd: repos.target, allowFail: true }).exitCode === 1, "C05/C07 delete retry retained the closure branch")
-		event("C05.C07.delete-retry.pass", { chain: registration, firstError: "runtime_cleanup_incomplete", firstStatus: "deleted", retryAlreadyDeleted: true, chainRootRemoved: true })
+		event("C05.C07.delete-retry.pass", { chain: registration, firstError: "runtime_cleanup_incomplete", firstStatus: "stopped", restartReconciliationBytes: deletionReconcile.length, retryAlreadyDeleted: false, chainRootRemoved: true })
 
 		for (const chain of chains) deleteChain(daemon, chain)
 		await stopDaemon(daemon)
