@@ -53,7 +53,7 @@ import {
 	type SchedulerSpawnErrorAttribution,
 } from "./runtime-data"
 import { detectsSessionIdInvalid } from "./runners/session-id"
-import { type ChainRecord, type ClosureConsumptionAuthority, type ClosureConsumptionEvidence, type ConsumeClosureResult, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, type ClosureConsumptionAuthority, type ClosureConsumptionEvidence, type ClosureConsumptionObservation, type ConsumeClosureResult, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
 	LOOP_RUN_CREDENTIAL_ENV,
@@ -199,7 +199,9 @@ export type SchedulerStore = Pick<
 	| "getTaskTree"
 	| "setClosureLifecycle"
 	| "setClosureResources"
+	| "assessClosureConsumption"
 	| "consumeClosureIfUnreachable"
+	| "markClosureConsumptionIntentEmitted"
 >
 
 export type SchedulerSpawnContext = {
@@ -1301,7 +1303,7 @@ export type ConsumeSchedulerClosureInput = {
 	authority: ClosureConsumptionAuthority
 	updatedAt: number
 	loopDataRootOptions?: LoopDataRootOptions
-	store: Pick<SqliteStateStore, "consumeClosureIfUnreachable" | "setClosureResources">
+	store: Pick<SqliteStateStore, "assessClosureConsumption" | "consumeClosureIfUnreachable" | "markClosureConsumptionIntentEmitted" | "setClosureResources">
 	emit: (event: Extract<SchedulerEvent, { type: "closure.consumed" }>) => Promise<void> | void
 }
 
@@ -1309,11 +1311,6 @@ export type ConsumeSchedulerClosureResult = {
 	decision: ConsumeClosureResult
 	cleanup: SchedulerChainWorktreeCleanup | null
 	complete: boolean
-}
-
-export type ClosureConsumptionObservation = {
-	evidence: ClosureConsumptionEvidence
-	freshness: OriginFreshness
 }
 
 export async function sampleClosureConsumptionObservation(input: {
@@ -1359,18 +1356,32 @@ export async function sampleClosureConsumptionObservation(input: {
 }
 
 export async function consumeSchedulerClosure(input: ConsumeSchedulerClosureInput): Promise<ConsumeSchedulerClosureResult> {
+	const assessment = input.store.assessClosureConsumption(input.closure.closureId, input.authority)
+	if (assessment.kind === "retained") return { decision: assessment, cleanup: null, complete: false }
+	const assessedClosure = assessment.closure
+	const observation = assessment.kind === "already-consumed" && assessment.intent !== null
+		? assessment.intent.observation
+		: assessedClosure.worktreePath === null || assessedClosure.branchName === null
+			? { evidence: "unevaluable" as const, freshness: { kind: "retained" as const, commit: assessedClosure.baseCommit } }
+			: await sampleClosureConsumptionObservation({ repoCwd: input.repoCwd, baseBranch: input.baseBranch, branchName: assessedClosure.branchName, baseCommit: assessedClosure.baseCommit })
 	const decision = input.store.consumeClosureIfUnreachable(input.closure.closureId, {
 		authority: input.authority,
 		updatedAt: input.updatedAt,
+		observation,
 	})
-	if (decision.kind === "retained" && decision.reason !== "already-consumed") return { decision, cleanup: null, complete: false }
-	const closure = decision.kind === "consumed" ? decision.closure : { ...input.closure, lifecycle: "consumed" as const }
-	if (closure.worktreePath === null || closure.branchName === null) return { decision, cleanup: null, complete: true }
-	const observation = await sampleClosureConsumptionObservation({ repoCwd: input.repoCwd, baseBranch: input.baseBranch, branchName: closure.branchName, baseCommit: closure.baseCommit })
-	const [cleanup] = await cleanupSchedulerChainWorktrees([{ chainName: input.chainName, repoCwd: input.repoCwd, closure, ...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }) }])
-	if (cleanup === undefined || cleanup.error !== null) return { decision, cleanup: cleanup ?? null, complete: false }
-	input.store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: input.updatedAt })
-	await input.emit({ type: "closure.consumed", chainId: input.chainId, closureId: closure.closureId, evidence: observation.evidence, freshness: observation.freshness })
+	if (decision.kind === "retained") return { decision, cleanup: null, complete: false }
+	const closure = decision.closure
+	let cleanup: SchedulerChainWorktreeCleanup | null = null
+	if (closure.worktreePath !== null && closure.branchName !== null) {
+		const [cleanupResult] = await cleanupSchedulerChainWorktrees([{ chainName: input.chainName, repoCwd: input.repoCwd, closure, ...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }) }])
+		cleanup = cleanupResult ?? null
+		if (cleanup === null || cleanup.error !== null) return { decision, cleanup, complete: false }
+	}
+	if (decision.intent.status === "pending") {
+		await input.emit({ type: "closure.consumed", chainId: input.chainId, closureId: closure.closureId, evidence: decision.intent.observation.evidence, freshness: decision.intent.observation.freshness })
+		input.store.markClosureConsumptionIntentEmitted(closure.closureId, input.updatedAt)
+	}
+	if (closure.worktreePath !== null || closure.branchName !== null) input.store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: input.updatedAt })
 	return { decision, cleanup, complete: true }
 }
 

@@ -25,7 +25,6 @@ import {
 	type RunnerStatusPersistenceFailure,
 } from "./loop"
 import {
-	cleanupSchedulerChainWorktrees,
 	consumeSchedulerClosure,
 	createSchedulerState,
 	listActiveRuns,
@@ -2852,13 +2851,6 @@ export class CoderLoopDaemon {
 		const worktrees: SchedulerChainWorktreeCleanup[] = []
 		const incompleteClosures: JsonObject[] = []
 		for (const { repoCwd, closure } of closures) {
-			if (closure.lifecycle === "consumed") {
-				const cleanup = await cleanupSchedulerChainWorktrees([{ chainName: chain.name, repoCwd, closure, loopDataRootOptions: { loopDataRoot: this.paths.root } }])
-				worktrees.push(...cleanup)
-				if (cleanup.every((result) => result.error === null)) store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: unixSeconds() })
-				else incompleteClosures.push({ closureId: closure.closureId, reason: "worktree-cleanup-failed" })
-				continue
-			}
 			const consumed = await consumeSchedulerClosure({
 				chainId: chain.id,
 				chainName: chain.name,

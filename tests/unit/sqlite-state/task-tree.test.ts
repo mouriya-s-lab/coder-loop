@@ -74,6 +74,7 @@ describe("sqlite state store", () => {
 		try {
 			legacy.exec("PRAGMA foreign_keys=OFF")
 			legacy.exec(`
+				DROP TABLE closure_consumption_intents;
 				CREATE TABLE closure_reachability_seeds_v16 (
 					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
 					closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
@@ -91,7 +92,8 @@ describe("sqlite state store", () => {
 		openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }).close()
 		const migrated = new Database(fixture.dbFile)
 		try {
-			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16)
+			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(17)
+			expect(migrated.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name='closure_consumption_intents'").get()?.name).toBe("closure_consumption_intents")
 			migrated.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,'decided-reopen'),($chain,$closure,'next-epoch-candidate')").run({ $chain: chain.id, $closure: closureId })
 			expect(migrated.query<{ kind: string }, []>("SELECT kind FROM closure_reachability_seeds ORDER BY kind").all().map((row) => row.kind)).toEqual([
 				"decided-reopen",
@@ -211,6 +213,42 @@ describe("sqlite state store", () => {
 			expectSqliteCode(() => store.setClosureLifecycle(`closure-${item.id}`, { kind: "suspend", updatedAt: 1_800_000_104 }), "closure_lifecycle_conflict")
 			expect(store.setClosureResources(`closure-${item.id}`, { worktreePath: null, branchName: null, updatedAt: 1_800_000_103 }).worktreePath).toBeNull()
 		} finally { store.close() }
+	})
+
+	test("closure consumption intent survives reopen and is emitted once", async () => {
+		const fixture = await openTestStore("closure-consumption-intent")
+		const chain = createFullChain(fixture.store)
+		const item = createFullItem(fixture.store, chain)
+		const closureId = `closure-${item.id}`
+		fixture.store.createTaskTree(chain.id, singleLeafTree(item))
+		const authority = { kind: "chain-deletion", chainId: chain.id } as const
+		const observation = {
+			evidence: "unevaluable",
+			freshness: { kind: "no-origin", availability: "unavailable", commit: "0123456789abcdef" },
+		} as const
+		expect(fixture.store.consumeClosureIfUnreachable(closureId, { authority, observation, updatedAt: 1_800_000_105 })).toMatchObject({
+			kind: "consumed",
+			intent: { status: "pending", observation },
+		})
+		fixture.store.close()
+
+		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try {
+			expect(reopened.assessClosureConsumption(closureId, authority)).toMatchObject({
+				kind: "already-consumed",
+				intent: { status: "pending", observation },
+			})
+			expect(reopened.markClosureConsumptionIntentEmitted(closureId, 1_800_000_106)).toEqual({ status: "emitted", observation })
+			expect(reopened.markClosureConsumptionIntentEmitted(closureId, 1_800_000_107)).toEqual({ status: "emitted", observation })
+		} finally { reopened.close() }
+
+		const verified = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try {
+			expect(verified.assessClosureConsumption(closureId, authority)).toMatchObject({
+				kind: "already-consumed",
+				intent: { status: "emitted", observation },
+			})
+		} finally { verified.close() }
 	})
 
 	test("run closure identity survives active relation cleanup", async () => {

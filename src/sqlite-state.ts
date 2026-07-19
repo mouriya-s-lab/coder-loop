@@ -29,7 +29,7 @@ import {
 	type TaskTreeSnapshot,
 } from "./task-runtime"
 import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
-import { computeClosureReachability, persistedClosureReachabilityModel, type ClosureReachabilityModel } from "./closure-lifecycle"
+import { computeClosureReachability, persistedClosureReachabilityModel, type ClosureReachabilityModel, type OriginFreshness } from "./closure-lifecycle"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -276,17 +276,24 @@ export type ClosureLifecycleInput =
 	| { kind: "consume"; updatedAt: number }
 export type ClosureResourcesInput = { worktreePath: string | null; branchName: string | null; updatedAt: number }
 export type ClosureConsumptionEvidence = "no-work" | "published" | "unpublished-discarded" | "unevaluable"
+export type ClosureConsumptionObservation = { evidence: ClosureConsumptionEvidence; freshness: OriginFreshness }
+export type ClosureConsumptionIntent = { status: "pending" | "emitted"; observation: ClosureConsumptionObservation }
 export type ClosureConsumptionAuthority =
 	| { kind: "outer-completion"; chainId: number; terminalStatuses: readonly InternalStatus[] }
 	| { kind: "chain-deletion"; chainId: number }
-export type ConsumeClosureInput = { authority: ClosureConsumptionAuthority; updatedAt: number; evidence?: ClosureConsumptionEvidence }
+export type AssessClosureConsumptionResult =
+	| { kind: "retained"; closureId: string; reason: "reachable" | "active-run" }
+	| { kind: "consumable"; closure: ClosureSnapshot }
+	| { kind: "already-consumed"; closure: ClosureSnapshot; intent: ClosureConsumptionIntent | null }
+export type ConsumeClosureInput = { authority: ClosureConsumptionAuthority; updatedAt: number; observation: ClosureConsumptionObservation }
 export type ConsumeClosureResult =
-	| { kind: "retained"; closureId: string; reason: "reachable" | "active-run" | "already-consumed" }
-	| { kind: "consumed"; closure: ClosureSnapshot; evidence: ClosureConsumptionEvidence }
+	| { kind: "retained"; closureId: string; reason: "reachable" | "active-run" }
+	| { kind: "already-consumed"; closure: ClosureSnapshot; intent: ClosureConsumptionIntent }
+	| { kind: "consumed"; closure: ClosureSnapshot; intent: ClosureConsumptionIntent }
 export type JoinBindingRecord = { parNodeId: string; version: number; value: JoinValueSnapshot; authorKind: string; authorId: string; authorityClass: string; effectiveFromEpoch: number; createdAt: number }
 export type JoinEvaluationRecord = { parNodeId: string; epoch: number; bindingVersion: number; state: "evaluating" | "decided" | "consumed" }
 
-export type StateTableName = "chains" | "items" | "runs" | "execution_definitions" | "task_trees" | "task_nodes" | "task_leaf_nodes" | "task_seq_nodes" | "task_par_nodes" | "task_join_bindings" | "task_join_evaluation_bindings" | "task_closures" | "closure_reachability_seeds" | "closure_reachability_edges" | "closure_sessions" | "active_runs" | "context_entries"
+export type StateTableName = "chains" | "items" | "runs" | "execution_definitions" | "task_trees" | "task_nodes" | "task_leaf_nodes" | "task_seq_nodes" | "task_par_nodes" | "task_join_bindings" | "task_join_evaluation_bindings" | "task_closures" | "closure_reachability_seeds" | "closure_reachability_edges" | "closure_sessions" | "closure_consumption_intents" | "active_runs" | "context_entries"
 
 export type SqliteStateStoreOptions = LoopDataRootOptions & {
 	createIfMissing?: boolean
@@ -328,7 +335,9 @@ export type SqliteStateStore = {
 	getTaskTree: (chainId: number) => TaskTreeSnapshot | null
 	setClosureLifecycle: (closureId: string, input: ClosureLifecycleInput) => ClosureSnapshot
 	setClosureResources: (closureId: string, input: ClosureResourcesInput) => ClosureSnapshot
+	assessClosureConsumption: (closureId: string, authority: ClosureConsumptionAuthority) => AssessClosureConsumptionResult
 	consumeClosureIfUnreachable: (closureId: string, input: ConsumeClosureInput) => ConsumeClosureResult
+	markClosureConsumptionIntentEmitted: (closureId: string, emittedAt: number) => ClosureConsumptionIntent
 	listJoinBindings: (parNodeId: string) => JoinBindingRecord[]
 	listJoinEvaluations: (parNodeId: string) => JoinEvaluationRecord[]
 	appendContextEntry: (input: AppendContextEntryInput) => ContextEntry
@@ -428,6 +437,12 @@ const ClosureRowBoundary = arkType({
 	closure_id: "string>0", item_row_id: "number.integer>0", item_id: "string>0", phase: "string>0",
 	lifecycle: "'active'|'suspended'|'consumed'", worktree_path: "string|null", branch_name: "string|null",
 	base_commit: "string>0", source_par_node_id: "string|null",
+	"+": "reject",
+})
+const ClosureConsumptionIntentRowBoundary = arkType({
+	evidence: "'no-work'|'published'|'unpublished-discarded'|'unevaluable'",
+	freshness: "string>0",
+	status: "'pending'|'emitted'",
 	"+": "reject",
 })
 const ClosureSessionRowBoundary = arkType({ runner_kind: "'claude'|'codex'|'opencode'", session_id: "string>0", "+": "reject" })
@@ -715,6 +730,15 @@ CREATE TABLE IF NOT EXISTS closure_sessions (
 	session_id TEXT NOT NULL,
 	PRIMARY KEY (closure_id, runner_kind)
 );
+CREATE TABLE IF NOT EXISTS closure_consumption_intents (
+	closure_id TEXT PRIMARY KEY REFERENCES task_closures(closure_id) ON DELETE CASCADE,
+	evidence TEXT NOT NULL CHECK (evidence IN ('no-work','published','unpublished-discarded','unevaluable')),
+	freshness TEXT NOT NULL,
+	status TEXT NOT NULL CHECK (status IN ('pending','emitted')),
+	created_at REAL NOT NULL,
+	emitted_at REAL,
+	CHECK ((status = 'pending' AND emitted_at IS NULL) OR (status = 'emitted' AND emitted_at IS NOT NULL))
+);
 CREATE TABLE IF NOT EXISTS active_runs (
 	closure_id TEXT PRIMARY KEY REFERENCES task_closures(closure_id) ON DELETE CASCADE,
 	run_id TEXT NOT NULL UNIQUE,
@@ -770,8 +794,9 @@ ${STATE_INDEXES_SQL}
 // the rebuild, and rows being copied through the new schema satisfy the new constraint (existing
 // runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
 // main independently used v14 for context_entries after #558 had used v14 for the
-// normalized v3 runtime tables. v15 is the first schema that requires both shapes.
-const STATE_SCHEMA_VERSION = 16
+// normalized v3 runtime tables. v15 is the first schema that requires both shapes. v17 adds the
+// closure consumption intent outbox so evidence/freshness survives cleanup failure and restart.
+const STATE_SCHEMA_VERSION = 17
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -853,6 +878,10 @@ function closureReachabilitySchemaExists(db: Database): boolean {
 		SELECT COUNT(*) AS table_count FROM sqlite_master
 		WHERE type = 'table' AND name IN ('closure_reachability_seeds','closure_reachability_edges')
 	`).get()?.table_count ?? 0) === 2
+}
+
+function closureConsumptionIntentSchemaExists(db: Database): boolean {
+	return (db.query<TableCountRow, []>("SELECT COUNT(*) AS table_count FROM sqlite_master WHERE type='table' AND name='closure_consumption_intents'").get()?.table_count ?? 0) === 1
 }
 
 function closureReachabilitySeedsAllowFutureWriterTargets(db: Database): boolean {
@@ -940,6 +969,7 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 		&& contextEntriesTableExists(db)
 		&& v3RuntimeSchemaExists(db)
 		&& closureReachabilitySchemaExists(db)
+		&& closureConsumptionIntentSchemaExists(db)
 		&& !needsClosureReachabilitySeedRebuild
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
@@ -1952,18 +1982,26 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			return requireClosureById(db, closureId)
 		}),
 
+		assessClosureConsumption: (closureId, authority) => read("assess closure consumption", () => assessClosureConsumption(db, closureId, authority)),
+
 		consumeClosureIfUnreachable: (closureId, input) => write("consume closure if unreachable", () => {
-			const current = requireClosureById(db, closureId)
-			if (current.lifecycle === "consumed") return { kind: "retained", closureId, reason: "already-consumed" }
-			const active = queryPersistedOne(db, "SELECT run_id FROM active_runs WHERE closure_id = $closureId", { closureId }, RunIdRowBoundary, `active_runs.${closureId}`)
-			if (active !== null) return { kind: "retained", closureId, reason: "active-run" }
-			const tree = requireTaskTree(db, input.authority.chainId)
-			const model = closureConsumptionReachabilityModel(db, tree, input.authority)
-			if (!model.closures.includes(closureId)) throw new SqliteStateError("run_closure_mismatch", `closure ${closureId} does not belong to chain ${input.authority.chainId}`, { closureId, chainId: input.authority.chainId })
-			if (computeClosureReachability(model).has(closureId)) return { kind: "retained", closureId, reason: "reachable" }
+			const assessment = assessClosureConsumption(db, closureId, input.authority)
+			if (assessment.kind === "retained") return assessment
+			if (assessment.kind === "already-consumed") {
+				const intent = assessment.intent ?? insertClosureConsumptionIntent(db, closureId, input.observation, input.updatedAt)
+				return { kind: "already-consumed", closure: assessment.closure, intent }
+			}
 			db.query<never, SqlParams>("UPDATE task_closures SET lifecycle = 'consumed', updated_at = $updatedAt WHERE closure_id = $closureId").run({ closureId, updatedAt: input.updatedAt })
 			db.query<never, SqlParams>("DELETE FROM closure_sessions WHERE closure_id = $closureId").run({ closureId })
-			return { kind: "consumed", closure: requireClosureById(db, closureId), evidence: input.evidence ?? "unevaluable" }
+			const intent = insertClosureConsumptionIntent(db, closureId, input.observation, input.updatedAt)
+			return { kind: "consumed", closure: requireClosureById(db, closureId), intent }
+		}),
+
+		markClosureConsumptionIntentEmitted: (closureId, emittedAt) => write("mark closure consumption intent emitted", () => {
+			const intent = requireClosureConsumptionIntent(db, closureId)
+			if (intent.status === "emitted") return intent
+			db.query<never, SqlParams>("UPDATE closure_consumption_intents SET status = 'emitted', emitted_at = $emittedAt WHERE closure_id = $closureId").run({ closureId, emittedAt })
+			return requireClosureConsumptionIntent(db, closureId)
 		}),
 
 		listJoinBindings: (parNodeId) => read("list join bindings", () => listJoinBindingRecords(db, parNodeId)),
@@ -1990,6 +2028,68 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		deleteContextEntriesForChain: (chainId) => write("delete chain context entries", () => db.query<unknown, SqlParams>("DELETE FROM context_entries WHERE chain_id=$chainId").run({chainId}).changes),
 	}
+}
+
+function originFreshnessFromJson(raw: string, label: string): OriginFreshness {
+	const value = parseJsonObject(raw, label)
+	if (value.kind === "fetched"
+		&& value.remote === "origin"
+		&& typeof value.commit === "string" && value.commit.length > 0
+		&& typeof value.observedAt === "string" && value.observedAt.length > 0
+		&& Object.keys(value).length === 4) {
+		return { kind: "fetched", remote: "origin", commit: value.commit, observedAt: value.observedAt }
+	}
+	if (value.kind === "no-origin"
+		&& value.availability === "unavailable"
+		&& typeof value.commit === "string" && value.commit.length > 0
+		&& Object.keys(value).length === 3) {
+		return { kind: "no-origin", availability: "unavailable", commit: value.commit }
+	}
+	if (value.kind === "retained"
+		&& typeof value.commit === "string" && value.commit.length > 0
+		&& Object.keys(value).length === 2) {
+		return { kind: "retained", commit: value.commit }
+	}
+	throw new SqliteStateError("invalid_json", `${label} contains invalid origin freshness`, { label })
+}
+
+function closureConsumptionIntent(db: Database, closureId: string): ClosureConsumptionIntent | null {
+	const row = queryPersistedOne(db,
+		"SELECT evidence, freshness, status FROM closure_consumption_intents WHERE closure_id = $closureId",
+		{ closureId }, ClosureConsumptionIntentRowBoundary, `closure_consumption_intents.${closureId}`)
+	return row === null ? null : {
+		status: row.status,
+		observation: { evidence: row.evidence, freshness: originFreshnessFromJson(row.freshness, `closure_consumption_intents.${closureId}.freshness`) },
+	}
+}
+
+function requireClosureConsumptionIntent(db: Database, closureId: string): ClosureConsumptionIntent {
+	const intent = closureConsumptionIntent(db, closureId)
+	if (intent === null) throw new SqliteStateError("not_found", `closure consumption intent for ${closureId} was not found`, { closureId })
+	return intent
+}
+
+function insertClosureConsumptionIntent(db: Database, closureId: string, observation: ClosureConsumptionObservation, createdAt: number): ClosureConsumptionIntent {
+	db.query<never, SqlParams>(`INSERT INTO closure_consumption_intents (closure_id, evidence, freshness, status, created_at, emitted_at)
+		VALUES ($closureId, $evidence, $freshness, 'pending', $createdAt, NULL)`).run({
+		closureId,
+		evidence: observation.evidence,
+		freshness: JSON.stringify(observation.freshness),
+		createdAt,
+	})
+	return requireClosureConsumptionIntent(db, closureId)
+}
+
+function assessClosureConsumption(db: Database, closureId: string, authority: ClosureConsumptionAuthority): AssessClosureConsumptionResult {
+	const current = requireClosureById(db, closureId)
+	const tree = requireTaskTree(db, authority.chainId)
+	const model = closureConsumptionReachabilityModel(db, tree, authority)
+	if (!model.closures.includes(closureId)) throw new SqliteStateError("run_closure_mismatch", `closure ${closureId} does not belong to chain ${authority.chainId}`, { closureId, chainId: authority.chainId })
+	if (current.lifecycle === "consumed") return { kind: "already-consumed", closure: current, intent: closureConsumptionIntent(db, closureId) }
+	const active = queryPersistedOne(db, "SELECT run_id FROM active_runs WHERE closure_id = $closureId", { closureId }, RunIdRowBoundary, `active_runs.${closureId}`)
+	if (active !== null) return { kind: "retained", closureId, reason: "active-run" }
+	if (computeClosureReachability(model).has(closureId)) return { kind: "retained", closureId, reason: "reachable" }
+	return { kind: "consumable", closure: current }
 }
 
 function closureConsumptionReachabilityModel(

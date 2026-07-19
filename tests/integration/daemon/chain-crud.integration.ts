@@ -721,6 +721,18 @@ describe("daemon", () => {
 
 				const retried = expectOk(await sendDaemonRequest(restarted.snapshot().socketPath, daemonRequest("chain.delete", { chainId })))
 				expect(retried).toMatchObject({ alreadyDeleted: false, chain: { status: "deleted" }, cleanup: { chainRootRemoved: true } })
+				const consumption = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+					chain: "delete-incomplete-cleanup",
+					type: "closure.consumed",
+				})
+				expect(consumption.events).toHaveLength(1)
+				expect(consumption.events[0]).toMatchObject({
+					type: "closure.consumed",
+					payload: {
+						evidence: "unevaluable",
+						freshness: { kind: "no-origin", availability: "unavailable" },
+					},
+				})
 				expect(await pathExists(paths.chainRoot)).toBe(false)
 			} finally {
 				await restarted.stop()
