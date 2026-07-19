@@ -72,6 +72,27 @@ describe("observability", () => {
 		expect(renderObservabilityEvent(event)).toContain("mismatch=registration-mismatch repaired=false")
 	})
 
+	test("closure reconciliation preserves Git-contract scan failure identity", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.reconciled",
+			chain: "unavailable-repository-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: null,
+				repoCwd: "/repo/unavailable",
+				mismatch: {
+					kind: "repository-scan-failed",
+					surface: "git-contract",
+					repaired: false,
+					error: "repository Git contract unavailable",
+				},
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("mismatch=repository-scan-failed repaired=false")
+	})
+
 	test("closure reconciliation preserves retired resource repair identity", () => {
 		const event = makeObservabilityEvent({
 			kind: "audit",

@@ -491,7 +491,7 @@ async function main(): Promise<void> {
 		const foreignRegistrationBranch = `issue560-foreign-registration-${id}`
 		command([REAL_GIT, "switch", "-q", "-c", foreignRegistrationBranch], { cwd: registrationRow.worktree_path })
 		await stopDaemon(daemon)
-		const missingDir = lifecycleReview.worktree_path, missingBranch = lifecycleReview.branch_name; assert(missingBranch !== null, "C07 review branch missing"); rmSync(missingDir, { recursive: true, force: true }); command([REAL_GIT, "update-ref", "-d", missingBranch], { cwd: repos.target })
+		const missingDir = lifecycleReview.worktree_path, missingBranch = lifecycleReview.branch_name; assert(missingBranch !== null, "C07 review branch missing"); const missingBranchTip = command([REAL_GIT, "rev-parse", missingBranch], { cwd: repos.target }).stdout.trim(); rmSync(missingDir, { recursive: true, force: true }); command([REAL_GIT, "update-ref", "-d", missingBranch], { cwd: repos.target })
 		const orphanDir = resolve(daemon.root, "chains", lifecycle, "worktrees", "orphan"); mkdirSync(orphanDir, { recursive: true }); const orphanBranch = `${closureBranchPrefix(lifecycle)}orphan`; command([REAL_GIT, "branch", orphanBranch.replace("refs/heads/", ""), "main"], { cwd: repos.target }); command([REAL_GIT, "config", "core.hooksPath", ".issue560-hooks"], { cwd: repos.target }); command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
 		daemon = startDaemon(runtime, env); await ready(daemon)
 		const reconcileKinds = ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift", "repo-config-drift"]
@@ -506,7 +506,40 @@ async function main(): Promise<void> {
 		assert(resumedRegistration !== null, "C05 active deletion fixture did not resume")
 		assert(!existsSync(orphanDir) && command([REAL_GIT, "show-ref", "--verify", orphanBranch], { cwd: repos.target, allowFail: true }).exitCode !== 0, "C07 orphan repair failed"); command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target }); command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
 		assert(lifecycleRows.every((row) => closureRows(daemon.root, lifecycle).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
-		event("C07.pass", { eventKinds: [...reconcileKinds, "registration-mismatch"], bytes: reconcile.length + registrationReconcile.length, registrationClosureId: registrationRow.closure_id })
+		assert(!existsSync(missingDir) && command([REAL_GIT, "show-ref", "--verify", "--quiet", missingBranch], { cwd: repos.target, allowFail: true }).exitCode === 1, "C07 reconciliation recreated a suspended closure resource")
+
+		// The contradiction above is test-owned. Restore it explicitly only after proving
+		// startup reconciliation did not mutate the suspended closure, so the remaining
+		// lifecycle scenario can legally continue.
+		await stopDaemon(daemon)
+		command([REAL_GIT, "worktree", "remove", "--force", missingDir], { cwd: repos.target, allowFail: true })
+		command([REAL_GIT, "update-ref", missingBranch, missingBranchTip], { cwd: repos.target })
+		command([REAL_GIT, "worktree", "add", missingDir, missingBranch], { cwd: repos.target })
+		daemon = startDaemon(runtime, env); await ready(daemon)
+
+		// A stopped chain whose repository disappears must not abort daemon startup or
+		// discard reconciliation output. Its Git-contract read failure stays auditable.
+		const unavailableRepo = resolve(runtime, `unavailable-repository-${id}`)
+		command([REAL_GIT, "clone", "-q", repos.target, unavailableRepo], { cwd: runtime })
+		const unavailableChain = `issue560-registration-unavailable-${id}`; chains.push(unavailableChain); createChain(daemon, unavailableChain, unavailableRepo)
+		await until(() => observations(shims.runnerLog).find((row) => row.chain === unavailableChain && row.phase === "iteration") ?? null, (row) => row !== null, "unavailable repository fixture readiness")
+		command(["bun", LOOP_ENTRY, "chain", "stop", unavailableChain, "--loop-data-root", daemon.root, "--json"], { env })
+		await stopDaemon(daemon)
+		const unavailableRepoOffline = `${unavailableRepo}-offline`; renameSync(unavailableRepo, unavailableRepoOffline)
+		let unavailableReconcile = ""
+		try {
+			daemon = startDaemon(runtime, env); await ready(daemon)
+			unavailableReconcile = await until(
+				() => existsSync(resolve(daemon.root, "events/events.jsonl")) ? readFileSync(resolve(daemon.root, "events/events.jsonl"), "utf8") : "",
+				(text) => text.includes(unavailableChain) && text.includes("repository-scan-failed") && text.includes("git-contract") && text.includes(unavailableRepo),
+				"unavailable repository reconciliation event",
+			)
+		} finally {
+			if (daemon.child.exitCode === null) await stopDaemon(daemon)
+			if (existsSync(unavailableRepoOffline) && !existsSync(unavailableRepo)) renameSync(unavailableRepoOffline, unavailableRepo)
+		}
+		daemon = startDaemon(runtime, env); await ready(daemon)
+		event("C07.pass", { eventKinds: [...reconcileKinds, "registration-mismatch", "repository-scan-failed:git-contract"], bytes: reconcile.length + registrationReconcile.length + unavailableReconcile.length, registrationClosureId: registrationRow.closure_id, unavailableRepo })
 
 		// C05: future-writer states not yet produced by the runtime are seeded into a
 		// separate persisted store, then consumed through the production store/scheduler/Git path.

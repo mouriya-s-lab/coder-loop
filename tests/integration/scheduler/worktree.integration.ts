@@ -211,16 +211,40 @@ test("worktree registered but directory missing is pruned and recreated", async 
 		const resource = await manager({ chain, item, phase: "iteration", closureId: "closure:missing:iteration", repoCwd, slotKey: "slot", existing: null })
 		if (typeof resource === "string") throw new Error("expected closure resources")
 		await rm(resource.worktreePath, { recursive: true, force: true })
-		// Registration survives the directory deletion; pre-fix the early-return handed back
-		// a nonexistent path.
-		const existing = { closureId: "closure:missing:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: null, sessions: [] } as const
-		const recreated = await manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", existing })
+		// Registration survives the directory deletion. With no persisted closure tuple this
+		// is still a first-open/stale-registration repair, not a reopen.
+		const recreated = await manager({ chain, item, phase: "iteration", closureId: "closure:missing:iteration", repoCwd, slotKey: "slot", existing: null })
 		if (typeof recreated === "string") throw new Error("expected closure resources")
 		expect(recreated.worktreePath).toBe(resource.worktreePath)
 		expect(existsSync(recreated.worktreePath)).toBe(true)
 	} finally {
 		store.close()
 	}
+})
+
+test("reopen rejects a persisted worktree whose directory is missing without mutating registration", async () => {
+	const root = resolve(TEST_ROOT, "reopen-missing-dir")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reopen-missing-dir-chain")
+		const item = makeItem(store, chain, "reopen-missing-dir", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reopen-missing-dir:iteration", repoCwd, slotKey: "slot", existing: null })
+		if (typeof resources === "string") throw new Error("expected closure resources")
+		await rm(resources.worktreePath, { recursive: true, force: true })
+		const registrationBefore = git(repoCwd, ["worktree", "list", "--porcelain"]).stdout
+		const existing = { closureId: "closure:reopen-missing-dir:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "suspended", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
+
+		await expect(manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", existing })).rejects.toThrow("persisted closure worktree is missing")
+
+		expect(existsSync(resources.worktreePath)).toBe(false)
+		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).toBe(registrationBefore)
+		expect(git(repoCwd, ["show-ref", "--verify", "--quiet", resources.branchName]).exitCode).toBe(0)
+	} finally { store.close() }
 })
 
 test("reopen rejects a persisted worktree registered to another branch without mutating it", async () => {
@@ -401,6 +425,29 @@ test("startup reconciliation preserves orphan directories when repository scans 
 		store.close()
 		await rm(root, { recursive: true, force: true })
 	}
+})
+
+test("startup reconciliation reports an unavailable repository without discarding findings", async () => {
+	const root = resolve(TEST_ROOT, "reconcile-unavailable-repository")
+	const repoCwd = resolve(root, "missing-repository")
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-unavailable-repository-chain")
+		const item = makeItem(store, chain, "reconcile-unavailable-repository", repoCwd)
+		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "orphan")
+		await mkdir(orphanPath, { recursive: true })
+
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot }, store })
+
+		expect(findings).toContainEqual({
+			closureId: null,
+			repoCwd,
+			mismatch: expect.objectContaining({ kind: "repository-scan-failed", surface: "git-contract", repaired: false }),
+		})
+		expect(existsSync(orphanPath)).toBe(true)
+	} finally { store.close() }
 })
 
 test("startup reconciliation attributes a registered orphan worktree to its owning repository", async () => {

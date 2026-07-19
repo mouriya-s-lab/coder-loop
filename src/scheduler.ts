@@ -902,9 +902,23 @@ export function createGitWorktreeManager(
 			)
 		return await coordinator.run(context.repoCwd, async () => {
 			await loadOrCaptureRepositoryGitContract(context.chain.name, context.repoCwd, options)
-			await mkdir(dirname(worktreePath), { recursive: true })
 			const listed = await git(context.repoCwd, ["worktree", "list", "--porcelain"])
 			if (listed.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to inspect closure worktrees for ${context.closureId}: ${listed.stderr}`)
+			if (retainedBase !== null) {
+				if (!gitWorktreeListOutputIncludesPath(listed.stdout, worktreePath)) {
+					throw new SchedulerError("worktree_create_failed", `persisted closure worktree registration is missing for ${context.closureId}: ${worktreePath}`)
+				}
+				const registeredBranch = gitWorktreeBranchForPath(listed.stdout, worktreePath)
+				if (registeredBranch !== branchName) {
+					throw new SchedulerError("worktree_create_failed", `closure worktree ${worktreePath} is registered to unexpected branch ${registeredBranch ?? "(detached)"}; expected ${branchName}`)
+				}
+				if (!existsSync(worktreePath)) {
+					throw new SchedulerError("worktree_create_failed", `persisted closure worktree is missing for ${context.closureId}: ${worktreePath}`)
+				}
+				const head = await requireGitCommit(worktreePath, "HEAD", "closure_head_unavailable")
+				return { worktreePath, branchName, baseCommit: context.existing?.baseCommit ?? head, freshness: { kind: "retained", commit: head } }
+			}
+			await mkdir(dirname(worktreePath), { recursive: true })
 			if (gitWorktreeListOutputIncludesPath(listed.stdout, worktreePath)) {
 				const registeredBranch = gitWorktreeBranchForPath(listed.stdout, worktreePath)
 				if (registeredBranch !== branchName) {
@@ -957,7 +971,7 @@ export type ClosureReconciliationMismatch =
 	| { kind: "orphan-directory"; path: string; repaired: false; error: string }
 	| { kind: "orphan-branch"; branchName: string; repaired: true }
 	| { kind: "orphan-branch"; branchName: string; repaired: false; error: string }
-	| { kind: "repository-scan-failed"; surface: "branches" | "worktrees"; repaired: false; error: string }
+	| { kind: "repository-scan-failed"; surface: "git-contract" | "branches" | "worktrees"; repaired: false; error: string }
 	| { kind: "hooks-drift"; expected: string | null; actual: string | null; repaired: false }
 	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; expected: string | null; actual: string | null; repaired: false }
 	| { kind: "retired-resource"; path: string; branchName: string; resourcesRemoved: boolean; repaired: true }
@@ -1060,10 +1074,14 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 	}
 	for (const repoCwd of new Set(input.items.map((item) => item.repoCwd))) {
 		await repositoryGitCoordinator.run(repoCwd, async () => {
-			const expected = await loadOrCaptureRepositoryGitContract(input.chain.name, repoCwd, input.loopDataRootOptions)
-			const actual = await readRepositoryGitContract(repoCwd)
-			if (actual.hooksPath !== expected.hooksPath) findings.push({ closureId: null, repoCwd, mismatch: { kind: "hooks-drift", expected: expected.hooksPath, actual: actual.hooksPath, repaired: false } })
-			if (actual.worktreeConfig !== expected.worktreeConfig) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repo-config-drift", key: "extensions.worktreeConfig", expected: expected.worktreeConfig, actual: actual.worktreeConfig, repaired: false } })
+			try {
+				const expected = await loadOrCaptureRepositoryGitContract(input.chain.name, repoCwd, input.loopDataRootOptions)
+				const actual = await readRepositoryGitContract(repoCwd)
+				if (actual.hooksPath !== expected.hooksPath) findings.push({ closureId: null, repoCwd, mismatch: { kind: "hooks-drift", expected: expected.hooksPath, actual: actual.hooksPath, repaired: false } })
+				if (actual.worktreeConfig !== expected.worktreeConfig) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repo-config-drift", key: "extensions.worktreeConfig", expected: expected.worktreeConfig, actual: actual.worktreeConfig, repaired: false } })
+			} catch (error) {
+				findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "git-contract", repaired: false, error: error instanceof Error ? error.message : "repository Git contract scan failed" } })
+			}
 			const prefix = closureBranchPrefix(input.chain.name)
 			const listed = await git(repoCwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
 			if (listed.exitCode !== 0) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "branches", repaired: false, error: gitFailure("for-each-ref", listed) } })
@@ -1175,7 +1193,7 @@ async function readRepositoryGitContract(repoCwd: string): Promise<RepositoryGit
 	const readConfig = async (key: "core.hooksPath" | "extensions.worktreeConfig"): Promise<string | null> => {
 		const result = await git(repoCwd, ["config", "--get", key])
 		if (result.exitCode === 0) return result.stdout
-		if (result.exitCode === 1 && result.stdout === "") return null
+		if (result.exitCode === 1 && result.stdout === "" && result.stderr === "") return null
 		throw new SchedulerError("worktree_create_failed", `failed to read repository Git contract ${key}: ${result.stderr}`)
 	}
 	return {
