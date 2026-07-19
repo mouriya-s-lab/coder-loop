@@ -666,18 +666,22 @@ describe("daemon", () => {
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", { chainId, itemId: "560-delete-retry", repoCwd: target, extra: { sleepMs: 5_000 } })
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
-			expectOk(await request(fixture, "chain.stop", { chainId }))
 			const paths = resolveChainRuntimePaths("delete-incomplete-cleanup", { loopDataRoot: fixture.loopDataRoot })
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			let worktreePath: string
 			let branchName: string
+			let attemptsBeforeDelete: number
 			try {
 				const root = store.getTaskTree(chainId)?.root
 				if (root?.kind !== "seq") throw new Error("expected seq task tree")
 				const closure = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
 				if (closure?.kind !== "leaf" || closure.closure.worktreePath === null || closure.closure.branchName === null) throw new Error("expected persisted iteration resources")
+				expect(closure.closure.lifecycle).toBe("active")
 				worktreePath = closure.closure.worktreePath
 				branchName = closure.closure.branchName
+				const item = store.listItems(chainId).find((entry) => entry.itemId === "560-delete-retry")
+				if (item === undefined) throw new Error("expected delete retry item")
+				attemptsBeforeDelete = item.attempts
 			} finally { store.close() }
 			await rename(target, unavailableTarget)
 
@@ -688,13 +692,23 @@ describe("daemon", () => {
 				expect(failed.error.code).toBe("runtime_cleanup_incomplete")
 				expect(record(failed.error.details)).toMatchObject({ chainRoot: paths.chainRoot, chainRootRemoved: false })
 			}
-			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("stopped")
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("deleted")
 			expect(await pathExists(paths.chainRoot)).toBe(true)
 			expect(await pathExists(worktreePath)).toBe(true)
+			for (let index = 0; index < 3; index += 1) expectOk(await request(fixture, "daemon.status"))
+			const failedStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const root = failedStore.getTaskTree(chainId)?.root
+				if (root?.kind !== "seq") throw new Error("expected retained seq task tree")
+				const closure = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+				if (closure?.kind !== "leaf") throw new Error("expected retained iteration closure")
+				expect(closure.closure).toMatchObject({ lifecycle: "consumed", worktreePath, branchName, sessions: [] })
+				expect(failedStore.listItems(chainId).find((entry) => entry.itemId === "560-delete-retry")?.attempts).toBe(attemptsBeforeDelete)
+			} finally { failedStore.close() }
 
 			await rename(unavailableTarget, target)
 			const retried = expectOk(await request(fixture, "chain.delete", { chainId }))
-			expect(retried).toMatchObject({ alreadyDeleted: false, chain: { status: "deleted" }, cleanup: { chainRootRemoved: true } })
+			expect(retried).toMatchObject({ alreadyDeleted: true, chain: { status: "deleted" }, cleanup: { chainRootRemoved: true } })
 			expect(await pathExists(paths.chainRoot)).toBe(false)
 			expect(Bun.spawnSync({ cmd: ["git", "show-ref", "--verify", "--quiet", branchName], cwd: target, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(1)
 		} finally {

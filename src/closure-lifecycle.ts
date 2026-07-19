@@ -76,8 +76,6 @@ export function persistedClosureReachabilityModel(
 			}
 			case "par": {
 				if (node.state === "open") seedClosures(node, "open-par-epoch")
-				if (node.join.evaluation.kind === "decided") seedClosures(node, "decided-reopen")
-				if (node.join.evaluation.kind !== "not-evaluating" && node.join.currentVersion > node.join.evaluation.bindingVersion) seedClosures(node, "next-epoch-candidate")
 				for (const child of node.children) visit(child)
 				return
 			}

@@ -1226,6 +1226,17 @@ export async function cleanupSchedulerChainWorktrees(
 					error: `closure branch ${branchName} is registered at unexpected worktree ${registeredBranchPath}`,
 				}
 			}
+			if (registered && registeredPathBranch === null) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `closure worktree ${worktreePath} is detached instead of registered to expected branch ${branchName}`,
+				}
+			}
 			if (registeredPathBranch !== null && registeredPathBranch !== branchName) {
 				return {
 					repoCwd,

@@ -285,12 +285,14 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 	const store = openSqliteStateStore({ loopDataRoot })
 	const manager = createGitWorktreeManager({ loopDataRoot })
 	const results: JsonObject[] = []
-	type CaseKind = "materialized-seq-suffix" | "open-par-epoch" | "decided-reopen" | "next-epoch-candidate" | "open-append" | "sealed-seq"
+	type CaseKind = "materialized-seq-suffix" | "open-par-epoch" | "decided-reopen" | "decided-unrelated-sibling" | "next-epoch-candidate" | "sealed-newer-binding" | "open-append" | "sealed-seq"
 	const cases: readonly { kind: CaseKind; itemStatus: "queued" | "done"; expected: "retained" | "consumed" }[] = [
 		{ kind: "materialized-seq-suffix", itemStatus: "queued", expected: "retained" },
 		{ kind: "open-par-epoch", itemStatus: "done", expected: "retained" },
 		{ kind: "decided-reopen", itemStatus: "done", expected: "retained" },
+		{ kind: "decided-unrelated-sibling", itemStatus: "done", expected: "consumed" },
 		{ kind: "next-epoch-candidate", itemStatus: "done", expected: "retained" },
+		{ kind: "sealed-newer-binding", itemStatus: "done", expected: "consumed" },
 		{ kind: "open-append", itemStatus: "done", expected: "retained" },
 		{ kind: "sealed-seq", itemStatus: "done", expected: "consumed" },
 	]
@@ -303,10 +305,11 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 			const resource = await manager({ chain, item, phase, closureId, repoCwd, slotKey: `c05-${index}`, existing: null })
 			assert(typeof resource !== "string", `C05 ${spec.kind} resource creation failed`)
 			const definitionRef = { kind: "chain", contentIdentity: `sha256:c05-${index}` } as const
-			const closure = { closureId, itemRowId: item.id, itemId: item.itemId, phase, lifecycle: "suspended", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: spec.kind.includes("par") || spec.kind.includes("reopen") || spec.kind.includes("epoch") ? `par-c05-${index}` : null, sessions: [] } as const
+			const parCase = spec.kind === "open-par-epoch" || spec.kind === "decided-reopen" || spec.kind === "decided-unrelated-sibling" || spec.kind === "next-epoch-candidate" || spec.kind === "sealed-newer-binding"
+			const closure = { closureId, itemRowId: item.id, itemId: item.itemId, phase, lifecycle: "suspended", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: parCase ? `par-c05-${index}` : null, sessions: [] } as const
 			const leaf = { kind: "leaf", identity: { runtimeNodeId: `leaf-c05-${index}`, definitionRef, definitionNodeId: phase }, closure } as const
 			let tree: TaskTreeSnapshot
-			if (spec.kind === "open-par-epoch" || spec.kind === "decided-reopen" || spec.kind === "next-epoch-candidate") {
+			if (parCase) {
 				const evaluation = spec.kind === "open-par-epoch" ? { kind: "not-evaluating" } as const : { kind: "decided", epoch: 1, bindingVersion: 1 } as const
 				tree = { root: { kind: "par", identity: { runtimeNodeId: `par-c05-${index}`, definitionRef, definitionNodeId: `par-c05-${index}` }, groupId: `par-c05-${index}`, pinCommit: resource.baseCommit, state: spec.kind === "open-par-epoch" ? "open" : "completed", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation }, children: [leaf] }, activeRuns: [] }
 			} else {
@@ -319,7 +322,13 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 					db.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,'open-append')").run({ $chain: chain.id, $closure: closureId })
 				} finally { db.close() }
 			}
-			if (spec.kind === "next-epoch-candidate") {
+			if (spec.kind === "decided-reopen" || spec.kind === "next-epoch-candidate") {
+				const db = new Database(resolve(loopDataRoot, "db.sqlite"))
+				try {
+					db.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,$kind)").run({ $chain: chain.id, $closure: closureId, $kind: spec.kind })
+				} finally { db.close() }
+			}
+			if (spec.kind === "next-epoch-candidate" || spec.kind === "sealed-newer-binding") {
 				const db = new Database(resolve(loopDataRoot, "db.sqlite"))
 				try {
 					db.query("INSERT INTO task_join_bindings (par_node_id,version,join_kind,candidate_definition_kind,candidate_definition_content_identity,candidate_id,author_kind,author_id,authority_class,effective_from_epoch,created_at) VALUES ($par,2,'drain',NULL,NULL,NULL,'engine','issue-560','runtime',2,2)").run({ $par: `par-c05-${index}` })
@@ -442,6 +451,9 @@ async function main(): Promise<void> {
 		assert(readFileSync(resolve(registrationRow.worktree_path, ".issue560-registration-wip"), "utf8") === "registration mismatch survives\n", "C07 reconciliation changed mismatched worktree WIP")
 		command([REAL_GIT, "switch", "-q", registrationRow.branch_name.replace(/^refs\/heads\//, "")], { cwd: registrationRow.worktree_path })
 		command([REAL_GIT, "branch", "-D", foreignRegistrationBranch], { cwd: repos.target })
+		command(["bun", LOOP_ENTRY, "chain", "resume", registration, "--loop-data-root", daemon.root, "--json"], { env })
+		const resumedRegistration = await until(() => observations(shims.runnerLog).find((row) => row.chain === registration && row.phase === "iteration" && row.attempt >= 2) ?? null, (row) => row !== null, "active deletion fixture resume", 90_000)
+		assert(resumedRegistration !== null, "C05 active deletion fixture did not resume")
 		assert(!existsSync(orphanDir) && command([REAL_GIT, "show-ref", "--verify", orphanBranch], { cwd: repos.target, allowFail: true }).exitCode !== 0, "C07 orphan repair failed"); command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target }); command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
 		assert(lifecycleRows.every((row) => closureRows(daemon.root, lifecycle).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
 		event("C07.pass", { eventKinds: [...reconcileKinds, "registration-mismatch"], bytes: reconcile.length + registrationReconcile.length, registrationClosureId: registrationRow.closure_id })
@@ -523,31 +535,46 @@ async function main(): Promise<void> {
 		assert(JSON.stringify(resourceStatesBefore) === JSON.stringify(resourceStatesAfter), "C10 tracking/config churn mutated saved base, HEAD, index, or WIP")
 		command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target })
 		command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
+		const detachedResource = directResources[0]
+		if (detachedResource === undefined || typeof detachedResource === "string") fail("expected detached cleanup resource")
+		command([REAL_GIT, "switch", "-q", "--detach"], { cwd: detachedResource.worktreePath })
+		writeFileSync(resolve(detachedResource.worktreePath, ".issue560-detached-wip"), "detached cleanup must preserve this file\n")
+		const [detachedCleanup] = await cleanupSchedulerChainWorktrees([{ chainName: directChain.name, repoCwd: repos.target, closure: { ...contexts[0]!.existing, lifecycle: "consumed", worktreePath: detachedResource.worktreePath, branchName: detachedResource.branchName }, loopDataRootOptions: { loopDataRoot: daemon.root } }])
+		assert(detachedCleanup?.error?.includes("is detached instead of registered to expected branch") === true, "C05 detached registration cleanup was not rejected")
+		assert(existsSync(resolve(detachedResource.worktreePath, ".issue560-detached-wip")), "C05 detached registration cleanup removed WIP")
+		assert(command([REAL_GIT, "show-ref", "--verify", detachedResource.branchName], { cwd: repos.target, allowFail: true }).exitCode === 0, "C05 detached registration cleanup removed the expected branch")
+		command([REAL_GIT, "switch", "-q", detachedResource.branchName.replace(/^refs\/heads\//, "")], { cwd: detachedResource.worktreePath })
 		for (let index = 0; index < directResources.length; index += 1) {
 			const resource = directResources[index]!; if (typeof resource === "string") fail("expected typed direct resources")
 			await cleanupSchedulerChainWorktrees([{ chainName: directChain.name, repoCwd: repos.target, closure: { ...contexts[index]!.existing, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName }, loopDataRootOptions: { loopDataRoot: daemon.root } }])
 		}
 		assert(!readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").includes("gc"), "C10 explicit gc observed")
-		event("C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, driftKinds: driftFindings.map((finding) => finding.mismatch.kind), resourceStates: resourceStatesAfter })
+		event("C05.C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, driftKinds: driftFindings.map((finding) => finding.mismatch.kind), detachedCleanupRejected: true, resourceStates: resourceStatesAfter })
 
-		// C05/C07 cleanup recovery: an unavailable repository makes deletion incomplete.
-		// The daemon retains the stopped chain's runtime and resource identity, then
-		// completes deletion after the exact repository path is restored.
+		// C05/C07 cleanup recovery: deletion first seals the active chain against
+		// resume, then an unavailable repository leaves only runtime cleanup retryable.
 		const unavailableTarget = `${repos.target}-unavailable`
 		const registrationChainRoot = resolve(daemon.root, "chains", registration)
+		const registrationAttemptsBeforeDelete = observations(shims.runnerLog).filter((row) => row.chain === registration).length
 		renameSync(repos.target, unavailableTarget)
 		try {
 			const incompleteDelete = command(["bun", LOOP_ENTRY, "chain", "delete", registration, "--loop-data-root", daemon.root, "--json"], { env, allowFail: true })
 			assert(incompleteDelete.exitCode !== 0 && `${incompleteDelete.stdout}\n${incompleteDelete.stderr}`.includes("runtime_cleanup_incomplete"), "C05/C07 unavailable-repository delete did not return runtime_cleanup_incomplete")
-			assert(chainStatus(daemon.root, registration) === "stopped", "C05/C07 incomplete delete changed chain status")
+			assert(chainStatus(daemon.root, registration) === "deleted", "C05/C07 incomplete delete did not seal the chain")
 			assert(existsSync(registrationChainRoot) && existsSync(registrationRow.worktree_path), "C05/C07 incomplete delete destroyed recovery state")
+			const retainedRegistration = closureRows(daemon.root, registration).find((row) => row.closure_id === registrationRow.closure_id)
+			assert(retainedRegistration?.lifecycle === "consumed" && retainedRegistration.worktree_path === registrationRow.worktree_path && retainedRegistration.branch_name === registrationRow.branch_name, "C05/C07 incomplete delete lost consumed resource identity")
+			for (let index = 0; index < 3; index += 1) command(["bun", LOOP_ENTRY, "daemon", "status", repos.target, "--json", "--loop-data-root", daemon.root], { env, allowFail: true })
+			assert(observations(shims.runnerLog).filter((row) => row.chain === registration).length === registrationAttemptsBeforeDelete, "C05 incomplete delete respawned the deleted chain")
 		} finally {
 			if (existsSync(unavailableTarget) && !existsSync(repos.target)) renameSync(unavailableTarget, repos.target)
 		}
-		deleteChain(daemon, registration)
+		const retriedDelete = command(["bun", LOOP_ENTRY, "chain", "delete", registration, "--loop-data-root", daemon.root, "--json"], { env })
+		const retriedDeleteBody = record(JSON.parse(retriedDelete.stdout), "retried chain deletion")
+		assert(retriedDeleteBody.alreadyDeleted === true, "C05/C07 cleanup retry did not use the already-deleted path")
 		assert(chainStatus(daemon.root, registration) === "deleted" && !existsSync(registrationChainRoot), "C05/C07 delete retry did not remove the restored runtime")
 		assert(command([REAL_GIT, "show-ref", "--verify", "--quiet", registrationRow.branch_name], { cwd: repos.target, allowFail: true }).exitCode === 1, "C05/C07 delete retry retained the closure branch")
-		event("C05.C07.delete-retry.pass", { chain: registration, firstError: "runtime_cleanup_incomplete", retryStatus: "deleted", chainRootRemoved: true })
+		event("C05.C07.delete-retry.pass", { chain: registration, firstError: "runtime_cleanup_incomplete", firstStatus: "deleted", retryAlreadyDeleted: true, chainRootRemoved: true })
 
 		for (const chain of chains) deleteChain(daemon, chain)
 		await stopDaemon(daemon)

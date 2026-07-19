@@ -60,6 +60,47 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("v16 reachability seeds migrate to explicit future-writer target variants", async () => {
+		const fixture = await openTestStore("v16-reachability-seeds")
+		const chain = createFullChain(fixture.store)
+		const item = createFullItem(fixture.store, chain)
+		fixture.store.createTaskTree(chain.id, singleLeafTree(item))
+		const tree = fixture.store.getTaskTree(chain.id)
+		if (tree?.root.kind !== "leaf") throw new Error("expected single migrated leaf")
+		const closureId = tree.root.closure.closureId
+		fixture.store.close()
+
+		const legacy = new Database(fixture.dbFile)
+		try {
+			legacy.exec("PRAGMA foreign_keys=OFF")
+			legacy.exec(`
+				CREATE TABLE closure_reachability_seeds_v16 (
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
+					kind TEXT NOT NULL CHECK (kind IN ('open-append')),
+					PRIMARY KEY (chain_id, closure_id, kind)
+				);
+				INSERT INTO closure_reachability_seeds_v16 (chain_id, closure_id, kind)
+					VALUES (${chain.id}, '${closureId}', 'open-append');
+				DROP TABLE closure_reachability_seeds;
+				ALTER TABLE closure_reachability_seeds_v16 RENAME TO closure_reachability_seeds;
+				PRAGMA user_version=16;
+			`)
+		} finally { legacy.close() }
+
+		openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }).close()
+		const migrated = new Database(fixture.dbFile)
+		try {
+			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16)
+			migrated.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,'decided-reopen'),($chain,$closure,'next-epoch-candidate')").run({ $chain: chain.id, $closure: closureId })
+			expect(migrated.query<{ kind: string }, []>("SELECT kind FROM closure_reachability_seeds ORDER BY kind").all().map((row) => row.kind)).toEqual([
+				"decided-reopen",
+				"next-epoch-candidate",
+				"open-append",
+			])
+		} finally { migrated.close() }
+	})
+
 	test("existing task root materializes every phase for a newly encountered item with stable identities", async () => {
 		const { store, dbFile } = await openTestStore("existing-root-full-item-definition")
 		const chain = createFullChain(store)

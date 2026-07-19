@@ -439,7 +439,7 @@ const JoinBindingValueRowBoundary = arkType({ version: "number.integer>=1", join
 const JoinBindingRowBoundary = arkType({ par_node_id: "string>0", version: "number.integer>=1", join_kind: "'drain'|'validator'", candidate_definition_kind: "'preset'|'chain'|null", candidate_definition_content_identity: "string|null", candidate_id: "string|null", author_kind: "string>0", author_id: "string>0", authority_class: "string>0", effective_from_epoch: "number.integer>=0", created_at: "number", "+": "reject" })
 const JoinEvaluationValueRowBoundary = arkType({ epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'", "+": "reject" })
 const JoinEvaluationRowBoundary = arkType({ par_node_id: "string>0", epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'", "+": "reject" })
-const ClosureReachabilitySeedRowBoundary = arkType({ closure_id: "string>0", kind: "'open-append'", "+": "reject" })
+const ClosureReachabilitySeedRowBoundary = arkType({ closure_id: "string>0", kind: "'open-append'|'decided-reopen'|'next-epoch-candidate'", "+": "reject" })
 const ClosureReachabilityEdgeRowBoundary = arkType({ from_closure_id: "string>0", to_closure_id: "string>0", kind: "'resume'|'scope-target'", "+": "reject" })
 const ClosureLeafRowBoundary = arkType({ leaf_node_id: "string>0", "+": "reject" })
 const ActiveRunAssociationRowBoundary = arkType({ lifecycle: "'active'|'suspended'|'consumed'", phase: "string>0", chain_id: "number.integer", "+": "reject" })
@@ -699,7 +699,7 @@ CREATE TABLE IF NOT EXISTS task_join_evaluation_bindings (
 CREATE TABLE IF NOT EXISTS closure_reachability_seeds (
 	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
 	closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
-	kind TEXT NOT NULL CHECK (kind IN ('open-append')),
+	kind TEXT NOT NULL CHECK (kind IN ('open-append','decided-reopen','next-epoch-candidate')),
 	PRIMARY KEY (chain_id, closure_id, kind)
 );
 CREATE TABLE IF NOT EXISTS closure_reachability_edges (
@@ -855,6 +855,11 @@ function closureReachabilitySchemaExists(db: Database): boolean {
 	`).get()?.table_count ?? 0) === 2
 }
 
+function closureReachabilitySeedsAllowFutureWriterTargets(db: Database): boolean {
+	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'closure_reachability_seeds'").get()?.sql ?? ""
+	return sql.includes("'decided-reopen'") && sql.includes("'next-epoch-candidate'")
+}
+
 function readUserVersion(db: Database): number {
 	return db.query<UserVersionRow, []>("PRAGMA user_version").get()?.user_version ?? 0
 }
@@ -928,12 +933,14 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 	const needsLegacyRuntimeMigration = stateSchemaExists(db) && !v3RuntimeSchemaExists(db)
 	const needsV14ItemSourceRetire = stateSchemaExists(db) && itemsTableHasColumn(db, "session_ids")
 	const needsRunIdentityMigration = stateSchemaExists(db) && (!runsTableHasColumn(db, "closure_id") || !runsTableHasColumn(db, "runtime_node_id"))
+	const needsClosureReachabilitySeedRebuild = closureReachabilitySchemaExists(db) && !closureReachabilitySeedsAllowFutureWriterTargets(db)
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
 		&& contextEntriesTableExists(db)
 		&& v3RuntimeSchemaExists(db)
 		&& closureReachabilitySchemaExists(db)
+		&& !needsClosureReachabilitySeedRebuild
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& !needsItemTableRebuildForOpencodeCheck
@@ -948,13 +955,14 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 		&& runsTableHasColumn(db, "closure_id")
 		&& runsTableHasColumn(db, "runtime_node_id")
 	) return
-	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration || needsClosureReachabilitySeedRebuild) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
 			if (!runsTableHasColumn(db, "closure_id")) db.exec("ALTER TABLE runs ADD COLUMN closure_id TEXT")
 			if (!runsTableHasColumn(db, "runtime_node_id")) db.exec("ALTER TABLE runs ADD COLUMN runtime_node_id TEXT")
 			db.exec(V3_RUNTIME_SCHEMA_SQL)
+			if (needsClosureReachabilitySeedRebuild) rebuildClosureReachabilitySeedsForTargetKinds(db)
 			if (needsChainTableRebuild) {
 				// v10 → v11 (#457): copy any non-null `chains.umbrella_issue` / `umbrella_repo` values
 				// into the chain's metadata.bindings (umbrellaIssue / umbrellaRepo) before the rebuild
@@ -1037,8 +1045,23 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration || needsClosureReachabilitySeedRebuild) db.exec("PRAGMA foreign_keys = ON")
 	}
+}
+
+function rebuildClosureReachabilitySeedsForTargetKinds(db: Database): void {
+	db.exec(`
+		CREATE TABLE closure_reachability_seeds_target_kinds (
+			chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+			closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK (kind IN ('open-append','decided-reopen','next-epoch-candidate')),
+			PRIMARY KEY (chain_id, closure_id, kind)
+		);
+		INSERT INTO closure_reachability_seeds_target_kinds (chain_id, closure_id, kind)
+			SELECT chain_id, closure_id, kind FROM closure_reachability_seeds;
+		DROP TABLE closure_reachability_seeds;
+		ALTER TABLE closure_reachability_seeds_target_kinds RENAME TO closure_reachability_seeds;
+	`)
 }
 
 function migrateRunIdentity(db: Database): void {

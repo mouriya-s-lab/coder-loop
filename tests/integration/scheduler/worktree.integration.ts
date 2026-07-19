@@ -435,6 +435,38 @@ test("consumed cleanup rejects persisted resources outside the closure-derived e
 	expect(git(repoCwd, ["show-ref", "--verify", "refs/heads/foreign-branch"]).exitCode).toBe(0)
 })
 
+test("consumed cleanup rejects a detached registration at the owned closure path", async () => {
+	const root = resolve(TEST_ROOT, "cleanup-detached-registration")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "cleanup-detached-registration-chain")
+		const item = makeItem(store, chain, "cleanup-detached-registration", repoCwd)
+		const closureId = "closure:cleanup-detached:iteration"
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const resources = await manager({ chain, item, phase: "iteration", closureId, repoCwd, slotKey: "slot", existing: null })
+		if (typeof resources === "string") throw new Error("expected closure resources")
+		const closure = { closureId, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
+		await writeFile(resolve(resources.worktreePath, "detached-wip.txt"), "must survive\n")
+		expect(git(resources.worktreePath, ["switch", "--detach"]).exitCode).toBe(0)
+
+		const [rejected] = await cleanupSchedulerChainWorktrees([{ chainName: chain.name, repoCwd, closure, loopDataRootOptions: { loopDataRoot } }])
+
+		expect(rejected).toMatchObject({ registered: true, removed: false, directoryRemoved: false, pruned: false })
+		expect(rejected?.error).toContain("is detached instead of registered to expected branch")
+		expect(existsSync(resolve(resources.worktreePath, "detached-wip.txt"))).toBe(true)
+		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).toContain(resources.worktreePath)
+		expect(git(repoCwd, ["show-ref", "--verify", resources.branchName]).exitCode).toBe(0)
+
+		expect(git(resources.worktreePath, ["switch", resources.branchName.replace(/^refs\/heads\//, "")]).exitCode).toBe(0)
+		const [cleaned] = await cleanupSchedulerChainWorktrees([{ chainName: chain.name, repoCwd, closure, loopDataRootOptions: { loopDataRoot } }])
+		expect(cleaned?.error).toBeNull()
+	} finally { store.close() }
+})
+
 test("consumed cleanup removes an owned prunable registration after its directory disappears", async () => {
 	const root = resolve(TEST_ROOT, "cleanup-prunable-registration")
 	const repoCwd = resolve(root, "repo")

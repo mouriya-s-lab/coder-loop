@@ -2506,19 +2506,23 @@ export class CoderLoopDaemon {
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
 		if (chain.status === "deleted") {
-			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
-			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
-			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
-			return { chain: chainToJson(chain), alreadyDeleted: true, invalidatedContextAppendSessions, deletedContextEntries }
-		}
-		const resumeScheduler = await this.pauseSchedulerForMutation()
-		try {
-			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
 			if (cleanup.kind === "incomplete") {
 				throw new DaemonError("runtime_cleanup_incomplete", `chain ${chain.name} runtime cleanup is incomplete and can be retried`, cleanup.details)
 			}
+			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
+			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
+			return { chain: chainToJson(chain), alreadyDeleted: true, cleanup: cleanup.details, invalidatedContextAppendSessions, deletedContextEntries }
+		}
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			const cleanup = await this.cleanupChainRuntime(updated)
+			if (cleanup.kind === "incomplete") {
+				throw new DaemonError("runtime_cleanup_incomplete", `chain ${chain.name} runtime cleanup is incomplete and can be retried`, cleanup.details)
+			}
 			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
 			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })

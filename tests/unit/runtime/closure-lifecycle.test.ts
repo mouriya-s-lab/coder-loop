@@ -9,9 +9,11 @@ import {
 	closureWorktreePath,
 	computeClosureReachability,
 	createRepositoryGitCoordinator,
+	persistedClosureReachabilityModel,
 	persistedParPin,
 	type ClosureReachabilityModel,
 } from "../../../src/closure-lifecycle"
+import type { TaskNodeSnapshot, TaskTreeSnapshot } from "../../../src/task-runtime"
 
 const TEST_ROOT = resolve(import.meta.dir, "../../../.coder-loop/runtime/evidence/closure-lifecycle-tests", String(process.pid))
 
@@ -41,6 +43,77 @@ describe("closure reachability fixed point", () => {
 			edges: [],
 		}
 		expect(computeClosureReachability(model)).toEqual(new Set(["append-target", "join-target"]))
+	})
+
+	test("completed par decisions and newer bindings do not seed every descendant", () => {
+		const definitionRef = { kind: "chain", contentIdentity: "sha256:targeted-par" } as const
+		const leaf = (id: string): TaskNodeSnapshot => ({
+			kind: "leaf",
+			identity: { runtimeNodeId: `leaf-${id}`, definitionRef, definitionNodeId: id },
+			closure: {
+				closureId: `closure-${id}`,
+				itemRowId: id === "target" ? 1 : 2,
+				itemId: id,
+				phase: "iteration",
+				lifecycle: "suspended",
+				worktreePath: `/worktrees/${id}`,
+				branchName: `refs/heads/${id}`,
+				baseCommit: "0123456789abcdef",
+				sourceParNodeId: "par-targeted",
+				sessions: [],
+			},
+		})
+		const tree: TaskTreeSnapshot = {
+			root: {
+				kind: "par",
+				identity: { runtimeNodeId: "par-targeted", definitionRef, definitionNodeId: "par" },
+				groupId: "par-targeted",
+				pinCommit: "0123456789abcdef",
+				state: "completed",
+				reopen: { count: 1, budgetRef: "chain.maxReopens" },
+				join: { currentVersion: 2, value: { kind: "drain" }, evaluation: { kind: "decided", epoch: 1, bindingVersion: 1 } },
+				children: [leaf("target"), leaf("sibling")],
+			},
+			activeRuns: [],
+		}
+
+		const model = persistedClosureReachabilityModel(tree, new Set([1, 2]))
+
+		expect(model.seeds).toEqual([])
+		expect(computeClosureReachability(model)).toEqual(new Set())
+	})
+
+	test("open par structure still protects every live descendant", () => {
+		const definitionRef = { kind: "chain", contentIdentity: "sha256:open-par" } as const
+		const closure = {
+			closureId: "closure-open",
+			itemRowId: 1,
+			itemId: "open",
+			phase: "iteration",
+			lifecycle: "suspended",
+			worktreePath: "/worktrees/open",
+			branchName: "refs/heads/open",
+			baseCommit: "0123456789abcdef",
+			sourceParNodeId: "par-open",
+			sessions: [],
+		} as const
+		const tree: TaskTreeSnapshot = {
+			root: {
+				kind: "par",
+				identity: { runtimeNodeId: "par-open", definitionRef, definitionNodeId: "par" },
+				groupId: "par-open",
+				pinCommit: closure.baseCommit,
+				state: "open",
+				reopen: { count: 0, budgetRef: "chain.maxReopens" },
+				join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } },
+				children: [{ kind: "leaf", identity: { runtimeNodeId: "leaf-open", definitionRef, definitionNodeId: "open" }, closure }],
+			},
+			activeRuns: [],
+		}
+
+		expect(persistedClosureReachabilityModel(tree, new Set([1])).seeds).toEqual([
+			{ kind: "open-par-epoch", closureId: closure.closureId },
+		])
 	})
 })
 
