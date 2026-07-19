@@ -216,15 +216,18 @@ export type SchedulerSpawnContext = {
 	phase: string
 }
 
-export type SchedulerWorktreeContext = {
+type SchedulerWorktreeContextBase = {
 	chain: ChainRecord
 	item: ItemRecord
 	phase: string
 	closureId: string
 	repoCwd: string
 	slotKey: string
-	existing: ClosureSnapshot | null
 }
+
+export type SchedulerWorktreeContext =
+	| SchedulerWorktreeContextBase & { resourceState: "first-open"; existing: ClosureSnapshot | null }
+	| SchedulerWorktreeContextBase & { resourceState: "reopen"; existing: ClosureSnapshot }
 
 export type SchedulerClosureResources = {
 	worktreePath: string
@@ -880,19 +883,24 @@ export function createGitWorktreeManager(
 		const loopDataRoot = resolveLoopDataPaths(options).root
 		const expectedWorktreePath = closureWorktreePath(loopDataRoot, context.chain.name, context.repoCwd, context.closureId)
 		const expectedBranchName = closureBranchName(context.chain.name, context.closureId)
-		// Compatibility provisioning materializes every phase closure from the first run
-		// packet and therefore may have copied that first closure's resource tuple into
-		// unopened siblings. Only a tuple derived from this closure identity is retainable.
-		const worktreePath = context.existing?.worktreePath === expectedWorktreePath
-			? context.existing.worktreePath
-			: expectedWorktreePath
-		const branchName = context.existing?.branchName === expectedBranchName
-			? context.existing.branchName
-			: expectedBranchName
+		// Compatibility provisioning can copy a legacy slot tuple into every declared
+		// phase closure. Durable phase-run history distinguishes a real reopen from an
+		// unopened sibling; tuple equality cannot, because migrated resources predate the
+		// deterministic per-closure namespace and must remain byte-identical on reopen.
+		const retainedResources = context.resourceState === "first-open"
+			? null
+			: context.existing.worktreePath === null || context.existing.branchName === null
+				? null
+				: { worktreePath: context.existing.worktreePath, branchName: context.existing.branchName, baseCommit: context.existing.baseCommit }
+		if (context.resourceState === "reopen" && retainedResources === null) {
+			throw new SchedulerError("worktree_create_failed", `persisted closure ${context.closureId} cannot reopen without its resource tuple`)
+		}
+		const worktreePath = retainedResources?.worktreePath ?? expectedWorktreePath
+		const branchName = retainedResources?.branchName ?? expectedBranchName
 		const parPin = persistedParPin(context.existing)
-		const retainedBase = context.existing?.worktreePath === expectedWorktreePath && context.existing.branchName === expectedBranchName
-			? { commit: context.existing.baseCommit, freshness: { kind: "retained", commit: context.existing.baseCommit } as const }
-			: null
+		const retainedBase = retainedResources === null
+			? null
+			: { commit: retainedResources.baseCommit, freshness: { kind: "retained", commit: retainedResources.baseCommit } as const }
 		const base: RepositoryGitSingleflightResult = parPin !== null
 			? { commit: parPin, freshness: { kind: "retained", commit: parPin } }
 			: retainedBase ?? await coordinator.singleflight(
@@ -909,7 +917,8 @@ export function createGitWorktreeManager(
 					throw new SchedulerError("worktree_create_failed", `persisted closure worktree registration is missing for ${context.closureId}: ${worktreePath}`)
 				}
 				const registeredBranch = gitWorktreeBranchForPath(listed.stdout, worktreePath)
-				if (registeredBranch !== branchName) {
+				const persistedBranchRef = branchName.startsWith("refs/") ? branchName : `refs/heads/${branchName}`
+				if (registeredBranch !== persistedBranchRef) {
 					throw new SchedulerError("worktree_create_failed", `closure worktree ${worktreePath} is registered to unexpected branch ${registeredBranch ?? "(detached)"}; expected ${branchName}`)
 				}
 				if (!existsSync(worktreePath)) {
@@ -1567,7 +1576,10 @@ async function spawnSchedulerRun(
 		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
-		const managed = await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, existing: existingClosure })
+		const hasRecordedPhaseRun = options.store.listRuns(chain.id).some((run) => run.itemId === item.id && run.phase === phase)
+		const managed = existingClosure !== null && hasRecordedPhaseRun
+			? await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, resourceState: "reopen", existing: existingClosure })
+			: await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, resourceState: "first-open", existing: existingClosure })
 		const resources = typeof managed === "string"
 			? {
 				worktreePath: managed,

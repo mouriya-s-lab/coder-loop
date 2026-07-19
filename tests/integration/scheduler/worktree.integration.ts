@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, resolve } from "node:path"
@@ -114,14 +114,14 @@ test("killed-run slot worktree holding the slot branch is self-healed from a new
 		const chainA = makeChain(storeA, "wedge-chain")
 		const itemA = makeItem(storeA, chainA, "a")
 		const managerA = createGitWorktreeManager({ loopDataRoot: rootA })
-		const resourceA = await managerA({ chain: chainA, item: itemA, phase: "iteration", closureId: "closure:a:iteration", repoCwd, slotKey: "slot-a", existing: null })
+		const resourceA = await managerA({ chain: chainA, item: itemA, phase: "iteration", closureId: "closure:a:iteration", repoCwd, slotKey: "slot-a", resourceState: "first-open", existing: null })
 		if (typeof resourceA === "string") throw new Error("expected closure resources")
 		expect(existsSync(resourceA.worktreePath)).toBe(true)
 
 		const chainB = makeChain(storeB, "wedge-chain")
 		const itemB = makeItem(storeB, chainB, "a")
 		const managerB = createGitWorktreeManager({ loopDataRoot: rootB })
-		const resourceB = await managerB({ chain: chainB, item: itemB, phase: "iteration", closureId: "closure:a:iteration", repoCwd, slotKey: "slot-b", existing: null })
+		const resourceB = await managerB({ chain: chainB, item: itemB, phase: "iteration", closureId: "closure:a:iteration", repoCwd, slotKey: "slot-b", resourceState: "first-open", existing: null })
 		if (typeof resourceB === "string") throw new Error("expected closure resources")
 		expect(resourceB.worktreePath).toBe(closureWorktreePath(rootB, chainB.name, repoCwd, "closure:a:iteration"))
 		expect(resourceB.worktreePath).not.toBe(resourceA.worktreePath)
@@ -150,7 +150,7 @@ test("reconciliation compares repository Git config with its captured baseline",
 		const chain = makeChain(store, "repository-contract-chain")
 		const item = makeItem(store, chain, "contract", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		await manager({ chain, item, phase: "iteration", closureId: "closure:contract:iteration", repoCwd, slotKey: "slot", existing: null })
+		await manager({ chain, item, phase: "iteration", closureId: "closure:contract:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		const baseline = await reconcileClosureResources({ chain, items: [item], tree: null, loopDataRootOptions: { loopDataRoot }, store })
 		expect(baseline.filter((finding) => finding.mismatch.kind === "hooks-drift" || finding.mismatch.kind === "repo-config-drift")).toEqual([])
 		expect(git(repoCwd, ["config", "core.hooksPath", ".changed-hooks"]).exitCode).toBe(0)
@@ -185,8 +185,8 @@ test("concurrent closure opens share the scheduler's origin fetch", async () => 
 		}
 		const manager = createGitWorktreeManager({ loopDataRoot }, coordinator)
 		const [first, second] = await Promise.all([
-			manager({ chain, item: firstItem, phase: "iteration", closureId: "closure:first:iteration", repoCwd, slotKey: "slot", existing: null }),
-			manager({ chain, item: secondItem, phase: "iteration", closureId: "closure:second:iteration", repoCwd, slotKey: "slot", existing: null }),
+			manager({ chain, item: firstItem, phase: "iteration", closureId: "closure:first:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null }),
+			manager({ chain, item: secondItem, phase: "iteration", closureId: "closure:second:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null }),
 		])
 		if (typeof first === "string" || typeof second === "string") throw new Error("expected closure resources")
 		expect(fetchExecutions).toBe(1)
@@ -208,12 +208,12 @@ test("worktree registered but directory missing is pruned and recreated", async 
 		const chain = makeChain(store, "missing-dir-chain")
 		const item = makeItem(store, chain, "missing")
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resource = await manager({ chain, item, phase: "iteration", closureId: "closure:missing:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resource = await manager({ chain, item, phase: "iteration", closureId: "closure:missing:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resource === "string") throw new Error("expected closure resources")
 		await rm(resource.worktreePath, { recursive: true, force: true })
 		// Registration survives the directory deletion. With no persisted closure tuple this
 		// is still a first-open/stale-registration repair, not a reopen.
-		const recreated = await manager({ chain, item, phase: "iteration", closureId: "closure:missing:iteration", repoCwd, slotKey: "slot", existing: null })
+		const recreated = await manager({ chain, item, phase: "iteration", closureId: "closure:missing:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof recreated === "string") throw new Error("expected closure resources")
 		expect(recreated.worktreePath).toBe(resource.worktreePath)
 		expect(existsSync(recreated.worktreePath)).toBe(true)
@@ -233,13 +233,13 @@ test("reopen rejects a persisted worktree whose directory is missing without mut
 		const chain = makeChain(store, "reopen-missing-dir-chain")
 		const item = makeItem(store, chain, "reopen-missing-dir", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reopen-missing-dir:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reopen-missing-dir:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		await rm(resources.worktreePath, { recursive: true, force: true })
 		const registrationBefore = git(repoCwd, ["worktree", "list", "--porcelain"]).stdout
 		const existing = { closureId: "closure:reopen-missing-dir:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "suspended", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
 
-		await expect(manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", existing })).rejects.toThrow("persisted closure worktree is missing")
+		await expect(manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", resourceState: "reopen", existing })).rejects.toThrow("persisted closure worktree is missing")
 
 		expect(existsSync(resources.worktreePath)).toBe(false)
 		expect(git(repoCwd, ["worktree", "list", "--porcelain"]).stdout).toBe(registrationBefore)
@@ -258,16 +258,129 @@ test("reopen rejects a persisted worktree registered to another branch without m
 		const chain = makeChain(store, "reopen-registration-mismatch-chain")
 		const item = makeItem(store, chain, "reopen-registration-mismatch", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reopen-registration-mismatch:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reopen-registration-mismatch:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		await writeFile(resolve(resources.worktreePath, ".reopen-wip"), "must survive\n")
 		expect(git(resources.worktreePath, ["switch", "-c", "foreign-reopen-branch"]).exitCode).toBe(0)
 		const existing = { closureId: "closure:reopen-registration-mismatch:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "suspended", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
 
-		await expect(manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", existing })).rejects.toThrow("registered to unexpected branch")
+		await expect(manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", resourceState: "reopen", existing })).rejects.toThrow("registered to unexpected branch")
 
 		expect(git(resources.worktreePath, ["symbolic-ref", "HEAD"]).stdout.trim()).toBe("refs/heads/foreign-reopen-branch")
 		expect(await Bun.file(resolve(resources.worktreePath, ".reopen-wip")).text()).toBe("must survive\n")
+	} finally { store.close() }
+})
+
+test("reopen retains a registered noncanonical migrated closure tuple and its WIP", async () => {
+	const root = resolve(TEST_ROOT, "reopen-migrated-tuple")
+	const repoCwd = await initOriginBackedRepo(root)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reopen-migrated-tuple-chain")
+		const item = makeItem(store, chain, "reopen-migrated-tuple", repoCwd)
+		const retired = retiredResourceTuple(loopDataRoot, chain.name, repoCwd)
+		const historicalBranch = "historical-migrated-candidate"
+		expect(git(repoCwd, ["worktree", "add", "-b", historicalBranch, retired.worktreePath, "origin/main"]).exitCode).toBe(0)
+		const registration = git(repoCwd, ["worktree", "list", "--porcelain"]).stdout
+		expect(registration).toContain(`worktree ${retired.worktreePath}`)
+		expect(registration).toContain(`branch refs/heads/${historicalBranch}`)
+		await writeFile(resolve(retired.worktreePath, ".migrated-wip"), "must survive migrated reopen\n")
+		const baseCommit = git(retired.worktreePath, ["rev-parse", "HEAD"]).stdout.trim()
+		const existing = {
+			closureId: `legacy-v13:closure:${item.id}:iteration`,
+			itemRowId: item.id,
+			itemId: item.itemId,
+			phase: "iteration",
+			lifecycle: "suspended",
+			worktreePath: retired.worktreePath,
+			branchName: historicalBranch,
+			baseCommit,
+			sourceParNodeId: null,
+			sessions: [{ runner: "codex", sessionId: "migrated-session" }],
+		} as const
+
+		const reopened = await createGitWorktreeManager({ loopDataRoot })({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", resourceState: "reopen", existing })
+		if (typeof reopened === "string") throw new Error("expected closure resources")
+
+		expect(reopened).toMatchObject({ worktreePath: retired.worktreePath, branchName: historicalBranch, baseCommit })
+		expect(await Bun.file(resolve(retired.worktreePath, ".migrated-wip")).text()).toBe("must survive migrated reopen\n")
+		expect(git(retired.worktreePath, ["symbolic-ref", "HEAD"]).stdout.trim()).toBe(`refs/heads/${historicalBranch}`)
+
+		const unopenedSibling = { ...existing, closureId: `legacy-v13:closure:${item.id}:review`, phase: "review", sessions: [] } as const
+		const firstOpened = await createGitWorktreeManager({ loopDataRoot })({ chain, item, phase: "review", closureId: unopenedSibling.closureId, repoCwd, slotKey: "slot", resourceState: "first-open", existing: unopenedSibling })
+		if (typeof firstOpened === "string") throw new Error("expected closure resources")
+		expect(firstOpened.worktreePath).toBe(closureWorktreePath(loopDataRoot, chain.name, repoCwd, unopenedSibling.closureId))
+		expect(firstOpened.worktreePath).not.toBe(retired.worktreePath)
+		expect(firstOpened.branchName).toBe(closureBranchName(chain.name, unopenedSibling.closureId))
+	} finally { store.close() }
+})
+
+test("scheduler run history reopens a noncanonical closure with its persisted cwd and session", async () => {
+	const root = resolve(TEST_ROOT, "scheduler-reopen-migrated-tuple")
+	const repoCwd = await initOriginBackedRepo(root)
+	const loopDataRoot = resolve(root, "loop-data")
+	const runner = resolve(root, "capture-reopened-runner.ts")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(runner, `#!/usr/bin/env bun\nawait Bun.write(".reopened-runner.cwd", process.cwd())\nawait Bun.write(".reopened-runner.argv", Bun.argv.join("\\n"))\nconsole.log(JSON.stringify({ type: "system", subtype: "init", session_id: "migrated-session" }))\n`)
+	await chmod(runner, 0o755)
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "scheduler-reopen-migrated-tuple-chain")
+		const item = makeItem(store, chain, "scheduler-reopen-migrated-tuple", repoCwd)
+		const retired = retiredResourceTuple(loopDataRoot, chain.name, repoCwd)
+		const historicalBranch = "historical-scheduler-candidate"
+		expect(git(repoCwd, ["worktree", "add", "-b", historicalBranch, retired.worktreePath, "origin/main"]).exitCode).toBe(0)
+		await writeFile(resolve(retired.worktreePath, ".scheduler-migrated-wip"), "scheduler reopen preserves this\n")
+		const baseCommit = git(retired.worktreePath, ["rev-parse", "HEAD"]).stdout.trim()
+		const closure = {
+			closureId: `legacy-v13:closure:${item.id}:iteration`,
+			itemRowId: item.id,
+			itemId: item.itemId,
+			phase: "iteration",
+			lifecycle: "suspended",
+			worktreePath: retired.worktreePath,
+			branchName: historicalBranch,
+			baseCommit,
+			sourceParNodeId: null,
+			sessions: [{ runner: "claude", sessionId: "migrated-session" }],
+		} as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${item.id}:phase:iteration`, definitionRef: { kind: "preset", contentIdentity: "sha256:migrated-reopen" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
+		store.recordRun({ runId: "historical-migrated-iteration", chainId: chain.id, itemId: item.id, phase: "iteration", status: runtimeStatus("changes_requested"), startedAt: 1_900_000_010, endedAt: 1_900_000_011, exitCode: 0 })
+		const observedResourceStates: ("first-open" | "reopen")[] = []
+		const events: SchedulerEvent[] = []
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const options: SchedulerOptions = {
+			store,
+			state: createSchedulerState(),
+			presetForChain: () => LOADED_PRESET,
+			phase: "iteration",
+			runner: { kind: "claude", source: "iteration-default", binary: runner, extraArgs: [], model: null },
+			worktreeManager: async (context) => {
+				observedResourceStates.push(context.resourceState)
+				return await manager(context)
+			},
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: () => "reopened-migrated-iteration",
+			prompt: "reopen migrated closure",
+			onEvent: (event) => { events.push(event) },
+		}
+
+		const tick = await schedulerTick(options)
+		expect(tick.spawnedRuns).toHaveLength(1)
+		const closed = await tick.spawnedRuns[0]!.closed
+		expect(closed.exitCode).toBe(0)
+		expect(events.filter((event) => event.type === "agent.exit")).toHaveLength(1)
+		const runnerCwd = await Bun.file(resolve(retired.worktreePath, ".reopened-runner.cwd")).text()
+		const runnerArgv = (await Bun.file(resolve(retired.worktreePath, ".reopened-runner.argv")).text()).split("\n")
+
+		expect(observedResourceStates).toEqual(["reopen"])
+		expect(runnerCwd).toBe(retired.worktreePath)
+		expect(runnerArgv).toContain("--resume")
+		expect(runnerArgv).toContain("migrated-session")
+		expect(await Bun.file(resolve(retired.worktreePath, ".scheduler-migrated-wip")).text()).toBe("scheduler reopen preserves this\n")
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { worktreePath: retired.worktreePath, branchName: historicalBranch } })
 	} finally { store.close() }
 })
 
@@ -283,8 +396,8 @@ test("startup reconciliation audits persisted worktree registration pairs withou
 		const wrongBranchItem = makeItem(store, chain, "wrong-branch", repoCwd)
 		const unregisteredItem = makeItem(store, chain, "unregistered", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const wrongBranch = await manager({ chain, item: wrongBranchItem, phase: "iteration", closureId: "closure:wrong-branch:iteration", repoCwd, slotKey: "wrong", existing: null })
-		const unregistered = await manager({ chain, item: unregisteredItem, phase: "iteration", closureId: "closure:unregistered:iteration", repoCwd, slotKey: "unregistered", existing: null })
+		const wrongBranch = await manager({ chain, item: wrongBranchItem, phase: "iteration", closureId: "closure:wrong-branch:iteration", repoCwd, slotKey: "wrong", resourceState: "first-open", existing: null })
+		const unregistered = await manager({ chain, item: unregisteredItem, phase: "iteration", closureId: "closure:unregistered:iteration", repoCwd, slotKey: "unregistered", resourceState: "first-open", existing: null })
 		if (typeof wrongBranch === "string" || typeof unregistered === "string") throw new Error("expected closure resources")
 		expect(git(wrongBranch.worktreePath, ["switch", "-c", "foreign-reconcile-branch"]).exitCode).toBe(0)
 		expect(git(repoCwd, ["worktree", "remove", "--force", unregistered.worktreePath]).exitCode).toBe(0)
@@ -324,7 +437,7 @@ test("startup reconciliation audits missing resources and repairs only orphaned 
 		const chain = makeChain(store, "reconcile-chain")
 		const item = makeItem(store, chain, "reconcile", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const definitionRef = { kind: "chain", contentIdentity: "sha256:reconcile" } as const
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile", definitionRef, definitionNodeId: "iteration" }, closure: { closureId: "closure:reconcile:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
@@ -355,7 +468,7 @@ test("startup reconciliation removes consumed worktree registrations and branche
 		const chain = makeChain(store, "reconcile-consumed-residue-chain")
 		const item = makeItem(store, chain, "reconcile-consumed", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile-consumed:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile-consumed:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const definitionRef = { kind: "chain", contentIdentity: "sha256:reconcile-consumed" } as const
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-consumed", definitionRef, definitionNodeId: "iteration" }, closure: { closureId: "closure:reconcile-consumed:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
@@ -687,7 +800,7 @@ test("consumed cleanup rejects a detached registration at the owned closure path
 		const item = makeItem(store, chain, "cleanup-detached-registration", repoCwd)
 		const closureId = "closure:cleanup-detached:iteration"
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId, repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId, repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const closure = { closureId, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
 		await writeFile(resolve(resources.worktreePath, "detached-wip.txt"), "must survive\n")
@@ -718,7 +831,7 @@ test("consumed cleanup removes an owned prunable registration after its director
 		const chain = makeChain(store, "cleanup-prunable-registration-chain")
 		const item = makeItem(store, chain, "cleanup-prunable-registration", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:cleanup-prunable:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:cleanup-prunable:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const closure = { closureId: "closure:cleanup-prunable:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-cleanup-prunable", definitionRef: { kind: "chain", contentIdentity: "sha256:cleanup-prunable" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
@@ -771,7 +884,7 @@ test("startup reconciliation removes an engine registration whose directory disa
 		const chain = makeChain(store, "reconcile-prunable-registration-chain")
 		const item = makeItem(store, chain, "reconcile-prunable-registration", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile-prunable:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile-prunable:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const closure = { closureId: "closure:reconcile-prunable:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-prunable", definitionRef: { kind: "chain", contentIdentity: "sha256:reconcile-prunable" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
@@ -796,7 +909,7 @@ test("serialized closure consumption removes only owned resources and emits evid
 		const chain = makeChain(store, "consume-resources-chain")
 		const item = makeItem(store, chain, "consume", repoCwd)
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:consume:iteration", repoCwd, slotKey: "slot", existing: null })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:consume:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const closure = { closureId: "closure:consume:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-consume", definitionRef: { kind: "chain", contentIdentity: "sha256:consume" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })

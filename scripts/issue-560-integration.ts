@@ -317,7 +317,7 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 			const chain = store.createChain({ name: `issue560-c05-${index}-${spec.kind}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", metadata: storedChainMetadata({}) })
 			const item = store.createItem({ chainId: chain.id, itemId: `c05-${index}`, repoCwd, status: runtimeStatus(spec.itemStatus), preset: PRESET, extra: storedItemExtra({}) })
 			const phase = "iteration", closureId = `closure:c05:${index}:${phase}`
-			const resource = await manager({ chain, item, phase, closureId, repoCwd, slotKey: `c05-${index}`, existing: null })
+			const resource = await manager({ chain, item, phase, closureId, repoCwd, slotKey: `c05-${index}`, resourceState: "first-open", existing: null })
 			assert(typeof resource !== "string", `C05 ${spec.kind} resource creation failed`)
 			const definitionRef = { kind: "chain", contentIdentity: `sha256:c05-${index}` } as const
 			const parCase = spec.kind === "open-par-epoch" || spec.kind === "decided-reopen" || spec.kind === "decided-unrelated-sibling" || spec.kind === "next-epoch-candidate" || spec.kind === "sealed-newer-binding"
@@ -448,7 +448,7 @@ async function main(): Promise<void> {
 		const directChain: ChainRecord = { id: 999_560, name: `issue560-direct-${id}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", status: "active", metadata: storedChainMetadata({}), createdAt: 0, updatedAt: 0 }
 		const directItem: ItemRecord = { id: 999_561, chainId: directChain.id, itemId: "direct", repoCwd: repos.target, status: runtimeStatus("queued"), phase: null, runner: null, attempts: 0, lastRunId: null, agentCwd: null, extra: storedItemExtra({}), position: 0, title: null, priority: null, sessionIds: {}, issueFile: null, evidenceDir: null, preset: null, presetPath: null, createdAt: 0, updatedAt: 0, statusUpdatedAt: 0 }
 		const gitLogBeforeSingleflight = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8")
-		const singleflightContexts = ["singleflight-a", "singleflight-b"].map((phase, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, existing: null }))
+		const singleflightContexts = ["singleflight-a", "singleflight-b"].map((phase, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, resourceState: "first-open" as const, existing: null }))
 		const singleflightResources = await Promise.all(singleflightContexts.map((context) => manager(context)))
 		const gitLogAfterSingleflight = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").slice(gitLogBeforeSingleflight.length)
 		const concurrentFetchCount = gitLogAfterSingleflight.split("\n").filter((line) => line.includes('"event":"fetch"')).length
@@ -583,7 +583,7 @@ async function main(): Promise<void> {
 			{ phase: "nested-par-member", lifecycle: "active" as const, sourceParNodeId: "par-nested", baseCommit: nestedPin },
 		]
 		const gitLogBeforePar = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8")
-		const contexts = contextSpecs.map(({ phase, lifecycle, sourceParNodeId, baseCommit }, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, existing: { closureId: `closure:direct:${phase}`, itemRowId: directItem.id + index, itemId: "direct", phase, lifecycle, worktreePath: null, branchName: null, baseCommit, sourceParNodeId, sessions: [] } }))
+		const contexts = contextSpecs.map(({ phase, lifecycle, sourceParNodeId, baseCommit }, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, resourceState: "first-open" as const, existing: { closureId: `closure:direct:${phase}`, itemRowId: directItem.id + index, itemId: "direct", phase, lifecycle, worktreePath: null, branchName: null, baseCommit, sourceParNodeId, sessions: [] } }))
 		rmSync(gitEntered, { force: true }); rmSync(gitRelease, { force: true }); writeFileSync(shims.gate, "worktree-add\n")
 		const directResourcesPromise = Promise.all(contexts.map((context) => manager(context)))
 		await until(() => existsSync(gitEntered), Boolean, "blocked worktree add")
