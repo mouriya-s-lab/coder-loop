@@ -514,7 +514,7 @@ async function main(): Promise<void> {
 		const publicationResource = directResources[1]
 		if (publicationResource === undefined || typeof publicationResource === "string") fail("expected publication resource")
 		const publishedObservation = await sampleClosureConsumptionObservation({ repoCwd: repos.target, baseBranch: "main", branchName: publicationResource.branchName, baseCommit: publicationResource.baseCommit })
-		assert(publishedObservation.evidence === "published", "C05 live origin branch was not observed as published")
+		assert(publishedObservation.evidence === "published", "C05 live origin branch publication evidence missing")
 		command([REAL_GIT, "--git-dir", repos.origin, "update-ref", "-d", publicationResource.branchName])
 		assert(command([REAL_GIT, "show-ref", "--verify", publicationResource.branchName.replace("refs/heads/", "refs/remotes/origin/")], { cwd: repos.target }).exitCode === 0, "C05 stale tracking fixture was not retained locally before sampling")
 		const deletedPublicationObservation = await sampleClosureConsumptionObservation({ repoCwd: repos.target, baseBranch: "main", branchName: publicationResource.branchName, baseCommit: publicationResource.baseCommit })
