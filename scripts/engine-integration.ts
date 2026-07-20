@@ -500,8 +500,8 @@ async function runHarness(options: HarnessOptions): Promise<number> {
 			return 1
 		}
 
-		const evidence = await assertEngineOutcome(fixtureCwd, daemon, chainName, startedAt)
 		await assertSuccessfulChainClosuresConsumed(fixtureCwd, daemon.loopDataRoot, chainName)
+		const evidence = await assertEngineOutcome(fixtureCwd, daemon, chainName, startedAt)
 		deleteChain(daemon, chainName)
 		await assertWorktreesRecycled(fixtureCwd, daemon.loopDataRoot, chainName)
 		await stopDaemon(daemon)
