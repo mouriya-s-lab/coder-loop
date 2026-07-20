@@ -191,7 +191,7 @@ export type SchedulerStore = Pick<
 	| "updateItem"
 	| "setItemSessionId"
 	| "getItemSessionId"
-	| "recordRun"
+	| "recordRunWithClosureResources"
 	| "getRunByRunId"
 	| "completeRun"
 	| "setCurrentRun"
@@ -1590,7 +1590,7 @@ async function spawnSchedulerRun(
 			: managed
 		worktreePath = resources.worktreePath
 		const branchName = resources.branchName
-		options.store.recordRun({
+		options.store.recordRunWithClosureResources({
 			runId,
 			chainId: chain.id,
 			itemId: item.id,
@@ -1614,10 +1614,11 @@ async function spawnSchedulerRun(
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 			}),
-		})
-		options.store.setClosureResources(closureId, {
+		}, {
+			closureId,
 			worktreePath: resources.worktreePath,
 			branchName: resources.branchName,
+			baseCommit: resources.baseCommit,
 			updatedAt: startedAt,
 		})
 		await emit(options, { type: "closure.resource_prepared", chainId: chain.id, itemId: item.id, phase, closureId, worktreePath, branchName, baseCommit: resources.baseCommit, freshness: resources.freshness })

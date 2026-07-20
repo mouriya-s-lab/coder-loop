@@ -60,6 +60,55 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("prepared closure resources and run history commit atomically", async () => {
+		const { store } = await openTestStore("prepared-resources-run")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			const closureId = `closure-${item.id}`
+			store.createTaskTree(chain.id, singleLeafTree(item))
+			store.recordRun({ runId: "existing-run", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_001 })
+			const prepared = {
+				closureId,
+				worktreePath: "/worktrees/prepared",
+				branchName: "coder-loop/closures/prepared",
+				baseCommit: "1234567890abcdef1234567890abcdef12345678",
+				updatedAt: 1_800_000_002,
+			} as const
+
+			expect(() => store.recordRunWithClosureResources({
+				runId: "existing-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_002,
+			}, prepared)).toThrow(SqliteStateError)
+			expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: {
+				closureId,
+				worktreePath: "/repo/coder-loop",
+				branchName: "issue-177",
+				baseCommit: "0123456789abcdef",
+			} })
+
+			const run = store.recordRunWithClosureResources({
+				runId: "prepared-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_003,
+			}, prepared)
+			expect(run.closureId).toBe(closureId)
+			expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: {
+				closureId,
+				worktreePath: prepared.worktreePath,
+				branchName: prepared.branchName,
+				baseCommit: prepared.baseCommit,
+			} })
+		} finally {
+			store.close()
+		}
+	})
+
 	test("v16 reachability seeds migrate to explicit future-writer target variants", async () => {
 		const fixture = await openTestStore("v16-reachability-seeds")
 		const chain = createFullChain(fixture.store)

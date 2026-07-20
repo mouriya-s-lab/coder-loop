@@ -275,6 +275,7 @@ export type ClosureLifecycleInput =
 	| { kind: "suspend"; updatedAt: number }
 	| { kind: "consume"; updatedAt: number }
 export type ClosureResourcesInput = { worktreePath: string | null; branchName: string | null; updatedAt: number }
+export type PreparedClosureResourcesInput = { closureId: string; worktreePath: string; branchName: string; baseCommit: string; updatedAt: number }
 export type ClosureConsumptionEvidence = "no-work" | "published" | "unpublished-discarded" | "unevaluable"
 export type ClosureConsumptionObservation = { evidence: ClosureConsumptionEvidence; freshness: OriginFreshness }
 export type ClosureConsumptionIntent = { status: "pending" | "emitted"; observation: ClosureConsumptionObservation }
@@ -324,6 +325,7 @@ export type SqliteStateStore = {
 	listDependencyWaits: (input: ListDependencyWaitsInput) => DependencyWaitReason[]
 	allItemsTerminal: (input: AllItemsTerminalInput) => boolean
 	recordRun: (input: RecordRunInput) => RunRecord
+	recordRunWithClosureResources: (input: RecordRunInput, resources: PreparedClosureResourcesInput) => RunRecord
 	getRunByRunId: (runId: string) => RunRecord | null
 	listRuns: (chainId: number) => RunRecord[]
 	completeRun: (runId: string, input: CompleteRunInput) => RunRecord
@@ -1628,6 +1630,36 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			json_set(active_runs.extra, '$.itemId', task_closures.item_row_id) AS extra
 			FROM active_runs INNER JOIN task_closures ON task_closures.closure_id = active_runs.closure_id
 			INNER JOIN runs ON runs.run_id = active_runs.run_id WHERE runs.chain_id = $chainId ORDER BY active_runs.started_at, active_runs.run_id`, { chainId }, CurrentRunRowBoundary, `active_runs for chain ${chainId}`)
+	const insertRun = (input: RecordRunInput, resources: PreparedClosureResourcesInput | null): RunRecord => {
+		const status = input.status ?? parseInternalStatus("in_progress", "runs.status")
+		const extra = input.extra ?? storedItemExtra({})
+		ensureRuntimeClosure(db, { runId: input.runId, chainId: input.chainId, itemId: input.itemId, phase: input.phase, extra })
+		const association = queryPersistedOne(db, "SELECT closure_id, leaf_node_id FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: input.itemId, phase: input.phase }, RunTaskIdentityRowBoundary, `task identity for run ${input.runId}`)
+		if (association === null) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} has no durable closure identity`, { runId: input.runId })
+		if (resources !== null) {
+			if (association.closure_id !== resources.closureId) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} resolved closure ${association.closure_id}, not prepared closure ${resources.closureId}`, { runId: input.runId, closureId: resources.closureId })
+			const closure = requireClosureById(db, resources.closureId)
+			if (closure.lifecycle === "consumed") throw new SqliteStateError("closure_lifecycle_conflict", `consumed closure ${resources.closureId} cannot accept prepared resources`, { closureId: resources.closureId })
+			db.query<never, SqlParams>("UPDATE task_closures SET worktree_path = $worktreePath, branch_name = $branchName, base_commit = $baseCommit, updated_at = $updatedAt WHERE closure_id = $closureId").run(resources)
+		}
+		const result = db.query<never, SqlParams>(`
+			INSERT INTO runs (run_id, chain_id, item_id, closure_id, runtime_node_id, phase, status, started_at, ended_at, exit_code, extra)
+			VALUES ($runId, $chainId, $itemId, $closureId, $runtimeNodeId, $phase, $status, $startedAt, $endedAt, $exitCode, $extra)
+		`).run({
+			runId: input.runId,
+			chainId: input.chainId,
+			itemId: input.itemId,
+			closureId: association.closure_id,
+			runtimeNodeId: association.leaf_node_id,
+			phase: input.phase,
+			status,
+			startedAt: input.startedAt,
+			endedAt: input.endedAt ?? null,
+			exitCode: input.exitCode ?? null,
+			extra: stringifyJsonObject(itemExtraToJsonObject(extra)),
+		})
+		return requireRun(getRunRowByRunId(input.runId), Number(result.lastInsertRowid))
+	}
 
 	return {
 		close: () => db.close(),
@@ -1870,31 +1902,9 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					.every((item) => terminal.has(item.status))
 			}),
 
-		recordRun: (input) =>
-			write("record run", () => {
-				const status = input.status ?? parseInternalStatus("in_progress", "runs.status")
-				const extra = input.extra ?? storedItemExtra({})
-				ensureRuntimeClosure(db, { runId: input.runId, chainId: input.chainId, itemId: input.itemId, phase: input.phase, extra })
-				const association = queryPersistedOne(db, "SELECT closure_id, leaf_node_id FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: input.itemId, phase: input.phase }, RunTaskIdentityRowBoundary, `task identity for run ${input.runId}`)
-				if (association === null) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} has no durable closure identity`, { runId: input.runId })
-				const result = db.query<never, SqlParams>(`
-					INSERT INTO runs (run_id, chain_id, item_id, closure_id, runtime_node_id, phase, status, started_at, ended_at, exit_code, extra)
-					VALUES ($runId, $chainId, $itemId, $closureId, $runtimeNodeId, $phase, $status, $startedAt, $endedAt, $exitCode, $extra)
-				`).run({
-					runId: input.runId,
-					chainId: input.chainId,
-					itemId: input.itemId,
-					closureId: association.closure_id,
-					runtimeNodeId: association.leaf_node_id,
-					phase: input.phase,
-					status,
-					startedAt: input.startedAt,
-					endedAt: input.endedAt ?? null,
-					exitCode: input.exitCode ?? null,
-					extra: stringifyJsonObject(itemExtraToJsonObject(extra)),
-				})
-				return requireRun(getRunRowByRunId(input.runId), Number(result.lastInsertRowid))
-			}),
+		recordRun: (input) => write("record run", () => insertRun(input, null)),
+
+		recordRunWithClosureResources: (input, resources) => write("record run with closure resources", () => insertRun(input, resources)),
 
 		getRunByRunId: (runId) => read("get run by run_id", () => rowToRun(getRunRowByRunId(runId))),
 
