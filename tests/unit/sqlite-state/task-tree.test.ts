@@ -9,6 +9,7 @@ import {
 	resolve,
 	SqliteStateError,
 	openSqliteStateStore,
+	storedChainMetadata,
 	storedItemExtra,
 	seedCanonicalHistoricalRuntime,
 	ItemRecord,
@@ -298,6 +299,32 @@ describe("sqlite state store", () => {
 				intent: { status: "emitted", observation },
 			})
 		} finally { verified.close() }
+	})
+
+	test("typed reachability facts keep closures retained and reject foreign chains", async () => {
+		const { store } = await openTestStore("typed-reachability-facts")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain, { status: "done" })
+			store.createTaskTree(chain.id, twoPhaseLeafTree(item))
+			const iterationClosure = `closure-${item.id}-iteration`
+			const reviewClosure = `closure-${item.id}-review`
+			const authority = { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] } as const
+
+			expect(store.assessClosureConsumption(iterationClosure, authority)).toMatchObject({ kind: "consumable" })
+			expect(store.assessClosureConsumption(reviewClosure, authority)).toMatchObject({ kind: "consumable" })
+
+			store.addClosureReachabilityFact(chain.id, { kind: "seed", closureId: iterationClosure, seed: "decided-reopen" })
+			store.addClosureReachabilityFact(chain.id, { kind: "seed", closureId: iterationClosure, seed: "decided-reopen" })
+			store.addClosureReachabilityFact(chain.id, { kind: "edge", edge: { kind: "scope-target", fromClosureId: iterationClosure, toClosureId: reviewClosure } })
+
+			expect(store.assessClosureConsumption(iterationClosure, authority)).toMatchObject({ kind: "retained", reason: "reachable" })
+			expect(store.assessClosureConsumption(reviewClosure, authority)).toMatchObject({ kind: "retained", reason: "reachable" })
+
+			const foreignChain = store.createChain({ name: "foreign-facts", preset: null, repository: "mouriya-s-lab/coder-loop", baseBranch: "main", status: "active", metadata: storedChainMetadata({}), createdAt: 1_800_000_000, updatedAt: 1_800_000_000 })
+			expectSqliteCode(() => store.addClosureReachabilityFact(foreignChain.id, { kind: "seed", closureId: iterationClosure, seed: "open-append" }), "run_closure_mismatch")
+			expectSqliteCode(() => store.addClosureReachabilityFact(chain.id, { kind: "seed", closureId: "closure-missing", seed: "next-epoch-candidate" }), "not_found")
+		} finally { store.close() }
 	})
 
 	test("run closure identity survives active relation cleanup", async () => {

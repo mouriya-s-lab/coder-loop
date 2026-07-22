@@ -2182,7 +2182,7 @@ export class CoderLoopDaemon {
 			name: validateChainNameForRequest(requiredString(args, "name")),
 			preset: chainPreset,
 			repository: validateRepositoryForRequest(requiredString(args, "repository")),
-			baseBranch: validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
+			baseBranch: await validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
 			status: "active",
 			metadata: validateChainMetadata(sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {}),
 		}
@@ -3166,7 +3166,7 @@ export class CoderLoopDaemon {
 			if (Object.hasOwn(extraInnerCarrier, "branch")) {
 				const branchValue = extraInnerCarrier.branch
 				if (branchValue !== null && typeof branchValue === "string") {
-					validateGitBranchNameForRequest(branchValue, "extra.branch")
+					await validateGitBranchNameForRequest(branchValue, "extra.branch")
 				} else if (branchValue !== null) {
 					throw new DaemonError("invalid_request", "extra.branch must be a string or null", { field: "extra.branch" })
 				}
@@ -4758,7 +4758,7 @@ function validateRepositoryForRequest(input: string): string {
 	return input
 }
 
-function validateBaseBranchForRequest(input: string): string {
+async function validateBaseBranchForRequest(input: string): Promise<string> {
 	if (/[\u0000-\u001f\u007f]/u.test(input)) {
 		throw new DaemonError("invalid_request", "baseBranch must not contain control characters", { baseBranch: input })
 	}
@@ -4766,11 +4766,17 @@ function validateBaseBranchForRequest(input: string): string {
 		throw new DaemonError("invalid_request", "baseBranch must be a literal branch name, not checkout shorthand", { baseBranch: input })
 	}
 
-	const check = Bun.spawnSync({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "pipe", stderr: "pipe" })
-	if (check.exitCode !== 0) {
+	if (await gitBranchGrammarRejects(input)) {
 		throw new DaemonError("invalid_request", "baseBranch must be a valid git branch name", { baseBranch: input })
 	}
 	return input
+}
+
+// `git check-ref-format` runs per validated request on the daemon's main thread; keep it
+// asynchronous so request validation can never stall socket dispatch behind process spawn.
+async function gitBranchGrammarRejects(input: string): Promise<boolean> {
+	const check = Bun.spawn({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "ignore", stderr: "ignore" })
+	return await check.exited !== 0
 }
 
 function validateItemTitleForRequest(value: string | null | undefined): string | null | undefined {
@@ -4803,7 +4809,7 @@ function validateItemId(value: string): string {
 	return value
 }
 
-function validateGitBranchNameForRequest(input: string, field: string): string {
+async function validateGitBranchNameForRequest(input: string, field: string): Promise<string> {
 	if (/[\u0000-\u001f\u007f]/u.test(input)) {
 		throw new DaemonError("invalid_request", `${field} must not contain control characters`, { [field]: input })
 	}
@@ -4811,8 +4817,7 @@ function validateGitBranchNameForRequest(input: string, field: string): string {
 		throw new DaemonError("invalid_request", `${field} must be a literal branch name, not checkout shorthand`, { [field]: input })
 	}
 
-	const check = Bun.spawnSync({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "pipe", stderr: "pipe" })
-	if (check.exitCode !== 0) {
+	if (await gitBranchGrammarRejects(input)) {
 		throw new DaemonError("invalid_request", `${field} must be a valid git branch name`, { [field]: input })
 	}
 	return input

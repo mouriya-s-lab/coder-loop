@@ -250,6 +250,7 @@ const ClosureReconciliationMismatchBoundary = arkType.or(
 	{ kind: arkType.unit("orphan-directory"), path: "string>0", repaired: arkType.unit(false), error: "string>0" },
 	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(true) },
 	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(false), error: "string>0" },
+	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(false), retained: arkType.unit("unpublished-work"), tip: "string>0" },
 	{ kind: arkType.unit("repository-scan-failed"), surface: arkType.or(arkType.unit("git-contract"), arkType.unit("branches"), arkType.unit("worktrees")), repaired: arkType.unit(false), error: "string>0" },
 	{ kind: arkType.unit("hooks-drift"), expected: "string|null", actual: "string|null", repaired: arkType.unit(false) },
 	{ kind: arkType.unit("repo-config-drift"), key: "string>0", expected: "string|null", actual: "string|null", repaired: arkType.unit(false) },

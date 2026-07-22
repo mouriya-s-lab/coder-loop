@@ -493,8 +493,14 @@ async function main(): Promise<void> {
 		await stopDaemon(daemon)
 		const missingDir = lifecycleReview.worktree_path, missingBranch = lifecycleReview.branch_name; assert(missingBranch !== null, "C07 review branch missing"); const missingBranchTip = command([REAL_GIT, "rev-parse", missingBranch], { cwd: repos.target }).stdout.trim(); rmSync(missingDir, { recursive: true, force: true }); command([REAL_GIT, "update-ref", "-d", missingBranch], { cwd: repos.target })
 		const orphanDir = resolve(daemon.root, "chains", lifecycle, "worktrees", "orphan"); mkdirSync(orphanDir, { recursive: true }); const orphanBranch = `${closureBranchPrefix(lifecycle)}orphan`; command([REAL_GIT, "branch", orphanBranch.replace("refs/heads/", ""), "main"], { cwd: repos.target }); command([REAL_GIT, "config", "core.hooksPath", ".issue560-hooks"], { cwd: repos.target }); command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
+		// An engine-namespace orphan whose tip is NOT published to origin or the base branch must
+		// survive reconciliation: deleting it would irreversibly destroy work that exists nowhere else.
+		const unpublishedOrphanBranch = `${closureBranchPrefix(lifecycle)}unpublished-orphan`
+		const unpublishedTree = command([REAL_GIT, "rev-parse", "main^{tree}"], { cwd: repos.target }).stdout.trim()
+		const unpublishedCommit = command([REAL_GIT, "commit-tree", unpublishedTree, "-p", "main", "-m", "issue560 unpublished orphan work"], { cwd: repos.target }).stdout.trim()
+		command([REAL_GIT, "update-ref", unpublishedOrphanBranch, unpublishedCommit], { cwd: repos.target })
 		daemon = startDaemon(runtime, env); await ready(daemon)
-		const reconcileKinds = ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift", "repo-config-drift"]
+		const reconcileKinds = ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "unpublished-work", "hooks-drift", "repo-config-drift"]
 		const reconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", lifecycle, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => reconcileKinds.every((kind) => text.includes(kind)), "reconciliation events")
 		const registrationReconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", registration, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => text.includes("registration-mismatch") && text.includes(registrationRow.closure_id), "registration mismatch reconciliation event")
 		// Keep the interrupted lifecycle retry paused while the remaining C07 fixtures
@@ -508,6 +514,9 @@ async function main(): Promise<void> {
 		const resumedRegistration = await until(() => observations(shims.runnerLog).find((row) => row.chain === registration && row.phase === "iteration" && row.attempt >= 2) ?? null, (row) => row !== null, "active deletion fixture resume", 90_000)
 		assert(resumedRegistration !== null, "C05 active deletion fixture did not resume")
 		assert(!existsSync(orphanDir) && command([REAL_GIT, "show-ref", "--verify", orphanBranch], { cwd: repos.target, allowFail: true }).exitCode !== 0, "C07 orphan repair failed"); command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target }); command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
+		assert(command([REAL_GIT, "show-ref", "--verify", unpublishedOrphanBranch], { cwd: repos.target, allowFail: true }).exitCode === 0, "C07 reconciliation destroyed an unpublished engine-namespace orphan branch")
+		assert(reconcile.includes("unpublished-work") && reconcile.includes(unpublishedOrphanBranch), "C07 unpublished orphan retention event missing")
+		command([REAL_GIT, "update-ref", "-d", unpublishedOrphanBranch], { cwd: repos.target })
 		assert(lifecycleRows.every((row) => closureRows(daemon.root, lifecycle).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
 		assert(!existsSync(missingDir) && command([REAL_GIT, "show-ref", "--verify", "--quiet", missingBranch], { cwd: repos.target, allowFail: true }).exitCode === 1, "C07 reconciliation recreated a suspended closure resource")
 

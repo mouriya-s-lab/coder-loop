@@ -980,6 +980,7 @@ export type ClosureReconciliationMismatch =
 	| { kind: "orphan-directory"; path: string; repaired: false; error: string }
 	| { kind: "orphan-branch"; branchName: string; repaired: true }
 	| { kind: "orphan-branch"; branchName: string; repaired: false; error: string }
+	| { kind: "orphan-branch"; branchName: string; repaired: false; retained: "unpublished-work"; tip: string }
 	| { kind: "repository-scan-failed"; surface: "git-contract" | "branches" | "worktrees"; repaired: false; error: string }
 	| { kind: "hooks-drift"; expected: string | null; actual: string | null; repaired: false }
 	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; expected: string | null; actual: string | null; repaired: false }
@@ -1096,6 +1097,19 @@ export async function reconcileClosureResources(input: ReconcileClosureResources
 			if (listed.exitCode !== 0) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "branches", repaired: false, error: gitFailure("for-each-ref", listed) } })
 			else for (const branchName of listed.stdout.split("\n").filter((name) => name.startsWith(prefix))) {
 				if (branchesByRepo.get(repoCwd)?.has(branchName) === true) continue
+				// An engine-namespace branch with no persisted closure can only appear through an
+				// interrupted consume or persistence loss. Deleting it is irreversible for commits
+				// that exist nowhere else, so repair only proves-published tips: the tip must be
+				// reachable from a remote-tracking ref or the chain base branch. Anything else is
+				// surfaced and retained rather than destroyed.
+				const tip = await git(repoCwd, ["rev-parse", "--verify", `${branchName}^{commit}`])
+				if (tip.exitCode === 0 && tip.stdout !== "") {
+					const containing = await git(repoCwd, ["for-each-ref", "--contains", tip.stdout, "--format=%(refname)", "refs/remotes/origin", `refs/heads/${input.chain.baseBranch}`])
+					if (containing.exitCode !== 0 || containing.stdout === "") {
+						findings.push({ closureId: null, repoCwd, mismatch: { kind: "orphan-branch", branchName, repaired: false, retained: "unpublished-work", tip: tip.stdout } })
+						continue
+					}
+				}
 				const removed = await git(repoCwd, ["update-ref", "-d", branchName])
 				findings.push({ closureId: null, repoCwd, mismatch: removed.exitCode === 0
 					? { kind: "orphan-branch", branchName, repaired: true }

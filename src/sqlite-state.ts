@@ -29,7 +29,7 @@ import {
 	type TaskTreeSnapshot,
 } from "./task-runtime"
 import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
-import { computeClosureReachability, persistedClosureReachabilityModel, type ClosureReachabilityModel, type OriginFreshness } from "./closure-lifecycle"
+import { computeClosureReachability, persistedClosureReachabilityModel, type ClosureReachabilityEdge, type ClosureReachabilityModel, type OriginFreshness } from "./closure-lifecycle"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -291,6 +291,14 @@ export type ConsumeClosureResult =
 	| { kind: "retained"; closureId: string; reason: "reachable" | "active-run" }
 	| { kind: "already-consumed"; closure: ClosureSnapshot; intent: ClosureConsumptionIntent }
 	| { kind: "consumed"; closure: ClosureSnapshot; intent: ClosureConsumptionIntent }
+// Future-writer reachability facts (#560 supplemental seeds/edges). The structural seed kinds
+// (`active-run` / `resumable-attempt` / `seq-suffix` / `open-par-epoch`) are derived from the
+// persisted task tree and must never be written to the fact tables; only the future-writer
+// kinds carried by `closure_reachability_seeds` / `closure_reachability_edges` are accepted here.
+export type SupplementalClosureReachabilitySeedKind = "open-append" | "decided-reopen" | "next-epoch-candidate"
+export type ClosureReachabilityFactInput =
+	| { kind: "seed"; closureId: string; seed: SupplementalClosureReachabilitySeedKind }
+	| { kind: "edge"; edge: ClosureReachabilityEdge }
 export type JoinBindingRecord = { parNodeId: string; version: number; value: JoinValueSnapshot; authorKind: string; authorId: string; authorityClass: string; effectiveFromEpoch: number; createdAt: number }
 export type JoinEvaluationRecord = { parNodeId: string; epoch: number; bindingVersion: number; state: "evaluating" | "decided" | "consumed" }
 
@@ -337,6 +345,7 @@ export type SqliteStateStore = {
 	getTaskTree: (chainId: number) => TaskTreeSnapshot | null
 	setClosureLifecycle: (closureId: string, input: ClosureLifecycleInput) => ClosureSnapshot
 	setClosureResources: (closureId: string, input: ClosureResourcesInput) => ClosureSnapshot
+	addClosureReachabilityFact: (chainId: number, fact: ClosureReachabilityFactInput) => void
 	assessClosureConsumption: (closureId: string, authority: ClosureConsumptionAuthority) => AssessClosureConsumptionResult
 	consumeClosureIfUnreachable: (closureId: string, input: ConsumeClosureInput) => ConsumeClosureResult
 	markClosureConsumptionIntentEmitted: (closureId: string, emittedAt: number) => ClosureConsumptionIntent
@@ -459,6 +468,7 @@ const JoinEvaluationRowBoundary = arkType({ par_node_id: "string>0", epoch: "num
 const ClosureReachabilitySeedRowBoundary = arkType({ closure_id: "string>0", kind: "'open-append'|'decided-reopen'|'next-epoch-candidate'", "+": "reject" })
 const ClosureReachabilityEdgeRowBoundary = arkType({ from_closure_id: "string>0", to_closure_id: "string>0", kind: "'resume'|'scope-target'", "+": "reject" })
 const ClosureLeafRowBoundary = arkType({ leaf_node_id: "string>0", "+": "reject" })
+const ClosureChainRowBoundary = arkType({ chain_id: "number.integer", "+": "reject" })
 const ActiveRunAssociationRowBoundary = arkType({ lifecycle: "'active'|'suspended'|'consumed'", phase: "string>0", chain_id: "number.integer", "+": "reject" })
 const ClosureAssociationRowBoundary = arkType({ closure_id: "string>0", leaf_node_id: "string>0", lifecycle: "'active'|'suspended'|'consumed'", "+": "reject" })
 const RunIdRowBoundary = arkType({ run_id: "string>0", "+": "reject" })
@@ -1991,6 +2001,21 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			return requireClosureById(db, closureId)
 		}),
 
+		addClosureReachabilityFact: (chainId, fact) => write("add closure reachability fact", () => {
+			switch (fact.kind) {
+				case "seed":
+					requireChainClosure(db, chainId, fact.closureId)
+					db.query<never, SqlParams>("INSERT OR IGNORE INTO closure_reachability_seeds (chain_id, closure_id, kind) VALUES ($chainId, $closureId, $kind)").run({ chainId, closureId: fact.closureId, kind: fact.seed })
+					return
+				case "edge":
+					requireChainClosure(db, chainId, fact.edge.fromClosureId)
+					requireChainClosure(db, chainId, fact.edge.toClosureId)
+					db.query<never, SqlParams>("INSERT OR IGNORE INTO closure_reachability_edges (chain_id, from_closure_id, to_closure_id, kind) VALUES ($chainId, $fromClosureId, $toClosureId, $kind)").run({ chainId, fromClosureId: fact.edge.fromClosureId, toClosureId: fact.edge.toClosureId, kind: fact.edge.kind })
+					return
+				default: return assertNever(fact)
+			}
+		}),
+
 		assessClosureConsumption: (closureId, authority) => read("assess closure consumption", () => assessClosureConsumption(db, closureId, authority)),
 
 		consumeClosureIfUnreachable: (closureId, input) => write("consume closure if unreachable", () => {
@@ -2432,6 +2457,12 @@ function requireClosureById(db: Database, closureId: string): ClosureSnapshot {
 	const row = queryPersistedOne(db, "SELECT leaf_node_id FROM task_closures WHERE closure_id = $closureId", { closureId }, ClosureLeafRowBoundary, `task_closures.${closureId}`)
 	if (row === null) throw new SqliteStateError("not_found", `closure ${closureId} was not found`, { closureId })
 	return readClosure(db, row.leaf_node_id)
+}
+
+function requireChainClosure(db: Database, chainId: number, closureId: string): void {
+	const row = queryPersistedOne(db, "SELECT items.chain_id FROM task_closures INNER JOIN items ON items.id = task_closures.item_row_id WHERE task_closures.closure_id = $closureId", { closureId }, ClosureChainRowBoundary, `task_closures.${closureId} chain`)
+	if (row === null) throw new SqliteStateError("not_found", `closure ${closureId} was not found`, { closureId })
+	if (row.chain_id !== chainId) throw new SqliteStateError("run_closure_mismatch", `closure ${closureId} does not belong to chain ${chainId}`, { closureId, chainId })
 }
 
 function insertActiveRunSnapshot(db: Database, chainId: number, active: ActiveRunSnapshot): void {
