@@ -371,6 +371,17 @@ export type ItemCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+	| {
+			action: "transition"
+			chainName: string
+			itemId: string
+			agentRunId: string
+			agentPhase: string
+			path: string
+			exit: JsonObject
+			loopDataRoot: string | null
+			json: boolean
+	  }
 
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
@@ -511,6 +522,7 @@ const PresetTomlBoundary = arkType({
 	"runtime?": { "businessKeys?": "string[]", "businessKeyValues?": "object" },
 	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]", exhausted: "string", "retry?": "string" },
 	phases: PresetPhaseBoundary.array(),
+	"tasks?": "object",
 	"fragments?": PresetFragmentBoundary.array(),
 	// #433: [agent].binary / [agent].extraArgs retired (zombie schema with no read site). Runner
 	// binaries now resolve from kind→PATH name (claude/codex) inside buildAgentRunnerCommands.
@@ -599,13 +611,19 @@ type PresetCompileCliArgs = typeof PresetCompileCliArgsBoundary.infer
 
 // #451 + #405: boundary parser for the `item.exits` wire-verb response. The CLI
 // uses it to validate the daemon's reply before rendering — keeps the protocol
-// shape pinned and forces both ends to stay in sync. After #405 the entry shape
-// is the discriminated ADT (item-status | chain-action) so the read side
-// mirrors the preset declaration without flattening the chain-action branch into
-// a fake status string.
+// shape pinned and forces both ends to stay in sync. The entry shape is the
+// discriminated ADT (item-status | chain-action | task-path), so the read side
+// preserves both authored task transitions and legacy phase exits without
+// flattening either branch into a fake status string.
 const ItemExitsResponseEntryBoundary = arkType.or(
 	{ kind: arkType.unit("item-status"), status: "string", when: "string" },
 	{ kind: arkType.unit("chain-action"), action: arkType.unit("stop"), when: "string" },
+	{
+		kind: arkType.unit("task-path"),
+		path: "string",
+		target: "string|null",
+		fields: arkType({ name: "string", type: "'string'|'number'|'boolean'|'json'", required: arkType.unit(true) }).array(),
+	},
 )
 
 export const ItemExitsResponseBoundary = arkType({
@@ -769,8 +787,9 @@ export type Preset = {
 			// load time as a member of `continuable`. Optional: a preset with no retry
 			// concept may omit it; doc builders that need it will render the empty string.
 			retry: InternalStatus | null
-		}
+	}
 	phases: readonly PresetPhase[]
+	taskDeclaration: CompiledRuntimeTaskTree | null
 	fragments: readonly PresetFragment[]
 	agent: {
 		attemptTimeoutSeconds: number
@@ -780,6 +799,47 @@ export type Preset = {
 export type CompiledTaskNode = { identity: string; kind: "phase"; phase: string }
 export type CompiledPhaseTaskTree = { identity: string; kind: "seq"; phase: string; children: readonly [CompiledTaskNode] }
 export type CompiledTaskTree = { identity: string; kind: "seq"; children: readonly CompiledPhaseTaskTree[] }
+
+export type TaskValueType = "string" | "number" | "boolean" | "json"
+export type CompiledTransitionField = { name: string; type: TaskValueType; required: true }
+export type CompiledTransitionBindingSource =
+	| { kind: "exit"; field: string }
+	| { kind: "item"; field: string }
+	| { kind: "chain"; field: string }
+	| { kind: "runtime"; key: string }
+export type CompiledTransitionBinding = {
+	target: string
+	source: CompiledTransitionBindingSource
+	required: true
+}
+export type CompiledTaskPath = {
+	identity: string
+	target: string | null
+	fields: readonly CompiledTransitionField[]
+	bindings: readonly CompiledTransitionBinding[]
+	prompt: string | null
+}
+export type CompiledRuntimeTaskPhase = {
+	identity: string
+	kind: "phase"
+	phase: string
+	paths: readonly CompiledTaskPath[]
+}
+export type CompiledRuntimeTaskSeq = {
+	identity: string
+	kind: "seq"
+	children: readonly CompiledRuntimeTaskNode[]
+}
+export type CompiledRuntimeTaskPar = {
+	identity: string
+	kind: "par"
+	join: { kind: "drain" }
+	maxConcurrency: number | null
+	reopenBudget: number
+	children: readonly CompiledRuntimeTaskNode[]
+}
+export type CompiledRuntimeTaskNode = CompiledRuntimeTaskPhase | CompiledRuntimeTaskSeq | CompiledRuntimeTaskPar
+export type CompiledRuntimeTaskTree = (CompiledRuntimeTaskSeq | CompiledRuntimeTaskPar) & { completeStatus: string }
 export type CompiledTaskModel = Preset & {
 	sourceDir: string
 	sourceHash: string
@@ -872,6 +932,141 @@ export function buildCompiledTaskTree(phases: readonly PresetPhase[]): CompiledT
 			children: [{ kind: "phase", identity: `task:${phase.name}`, phase: phase.name }],
 		})),
 	}
+}
+
+function parseCompiledTaskTree(
+	value: BoundaryValue,
+	phases: readonly PresetPhase[],
+	itemIdField: string,
+	itemFields: ReadonlyMap<string, PresetItemField>,
+	terminalStatuses: ReadonlySet<string>,
+): CompiledRuntimeTaskTree {
+	const root = taskRecord(value, "preset.tasks")
+	const completeStatusRaw = root.completeStatus
+	if (typeof completeStatusRaw !== "string" || !terminalStatuses.has(completeStatusRaw)) {
+		presetError(`preset.tasks.completeStatus: must name a declared terminal status`)
+	}
+	const phaseNames = new Set(phases.map((phase) => phase.name))
+	const nodeIds = new Set<string>()
+	const phaseNodeIds = new Map<string, string>()
+	const paths: CompiledTaskPath[] = []
+	const parseNode = (raw: BoundaryValue, label: string): CompiledRuntimeTaskNode => {
+		const record = taskRecord(raw, label)
+		const identity = taskIdentifier(record.id, `${label}.id`)
+		if (nodeIds.has(identity)) presetError(`${label}.id: duplicate task node id "${identity}"`)
+		nodeIds.add(identity)
+		const kind = record.kind
+		if (kind === "phase") {
+			const phase = taskIdentifier(record.phase, `${label}.phase`)
+			if (!phaseNames.has(phase)) presetError(`${label}.phase: unknown phase "${phase}"`)
+			const existingNodeId = phaseNodeIds.get(phase)
+			if (existingNodeId !== undefined) {
+				presetError(`${label}.phase: phase "${phase}" is already referenced by task node "${existingNodeId}"; one item phase owns one persistent closure`)
+			}
+			phaseNodeIds.set(phase, identity)
+			const rawPaths = record.paths ?? []
+			if (!Array.isArray(rawPaths)) presetError(`${label}.paths: must be an array`)
+			const pathIds = new Set<string>()
+			const compiledPaths = rawPaths.map((rawPath, index): CompiledTaskPath => {
+				const pathLabel = `${label}.paths[${index}]`
+				const path = taskRecord(rawPath, pathLabel)
+				const pathIdentity = taskIdentifier(path.id, `${pathLabel}.id`)
+				if (pathIds.has(pathIdentity)) presetError(`${pathLabel}.id: duplicate path id "${pathIdentity}"`)
+				pathIds.add(pathIdentity)
+				const target = path.target === undefined ? null : taskIdentifier(path.target, `${pathLabel}.target`)
+				const fieldsRecord = path.fields === undefined ? {} : taskRecord(path.fields, `${pathLabel}.fields`)
+				const fields = Object.entries(fieldsRecord).map(([name, rawType]): CompiledTransitionField => ({
+					name: taskIdentifier(name, `${pathLabel}.fields.${name}`),
+					type: parseTaskValueType(rawType, `${pathLabel}.fields.${name}`),
+					required: true,
+				}))
+				const fieldNames = new Set(fields.map((field) => field.name))
+				const bindingsRecord = path.bindings === undefined ? {} : taskRecord(path.bindings, `${pathLabel}.bindings`)
+				const bindings = Object.entries(bindingsRecord).map(([targetKey, rawSource]): CompiledTransitionBinding => {
+					const targetName = taskIdentifier(targetKey, `${pathLabel}.bindings.${targetKey}`)
+					if (typeof rawSource !== "string") presetError(`${pathLabel}.bindings.${targetKey}: must be a source string`)
+					const source = parseTransitionBindingSource(rawSource, `${pathLabel}.bindings.${targetKey}`)
+					if (source.kind === "exit" && !fieldNames.has(source.field)) {
+						presetError(`${pathLabel}.bindings.${targetKey}: exit field "${source.field}" is not declared by this path`)
+					}
+					if (source.kind === "item") {
+						const rootField = itemFieldRoot(source.field)
+						if (!isKnownPresetItemField(rootField, itemIdField, itemFields)) {
+							presetError(`${pathLabel}.bindings.${targetKey}: unknown item field "${source.field}"`)
+						}
+					}
+					return { target: targetName, source, required: true }
+				})
+				const prompt = path.prompt === undefined ? null : taskIdentifier(path.prompt, `${pathLabel}.prompt`, true)
+				const compiled = { identity: pathIdentity, target, fields, bindings, prompt }
+				paths.push(compiled)
+				return compiled
+			})
+			return { identity, kind, phase, paths: compiledPaths }
+		}
+		if (kind !== "seq" && kind !== "par") presetError(`${label}.kind: must be phase, seq, or par`)
+		if (!Array.isArray(record.children) || record.children.length === 0) presetError(`${label}.children: must be a non-empty array`)
+		const children = record.children.map((child, index) => parseNode(child, `${label}.children[${index}]`))
+		if (kind === "seq") return { identity, kind, children }
+		const join = record.join ?? "drain"
+		if (join !== "drain") presetError(`${label}.join: #698 supports only "drain"; validator belongs to #700`)
+		const maxConcurrency = record.maxConcurrency === undefined
+			? null
+			: taskPositiveInteger(record.maxConcurrency, `${label}.maxConcurrency`)
+		const reopenBudget = record.reopenBudget === undefined
+			? 0
+			: taskNonNegativeInteger(record.reopenBudget, `${label}.reopenBudget`)
+		return { identity, kind, join: { kind: "drain" }, maxConcurrency, reopenBudget, children }
+	}
+	const parsed = parseNode(root, "preset.tasks")
+	if (parsed.kind === "phase") presetError("preset.tasks: root must be seq or par")
+	for (const path of paths) {
+		if (path.target !== null && !nodeIds.has(path.target)) {
+			presetError(`path "${path.identity}" targets unknown node "${path.target}"`)
+		}
+	}
+	return { ...parsed, completeStatus: completeStatusRaw }
+}
+
+function taskRecord(value: BoundaryValue, label: string): BoundaryRecord {
+	if (!isObjectRecord(value) || Array.isArray(value)) presetError(`${label}: must be an object`)
+	return value
+}
+
+function taskIdentifier(value: BoundaryValue, label: string, allowPath = false): string {
+	if (typeof value !== "string" || value.trim() === "") presetError(`${label}: must be a non-empty string`)
+	const pattern = allowPath ? /^[A-Za-z0-9_./-]+$/ : /^[A-Za-z_][A-Za-z0-9_.-]*$/
+	if (!pattern.test(value)) presetError(`${label}: invalid identifier "${value}"`)
+	return value
+}
+
+function parseTaskValueType(value: BoundaryValue, label: string): TaskValueType {
+	if (value === "string" || value === "number" || value === "boolean" || value === "json") return value
+	presetError(`${label}: type must be string, number, boolean, or json`)
+}
+
+function parseTransitionBindingSource(value: string, label: string): CompiledTransitionBindingSource {
+	const match = /^(exit|item|chain|runtime)\.([A-Za-z_][A-Za-z0-9_.]*)$/.exec(value)
+	if (match === null) presetError(`${label}: invalid source "${value}"`)
+	const field = match[2]
+	if (field === undefined) presetError(`${label}: missing source field`)
+	switch (match[1]) {
+		case "exit": return { kind: "exit", field }
+		case "item": return { kind: "item", field }
+		case "chain": return { kind: "chain", field }
+		case "runtime": return { kind: "runtime", key: field }
+		default: throw new PresetStructureError(`unhandled transition source kind: ${String(match[1])}`)
+	}
+}
+
+function taskPositiveInteger(value: BoundaryValue, label: string): number {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 1) presetError(`${label}: must be a positive integer`)
+	return value
+}
+
+function taskNonNegativeInteger(value: BoundaryValue, label: string): number {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) presetError(`${label}: must be a non-negative integer`)
+	return value
 }
 
 export type PresetItemField = {
@@ -1926,6 +2121,35 @@ const itemExitActionCliCommand = command({
 	}),
 })
 
+const itemTransitionCliCommand = command({
+	name: "transition",
+	description: "Commit one declared typed task path for the current closure.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		agentRunId: option({ long: "agent-run-id", type: cmdString }),
+		agentPhase: option({ long: "agent-phase", type: cmdString }),
+		path: option({ long: "path", type: cmdString }),
+		exitJson: option({ long: "exit-json", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "transition",
+			chainName: args.chain,
+			itemId: parseRequiredItemId(args.issue, "--issue"),
+			agentRunId: args.agentRunId,
+			agentPhase: args.agentPhase,
+			path: args.path,
+			exit: parseRequiredJsonObjectFlag(args.exitJson, "--exit-json"),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const itemCliCommand = subcommands({
 	name: "item",
 	description: "Operate centralized coder-loop chain items through the daemon socket.",
@@ -1936,6 +2160,7 @@ const itemCliCommand = subcommands({
 		update: itemUpdateCliCommand,
 		reorder: itemReorderCliCommand,
 		exits: itemExitsCliCommand,
+		transition: itemTransitionCliCommand,
 		"exit-action": itemExitActionCliCommand,
 	},
 })
@@ -2316,6 +2541,18 @@ async function runItemCommand(args: string[]): Promise<void> {
 		writeCommandResult(result, itemArgs.json, formatItemExitsResult)
 		return
 	}
+	if (itemArgs.action === "transition") {
+		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.transition", {
+			chainName: itemArgs.chainName,
+			itemId: itemArgs.itemId,
+			agentRunId: itemArgs.agentRunId,
+			agentPhase: itemArgs.agentPhase,
+			path: itemArgs.path,
+			exit: itemArgs.exit,
+		})
+		writeCommandResult(result, itemArgs.json, formatItemTransitionResult)
+		return
+	}
 	if (itemArgs.action === "exit-action") {
 		// #405: chain-action exit selection. Same agent-binding shape as the
 		// `exits` query — both agent-run-id and agent-phase travel to the daemon
@@ -2372,6 +2609,12 @@ function parseOptionalJsonObjectFlag(raw: string | null, flagName: string): Json
 		fail(`${flagName} must be a JSON object: ${errorMessage(error)}`)
 	}
 	if (!isJsonObject(parsed)) fail(`${flagName} must be a JSON object`)
+	return parsed
+}
+
+function parseRequiredJsonObjectFlag(raw: string, flagName: string): JsonObject {
+	const parsed = parseOptionalJsonObjectFlag(raw, flagName)
+	if (parsed === null) fail(`${flagName} must be a JSON object`)
 	return parsed
 }
 
@@ -2527,6 +2770,7 @@ const AGENT_ATTRIBUTED_COMMANDS = [
 	"item.update",
 	"item.add",
 	"item.batchAdd",
+	"item.transition",
 	"item.exitAction",
 	"item.reorder",
 	"chain.create",
@@ -2546,9 +2790,13 @@ function isAgentAttributedCommand(command: DaemonCommandName): command is AgentA
 	return AGENT_ATTRIBUTED_COMMANDS.some((entry) => entry === command)
 }
 
-function withInjectedRunCredential(command: DaemonCommandName, args: JsonObject): JsonObject {
+export function withInjectedRunCredential(
+	command: DaemonCommandName,
+	args: JsonObject,
+	environment: NodeJS.ProcessEnv = process.env,
+): JsonObject {
 	if (!isAgentAttributedCommand(command)) return args
-	const value = process.env[LOOP_RUN_CREDENTIAL_ENV]
+	const value = environment[LOOP_RUN_CREDENTIAL_ENV]
 	if (typeof value !== "string" || value === "") return args
 	// Operator path explicitness: if the caller already supplied agentCredential (test fixtures
 	// that exercise the gate directly), respect it instead of overwriting from env.
@@ -2757,9 +3005,8 @@ function formatItemListResult(result: JsonObject): string {
 
 // #451 + #405 text formatter for the typed phase-exits query. Parses the wire
 // shape through the arktype boundary before rendering — guarantees that a
-// daemon version drift cannot quietly print malformed exits to the agent. The
-// ADT (item-status | chain-action) renders each branch with the writer command
-// the agent must use to select it.
+// daemon version drift cannot quietly print malformed exits to the agent. All
+// three ADT branches render the writer command the agent must use to select it.
 function formatItemExitsResult(result: JsonObject): string {
 	const parsed = ItemExitsResponseBoundary.assert(result)
 	if (parsed.exits.length === 0) {
@@ -2771,11 +3018,20 @@ function formatItemExitsResult(result: JsonObject): string {
 				return `  - item-status ${exit.status} (writer: coder-loop item update --status ${exit.status}): ${exit.when}`
 			case "chain-action":
 				return `  - chain-action ${exit.action} (writer: coder-loop item exit-action --action ${exit.action}): ${exit.when}`
+			case "task-path": {
+				const fields = exit.fields.map((field) => `${field.name}:${field.type}`).join(", ") || "<none>"
+				return `  - task-path ${exit.path} -> ${exit.target ?? "<terminal>"} (writer: coder-loop item transition --path ${exit.path} --exit-json '{...}'; fields: ${fields})`
+			}
 			default:
 				return assertNeverPhaseExit(exit)
 		}
 	}).join("\n")
 	return `phase: ${parsed.phase}\nexits:\n${rows}\n`
+}
+
+function formatItemTransitionResult(result: JsonObject): string {
+	const transition = jsonObjectEntry(result.transition)
+	return `transition: id=${String(transition?.id ?? "")} path=${String(transition?.path ?? "")} source=${String(transition?.sourceRuntimeNodeId ?? "")}\n`
 }
 
 // #405 text formatter for the chain-action exit-selection response. The daemon
@@ -3052,7 +3308,7 @@ function rootUsage(): string {
 		"  logs <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
 		"  daemon <up|down|status|start|stop|restart>",
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
-		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
+		"  item <add|batch-add|list|update|reorder|exits|transition|exit-action>",
 		"  queue unblock <target> --issue <issue>",
 		"  context append <chain> --scope <chain|item|group> --body <text>",
 		"  doctor <target>",
@@ -4593,7 +4849,10 @@ export async function compilePreset(sourceDir: string, options: LoadPresetOption
 	} catch (error) {
 		if (error instanceof PresetCompileFailure) return { kind: "rejected", diagnostics: error.diagnostics }
 		if (error instanceof PresetStructureError) {
-			return { kind: "rejected", diagnostics: [{ verdict: "error", rule: "preset-structure", message: error.message }] }
+			const rule = error.message.includes("preset.tasks") || error.message.includes('path "')
+				? "task-structure"
+				: "preset-structure"
+			return { kind: "rejected", diagnostics: [{ verdict: "error", rule, message: error.message }] }
 		}
 		throw error
 	}
@@ -4628,7 +4887,7 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		if (error instanceof RuntimeDataError) {
 			throw new PresetCompileFailure([{
 				verdict: "error",
-				rule: "preset-structure",
+				rule: error.message.includes("preset.tasks") || error.message.includes('path "') ? "task-structure" : "preset-structure",
 				message: error.message,
 			}])
 		}
@@ -4683,6 +4942,25 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 	for (const fragment of preset.fragments) {
 		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
 	}
+	if (preset.taskDeclaration !== null) {
+		for (const path of collectCompiledTaskPaths(preset.taskDeclaration)) {
+			if (path.prompt === null) continue
+			const pathFile = resolve(presetDir, path.prompt)
+			const template = await readPresetSourceText(pathFile)
+			const placeholders = new Set(extractPromptPlaceholders(template).map((match) => match.key))
+			const bindingTargets = new Set(path.bindings.map((binding) => binding.target))
+			for (const target of bindingTargets) {
+				if (!placeholders.has(target)) {
+					throw new PresetCompileFailure([{ verdict: "error", rule: "template-undeclared", message: `${pathFile}: binding ${target} is not used by path "${path.identity}"` }])
+				}
+			}
+			for (const key of placeholders) {
+				if (!bindingTargets.has(key)) {
+					throw new PresetCompileFailure([{ verdict: "error", rule: "template-undeclared", message: `${pathFile}: {{${key}}} has no binding in path "${path.identity}"` }])
+				}
+			}
+		}
+	}
 	const sourceHash = await hashPresetSource(sourceAbs)
 	return {
 		model: {
@@ -4694,6 +4972,19 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		},
 		warnings,
 	}
+}
+
+export function collectCompiledTaskPaths(node: CompiledRuntimeTaskNode): readonly CompiledTaskPath[] {
+	switch (node.kind) {
+		case "phase": return node.paths
+		case "seq":
+		case "par": return node.children.flatMap((child) => collectCompiledTaskPaths(child))
+		default: return assertNeverCompiledRuntimeTaskNode(node)
+	}
+}
+
+function assertNeverCompiledRuntimeTaskNode(node: never): never {
+	throw new CoderLoopError(`unhandled compiled runtime task node: ${JSON.stringify(node)}`)
 }
 
 async function hashPresetSource(sourceDir: string): Promise<string> {
@@ -4817,10 +5108,10 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			}
 			variables.push({ key, source, doc: variable.doc })
 		}
-			const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
-			const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
-			const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
-			const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
+		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
+		const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
+		const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
+		const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
 		const roles = parsePresetPhaseRoles(
 			entry.roles ?? null,
 			fragments.length > 0,
@@ -4834,50 +5125,53 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
+	const taskDeclaration = root.tasks === undefined
+		? null
+		: parseCompiledTaskTree(root.tasks, phases, root.item.idField, itemFields, new Set(root.statuses.terminal))
 
-		for (const [index, phase] of phases.entries()) {
-			const phaseExitStatuses = new Set<string>()
-			const phaseExitChainActions = new Set<string>()
-			for (const exit of phase.exits) {
-				switch (exit.kind) {
-					case "item-status": {
-						if (!statusNames.has(exit.status)) {
-							presetError(`preset.phases[${index}].exits.status: unrecognized status "${exit.status}"`)
-						}
-						if (phaseExitStatuses.has(exit.status)) {
-							presetError(`preset.phases[${index}].exits.status: duplicate status "${exit.status}"`)
-						}
-						phaseExitStatuses.add(exit.status)
-						break
+	for (const [index, phase] of phases.entries()) {
+		const phaseExitStatuses = new Set<string>()
+		const phaseExitChainActions = new Set<string>()
+		for (const exit of phase.exits) {
+			switch (exit.kind) {
+				case "item-status": {
+					if (!statusNames.has(exit.status)) {
+						presetError(`preset.phases[${index}].exits.status: unrecognized status "${exit.status}"`)
 					}
-					case "chain-action": {
-						if (phaseExitChainActions.has(exit.action)) {
-							presetError(`preset.phases[${index}].exits.chainAction: duplicate action "${exit.action}"`)
-						}
-						phaseExitChainActions.add(exit.action)
-						break
+					if (phaseExitStatuses.has(exit.status)) {
+						presetError(`preset.phases[${index}].exits.status: duplicate status "${exit.status}"`)
 					}
-					default:
-						assertNeverPhaseExit(exit)
+					phaseExitStatuses.add(exit.status)
+					break
 				}
-			}
-			if (phase.trigger === null) continue
-			if (isChainCompleteTrigger(phase.trigger)) continue
-			const trigger = phase.trigger
-			if (!phaseNames.has(trigger.afterPhase)) {
-				presetError(`preset.phases[${index}].trigger.afterPhase: unrecognized phase "${trigger.afterPhase}"`)
-			}
-			if (!statusNames.has(trigger.whenStatus)) {
-				presetError(`preset.phases[${index}].trigger.whenStatus: unrecognized status "${trigger.whenStatus}"`)
-			}
-			const triggerSourcePhase = phases.find((candidate) => candidate.name === trigger.afterPhase)
-			// #405: trigger linkage is keyed on item-status only (no chain-action exit can be
-			// the `whenStatus` of another phase — chain-action exits do not write item status).
-			const triggerSourceExits = new Set((triggerSourcePhase?.exits ?? []).flatMap((exit) => exit.kind === "item-status" ? [exit.status] : []))
-			if (!triggerSourceExits.has(trigger.whenStatus)) {
-				presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" item-status exits`)
+				case "chain-action": {
+					if (phaseExitChainActions.has(exit.action)) {
+						presetError(`preset.phases[${index}].exits.chainAction: duplicate action "${exit.action}"`)
+					}
+					phaseExitChainActions.add(exit.action)
+					break
+				}
+				default:
+					assertNeverPhaseExit(exit)
 			}
 		}
+		if (phase.trigger === null) continue
+		if (isChainCompleteTrigger(phase.trigger)) continue
+		const trigger = phase.trigger
+		if (!phaseNames.has(trigger.afterPhase)) {
+			presetError(`preset.phases[${index}].trigger.afterPhase: unrecognized phase "${trigger.afterPhase}"`)
+		}
+		if (!statusNames.has(trigger.whenStatus)) {
+			presetError(`preset.phases[${index}].trigger.whenStatus: unrecognized status "${trigger.whenStatus}"`)
+		}
+		const triggerSourcePhase = phases.find((candidate) => candidate.name === trigger.afterPhase)
+		// #405: trigger linkage is keyed on item-status only (no chain-action exit can be
+		// the `whenStatus` of another phase — chain-action exits do not write item status).
+		const triggerSourceExits = new Set((triggerSourcePhase?.exits ?? []).flatMap((exit) => exit.kind === "item-status" ? [exit.status] : []))
+		if (!triggerSourceExits.has(trigger.whenStatus)) {
+			presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" item-status exits`)
+		}
+	}
 
 	return {
 		name: root.name,
@@ -4886,6 +5180,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		runtime: { businessKeys: runtimeBusinessKeys, businessKeyValues: runtimeBusinessKeyValues },
 			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses, exhausted: exhaustedStatus, retry: retryStatus },
 		phases,
+		taskDeclaration,
 		fragments,
 		agent: { attemptTimeoutSeconds },
 	}
@@ -5775,7 +6070,12 @@ export function validatePresetPhaseTemplate(
 	return findings
 }
 
-export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext & { item: ItemRecord }): string {
+export function renderPrompt(
+	template: string,
+	phase: PresetPhase,
+	ctx: ResolveContext & { item: ItemRecord },
+	injectedBindings: Readonly<JsonObject> = {},
+): string {
 	const stripped = stripRoleEntryFrontmatter(template)
 	const matches = extractPromptPlaceholders(stripped)
 	const declared = new Map(phase.variables.map((variable) => [variable.key, variable.source] as const))
@@ -5786,6 +6086,15 @@ export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveC
 		if (match.kind === "escape") {
 			// Emit the literal `{{KEY}}` (drop the leading backslash).
 			parts.push(stripped.slice(match.start + 1, match.end))
+			cursor = match.end
+			continue
+		}
+		if (Object.hasOwn(injectedBindings, match.key)) {
+			const value = injectedBindings[match.key]
+			if (value === undefined) throw new Error(`renderPrompt: injected binding ${match.key} is missing`)
+			const serialized = typeof value === "string" ? value : JSON.stringify(value)
+			if (serialized === undefined) throw new Error(`renderPrompt: injected binding ${match.key} cannot be serialized`)
+			parts.push(serialized)
 			cursor = match.end
 			continue
 		}
@@ -5958,20 +6267,11 @@ function assertNeverPhaseExit(value: never): never {
 }
 
 // #451 + #405 unified completion-protocol epilogue. Engine-owned, zero business
-// literals: references only the engine's own CLI surface (`coder-loop item
-// exits` for the query face, `coder-loop item update --status` for item-status
-// exits, `coder-loop item exit-action --action` for chain-action exits). The
-// same string is appended to every daemon-spawned phase prompt so the agent has
-// one uniform protocol for "I am done" — multi-option phases pick one branch,
-// single-option phases mark themselves complete by writing the only option.
-// Phases that declare no `[[phases.exits]]` still receive the epilogue: the
-// query face will truthfully report `<none>` and the write gate rejects all
-// writes (default-deny per #397), which is the right teaching for those phases
-// too. The chain-action branch is the only controlled channel for stop-chain —
-// agent direct `coder-loop chain stop` calls are rejected at the daemon gate
-// (#409); the engine maps the selected `chain-action: stop` exit to the same
-// code path operator `chain stop` runs (D1: scheduler stops selecting from this
-// chain, in-flight runs naturally complete, `chain resume` reversible).
+// literals: references only the engine's own exit discovery and three typed
+// writers. Authored `[tasks]` presets complete leaves through `item transition`;
+// legacy presets retain admitted item-status exits. Chain actions stay
+// orthogonal to both. The same string is appended to every daemon-spawned phase
+// prompt so discovery and write guidance cannot drift.
 export function phaseExitsEpilogue(): string {
 	return [
 		"",
@@ -5984,11 +6284,17 @@ export function phaseExitsEpilogue(): string {
 		"   ```",
 		"   coder-loop item exits <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --json",
 		"   ```",
-		"   返回的 `exits` 列表是本 phase 唯一允许选择的出边集合（per-phase 切片，不暴露其他 phase 出边）。每个 exit 是两种 kind 之一：",
-		"   - `kind: \"item-status\"` 带 `status` 字段：表示在本 phase 写回该 item status 即可推进 item 到下一步。",
+		"   返回的 `exits` 列表是本 phase 唯一允许选择的出边集合（per-phase 切片，不暴露其他 phase 出边）。每个 exit 是三种 kind 之一：",
+		"   - `kind: \"task-path\"` 带 `path`、`target`、`fields`：表示提交一条声明式 task transition；`fields` 列出的字段全部必填。",
+		"   - `kind: \"item-status\"` 带 `status` 字段：表示旧式 phase 允许写回该 item status。",
 		"   - `kind: \"chain-action\"` 带 `action` 字段：表示在本 phase 触发一个 chain 级副作用（如 `action: \"stop\"` 停链），不是 item 终态。",
 		"",
 		"2. 按所选 exit 的 kind 执行对应写入：",
+		"   - task-path 分支 → 用 `item transition` 提交所选 path：",
+		"     ```",
+		"     coder-loop item transition <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --path <chosen-path> --exit-json '<json-object>'",
+		"     ```",
+		"     `--exit-json` 必须提供全部声明字段；没有字段时传 `{}`。裸 `item update --status` 不能替代 committed task transition。",
 		"   - item-status 分支 → 用 `item update --status`：",
 		"     ```",
 		"     coder-loop item update <CHAIN> --issue <ISSUE> --status <chosen-status>",
@@ -6000,11 +6306,13 @@ export function phaseExitsEpilogue(): string {
 		"     ```",
 		"     选返回集合以外的 action（或绕过此通道直接调 `coder-loop chain stop`）都会被引擎拒绝。",
 		"",
-		"协议对所有 phase 一致：多选项 phase 选其一表达裁决；单选项 phase 调用即标记完成。不要凭空捏造任何元数据未声明的状态或动作。",
+		"`exits` 为空时不要写 status、path 或 action。对未声明 `[tasks]` 的旧式 preset，成功退出非最终 phase 会由引擎提交窄兼容 transition；失败仍留在当前 leaf，最终 phase 无写回时也不会自动推进。",
+		"",
+		"协议对所有 phase 一致：先查询，再只选择返回集合中的一条出边。不要凭空捏造任何元数据未声明的状态、路径或动作。",
 	].join("\n")
 }
 
-function lookupItemField(item: ItemRecord, field: string): JsonValue | undefined {
+export function lookupItemField(item: ItemRecord, field: string): JsonValue | undefined {
 	const [root, ...path] = field.split(".")
 	let value = lookupItemRootField(item, root ?? field)
 	for (const segment of path) {

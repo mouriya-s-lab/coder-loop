@@ -326,7 +326,7 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 			let tree: TaskTreeSnapshot
 			if (parCase) {
 				const evaluation = spec.kind === "open-par-epoch" ? { kind: "not-evaluating" } as const : { kind: "decided", epoch: 1, bindingVersion: 1 } as const
-				tree = { root: { kind: "par", identity: { runtimeNodeId: `par-c05-${index}`, definitionRef, definitionNodeId: `par-c05-${index}` }, groupId: `par-c05-${index}`, pinCommit: resource.baseCommit, state: spec.kind === "open-par-epoch" ? "open" : "completed", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation }, children: [leaf] }, activeRuns: [] }
+				tree = { root: { kind: "par", identity: { runtimeNodeId: `par-c05-${index}`, definitionRef, definitionNodeId: `par-c05-${index}` }, groupId: `par-c05-${index}`, pinCommit: resource.baseCommit, maxConcurrency: null, state: spec.kind === "open-par-epoch" ? "open" : "completed", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation }, children: [leaf] }, activeRuns: [] }
 			} else {
 				tree = { root: { kind: "seq", identity: { runtimeNodeId: `seq-c05-${index}`, definitionRef, definitionNodeId: `seq-c05-${index}` }, cursor: spec.kind === "sealed-seq" ? { kind: "complete" } : { kind: "next", nodeId: leaf.identity.runtimeNodeId }, children: [leaf] }, activeRuns: [] }
 			}
@@ -368,8 +368,8 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 		const retiredFirst = { closureId: "closure:issue560:retired:first", itemRowId: retiredFirstItem.id, itemId: retiredFirstItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit: retiredBase, sourceParNodeId: null, sessions: [] } as const
 		const retiredSecond = { closureId: "closure:issue560:retired:second", itemRowId: retiredSecondItem.id, itemId: retiredSecondItem.itemId, phase: "review", lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit: retiredBase, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(retiredChain.id, { root: { kind: "seq", identity: { runtimeNodeId: "seq-issue560-retired", definitionRef: retiredDefinition, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: "leaf-issue560-retired-first" }, children: [
-			{ kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-first", definitionRef: retiredDefinition, definitionNodeId: "iteration" }, closure: retiredFirst },
-			{ kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-second", definitionRef: retiredDefinition, definitionNodeId: "review" }, closure: retiredSecond },
+			{ kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-first", definitionRef: retiredDefinition, definitionNodeId: "iteration" }, state: "pending", closure: retiredFirst },
+			{ kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-second", definitionRef: retiredDefinition, definitionNodeId: "review" }, state: "pending", closure: retiredSecond },
 		] }, activeRuns: [] })
 		const firstRetired = await consumeSchedulerClosure({ chainId: retiredChain.id, chainName: retiredChain.name, baseBranch: retiredChain.baseBranch, repoCwd, closure: retiredFirst, authority: { kind: "chain-deletion", chainId: retiredChain.id }, updatedAt: 2_000_000_200, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
 		assert(firstRetired.complete && firstRetired.cleanup === null && existsSync(retired.worktreePath), "C05 retired shared reference removed a live sibling resource")
@@ -386,7 +386,7 @@ async function runPersistedReachabilityCases(runtime: string, repoCwd: string): 
 		const reconcileRetired = retiredResourceTuple(loopDataRoot, reconcileChain.name, repoCwd)
 		command([REAL_GIT, "worktree", "add", "-b", reconcileRetired.branchName, reconcileRetired.worktreePath, "main"], { cwd: repoCwd })
 		const reconcileClosure = { closureId: "closure:issue560:retired:reconcile", itemRowId: reconcileItem.id, itemId: reconcileItem.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: reconcileRetired.worktreePath, branchName: reconcileRetired.branchName, baseCommit: retiredBase, sourceParNodeId: null, sessions: [] } as const
-		store.createTaskTree(reconcileChain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-reconcile", definitionRef: { kind: "chain", contentIdentity: "sha256:issue560-retired-reconcile" }, definitionNodeId: "iteration" }, closure: reconcileClosure }, activeRuns: [] })
+		store.createTaskTree(reconcileChain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-issue560-retired-reconcile", definitionRef: { kind: "chain", contentIdentity: "sha256:issue560-retired-reconcile" }, definitionNodeId: "iteration" }, state: "pending", closure: reconcileClosure }, activeRuns: [] })
 		const retiredFindings = await reconcileClosureResources({ chain: reconcileChain, items: [reconcileItem], tree: store.getTaskTree(reconcileChain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
 		assert(retiredFindings.some((finding) => finding.closureId === reconcileClosure.closureId && finding.mismatch.kind === "retired-resource" && finding.mismatch.repaired && finding.mismatch.resourcesRemoved), "C07 reconciliation did not retire the consumed base-era tuple")
 		const reconciledTree = store.getTaskTree(reconcileChain.id)
@@ -625,7 +625,7 @@ async function main(): Promise<void> {
 		assert(command([REAL_GIT, "rev-parse", "refs/remotes/origin/main"], { cwd: repos.target }).stdout.trim() === trackingCommit, "C10 remote-tracking ref did not advance")
 		const directLeaves = contexts.map((context, index): TaskNodeSnapshot => {
 			const resource = directResources[index]; if (resource === undefined || typeof resource === "string") fail("expected typed direct resources")
-			return { kind: "leaf", identity: { runtimeNodeId: `leaf-${context.closureId}`, definitionRef: { kind: "chain", contentIdentity: "sha256:issue-560-direct" }, definitionNodeId: context.phase }, closure: { ...context.existing, worktreePath: resource.worktreePath, branchName: resource.branchName } }
+			return { kind: "leaf", identity: { runtimeNodeId: `leaf-${context.closureId}`, definitionRef: { kind: "chain", contentIdentity: "sha256:issue-560-direct" }, definitionNodeId: context.phase }, state: "pending", closure: { ...context.existing, worktreePath: resource.worktreePath, branchName: resource.branchName } }
 		})
 		const directTree: TaskNodeSnapshot = { kind: "seq", identity: { runtimeNodeId: `seq-${directChain.name}`, definitionRef: { kind: "chain", contentIdentity: "sha256:issue-560-direct" }, definitionNodeId: "root" }, cursor: { kind: "complete" }, children: directLeaves }
 		command([REAL_GIT, "config", "core.hooksPath", ".issue560-live-hooks"], { cwd: repos.target })

@@ -44,6 +44,7 @@ import { resolveChainRuntimePaths, resolveLoopDataPaths } from "../../../src/run
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "../../../src/sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "../../../src/observability"
 import { chainMetadataToJsonObject, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
+import type { TaskLeafNodeSnapshot, TaskNodeSnapshot } from "../../../src/task-runtime"
 
 export const REPO_ROOT = resolve(import.meta.dir, "../../..")
 
@@ -102,16 +103,116 @@ export function historicalRunExtra(extra: JsonObject = {}) {
 	})
 }
 
-export function seedSessionClosure(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, item: ItemRecord, phase: string): void {
-	const definitionRef = { kind: "chain", contentIdentity: "sha256:session-fixture" } as const
-	store.createTaskTree(chain.id, {
-		root: {
-			kind: "leaf",
-			identity: { runtimeNodeId: `session-leaf-${item.id}`, definitionRef, definitionNodeId: phase },
-			closure: { closureId: `session-closure-${item.id}`, itemRowId: item.id, itemId: item.itemId, phase, lifecycle: "active", worktreePath: REPO_ROOT, branchName: "main", baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] },
-		},
-		activeRuns: [],
+function findFixtureTaskLeaf(
+	node: TaskNodeSnapshot,
+	itemRowId: number,
+	phase: string,
+): TaskLeafNodeSnapshot | null {
+	if (node.kind === "leaf") {
+		return node.closure.itemRowId === itemRowId && node.closure.phase === phase ? node : null
+	}
+	for (const child of node.children) {
+		const found = findFixtureTaskLeaf(child, itemRowId, phase)
+		if (found !== null) return found
+	}
+	return null
+}
+
+export function fixtureTaskLeaf(
+	store: ReturnType<typeof openSqliteStateStore>,
+	chainId: number,
+	itemRowId: number,
+	phase: string,
+): TaskLeafNodeSnapshot | null {
+	const tree = store.getTaskTree(chainId)
+	return tree === null ? null : findFixtureTaskLeaf(tree.root, itemRowId, phase)
+}
+
+let nextFixtureTransitionRun = 0
+
+export function fixtureTransitionRunId(
+	store: ReturnType<typeof openSqliteStateStore>,
+	chainId: number,
+	itemRowId: number,
+	phase: string,
+): string {
+	const source = fixtureTaskLeaf(store, chainId, itemRowId, phase)
+	if (source === null) throw new Error(`fixture item ${itemRowId} has no persisted ${phase} task leaf`)
+	const committedRunIds = new Set(store.listTaskTransitions(chainId).map((transition) => transition.sourceRunId))
+	const existing = [...store.listRuns(chainId)]
+		.reverse()
+		.find((run) => run.itemId === itemRowId
+			&& run.closureId === source.closure.closureId
+			&& !committedRunIds.has(run.runId))
+	if (existing !== undefined) return existing.runId
+	const sequence = ++nextFixtureTransitionRun
+	const runId = `fixture-transition-${chainId}-${itemRowId}-${phase}-${sequence}`
+	store.recordRun({
+		runId,
+		chainId,
+		itemId: itemRowId,
+		phase,
+		startedAt: 1_950_000_000 + sequence,
+		extra: historicalRunExtra(),
 	})
+	return runId
+}
+
+export function commitFixtureLegacyItemTrigger(
+	store: ReturnType<typeof openSqliteStateStore>,
+	chainId: number,
+	itemRowId: number,
+	sourcePhase: string,
+	triggerPhase: string,
+	status: string,
+	createdAt: number,
+): void {
+	const chain = store.getChain(chainId)
+	const item = store.getItem(itemRowId)
+	const tree = store.getTaskTree(chainId)
+	const source = fixtureTaskLeaf(store, chainId, itemRowId, sourcePhase)
+	if (chain === null || item === null || tree === null || source === null) {
+		throw new Error(`fixture item ${itemRowId} cannot materialize ${triggerPhase} from ${sourcePhase}`)
+	}
+	if (tree.root.kind !== "par") throw new Error(`fixture chain ${chainId} task root is not a par`)
+	const runtimeNodeId = `task:${chainId}:item:${itemRowId}:legacy-trigger:${triggerPhase}`
+	const closureId = `closure:${chainId}:${itemRowId}:legacy-trigger:${triggerPhase}`
+	store.commitLegacyItemTrigger({
+		sourceRunId: fixtureTransitionRunId(store, chainId, itemRowId, sourcePhase),
+		sourceClosureId: source.closure.closureId,
+		pathId: `legacy-status:${sourcePhase}:${status}`,
+		exitPayload: { status },
+		resolvedBindings: {},
+		createdAt,
+		itemId: itemRowId,
+		triggerLeaf: {
+			kind: "leaf",
+			identity: {
+				runtimeNodeId,
+				definitionRef: source.identity.definitionRef,
+				definitionNodeId: triggerPhase,
+			},
+			state: "pending",
+			closure: {
+				closureId,
+				itemRowId,
+				itemId: item.itemId,
+				phase: triggerPhase,
+				lifecycle: "active",
+				worktreePath: item.repoCwd,
+				branchName: closureBranchName(chain.name, closureId),
+				baseCommit: source.closure.baseCommit,
+				sourceParNodeId: tree.root.identity.runtimeNodeId,
+				sessions: [],
+			},
+		},
+		itemUpdate: {},
+	})
+}
+
+export function seedSessionClosure(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, item: ItemRecord, phase: string): void {
+	if (fixtureTaskLeaf(store, chain.id, item.id, phase) !== null) return
+	throw new Error(`fixture item ${item.id} has no persisted ${phase} task leaf`)
 }
 
 afterAll(async () => {
@@ -554,7 +655,20 @@ export function createChain(
 export function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; waitForConcurrentStarts?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null; captureArgv?: string; probeNullDevice?: boolean },
+	input: {
+		issueNumber: number
+		repoCwd: string
+		sleepMs?: number
+		waitForConcurrentStarts?: number
+		exitCode?: number
+		summary?: string | null
+		runner?: AgentRunnerKind | null
+		writeStatus?: string | null
+		captureArgv?: string
+		probeNullDevice?: boolean
+		taskPhases?: readonly string[] | null
+		taskBaseCommit?: string
+	},
 ) {
 	const extra: JsonObject = {
 		// #419: the bundled preset's `idField` is `issue` and reads from `extra.issue` via the
@@ -588,7 +702,57 @@ export function createItem(
 		updatedAt: 1_800_000_001 + input.issueNumber,
 	})
 	if (item.presetPath !== (fixturePresetDirs.get(store) ?? null)) throw new Error("scheduler fixture item lost its declared preset path")
+	const taskPhases = input.taskPhases === undefined ? ["iteration", "review"] : input.taskPhases
+	if (taskPhases !== null) appendFixtureItemTaskTree(store, chain, item, taskPhases, input.taskBaseCommit)
 	return item
+}
+
+export function appendFixtureItemTaskTree(
+	store: ReturnType<typeof openSqliteStateStore>,
+	chain: ChainRecord,
+	item: ItemRecord,
+	phases: readonly string[],
+	baseCommit = "0123456789abcdef0123456789abcdef01234567",
+	definitionContentIdentity = `sha256:scheduler-fixture-${chain.id}-${item.id}`,
+): void {
+	if (phases.length === 0) throw new Error(`fixture item ${item.id} requires at least one task phase`)
+	if (new Set(phases).size !== phases.length) throw new Error(`fixture item ${item.id} task phases must be unique`)
+	const definitionRef = {
+		kind: "preset",
+		contentIdentity: definitionContentIdentity,
+	} as const
+	const sourceParNodeId = `chain:${chain.id}:tasks`
+	const children: TaskLeafNodeSnapshot[] = phases.map((phase) => {
+		const runtimeNodeId = `task:${chain.id}:item:${item.id}:${phase}`
+		const closureId = `closure:${chain.id}:${item.id}:${phase}`
+		return {
+			kind: "leaf",
+			identity: { runtimeNodeId, definitionRef, definitionNodeId: phase },
+			state: "pending",
+			closure: {
+				closureId,
+				itemRowId: item.id,
+				itemId: item.itemId,
+				phase,
+				lifecycle: "active",
+				worktreePath: item.repoCwd,
+				branchName: closureBranchName(chain.name, closureId),
+				baseCommit,
+				sourceParNodeId,
+				sessions: [],
+			},
+		}
+	})
+	store.appendItemTaskTree(chain.id, {
+		kind: "seq",
+		identity: {
+			runtimeNodeId: `task:${chain.id}:item:${item.id}:root`,
+			definitionRef,
+			definitionNodeId: "root",
+		},
+		cursor: { kind: "next", nodeId: children[0]!.identity.runtimeNodeId },
+		children,
+	})
 }
 
 export async function writeFakeRunner(path: string): Promise<void> {

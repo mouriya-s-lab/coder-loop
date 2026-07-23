@@ -152,15 +152,16 @@ export function singleLeafTree(item: ItemRecord): TaskTreeSnapshot {
 		root: {
 			kind: "leaf",
 			identity: { runtimeNodeId: `leaf-${item.id}`, definitionRef: { kind: "chain", contentIdentity: "sha256:single-leaf" }, definitionNodeId: "leaf" },
+			state: "pending",
 			closure: { closureId: `closure-${item.id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: "/repo/coder-loop", branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] },
 		},
 		activeRuns: [],
 	}
 }
 
-export function twoPhaseLeafTree(item: ItemRecord): TaskTreeSnapshot {
+export function twoPhaseLeafTree(item: ItemRecord, sourceParNodeId: string | null = null): TaskTreeSnapshot {
 	const definitionRef = { kind: "chain", contentIdentity: "sha256:two-phase" } as const
-	const closure = (phase: string) => ({ kind: "leaf", identity: { runtimeNodeId: `leaf-${item.id}-${phase}`, definitionRef, definitionNodeId: phase }, closure: { closureId: `closure-${item.id}-${phase}`, itemRowId: item.id, itemId: item.itemId, phase, lifecycle: "active", worktreePath: "/repo/coder-loop", branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } } as const)
+	const closure = (phase: string) => ({ kind: "leaf", identity: { runtimeNodeId: `leaf-${item.id}-${phase}`, definitionRef, definitionNodeId: phase }, state: "pending", closure: { closureId: `closure-${item.id}-${phase}`, itemRowId: item.id, itemId: item.itemId, phase, lifecycle: "active", worktreePath: "/repo/coder-loop", branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId, sessions: [] } } as const)
 	return { root: { kind: "seq", identity: { runtimeNodeId: `root-${item.id}`, definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: `leaf-${item.id}-iteration` }, children: [closure("iteration"), closure("review")] }, activeRuns: [] }
 }
 
@@ -170,4 +171,3 @@ export function dbFileRoot(dbFile: string): string {
 
 export { Database, cp, mkdir, rm, writeFile, resolve, SqliteStateError, openSqliteStateStore, chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra, seedCanonicalHistoricalRuntime }
 export type { ChainRecord, CreateItemInput, ItemRecord, JsonObject, TaskTreeSnapshot }
-

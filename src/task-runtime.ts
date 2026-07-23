@@ -40,13 +40,15 @@ export type JoinEvaluationSnapshot =
 export type SeqCursorSnapshot = { kind: "next"; nodeId: string } | { kind: "complete" }
 export type ParReopenSnapshot = { count: number; budgetRef: string }
 export type ParJoinSnapshot = { currentVersion: number; value: JoinValueSnapshot; evaluation: JoinEvaluationSnapshot }
-export type TaskLeafNodeSnapshot = { kind: "leaf"; identity: TaskNodeIdentity; closure: ClosureSnapshot }
+export type TaskLeafState = "pending" | "completed" | "exhausted"
+export type TaskLeafNodeSnapshot = { kind: "leaf"; identity: TaskNodeIdentity; state?: TaskLeafState; closure: ClosureSnapshot }
 export type TaskSeqNodeSnapshot = { kind: "seq"; identity: TaskNodeIdentity; cursor: SeqCursorSnapshot; children: readonly TaskNodeSnapshot[] }
 export type TaskParNodeSnapshot = {
 	kind: "par"
 	identity: TaskNodeIdentity
 	groupId: string
 	pinCommit: string
+	maxConcurrency?: number | null
 	state: "open" | "completed" | "exhausted"
 	reopen: ParReopenSnapshot
 	join: ParJoinSnapshot
@@ -126,7 +128,11 @@ function isClosure(value: unknown): value is ClosureSnapshot {
 
 function isTaskNodeSnapshot(value: unknown): value is TaskNodeSnapshot {
 	if (!isRecord(value) || !isIdentity(value.identity)) return false
-	if (value.kind === "leaf") return isClosure(value.closure) && hasExactKeys(value, ["kind", "identity", "closure"])
+	if (value.kind === "leaf") {
+		return (value.state === undefined || value.state === "pending" || value.state === "completed" || value.state === "exhausted")
+			&& isClosure(value.closure)
+			&& (hasExactKeys(value, ["kind", "identity", "closure"]) || hasExactKeys(value, ["kind", "identity", "state", "closure"]))
+	}
 	if (!Array.isArray(value.children) || !value.children.every(isTaskNodeSnapshot)) return false
 	if (value.kind === "seq") {
 		if (!isRecord(value.cursor)) return false
@@ -139,11 +145,13 @@ function isTaskNodeSnapshot(value: unknown): value is TaskNodeSnapshot {
 	if (!isRecord(identity)) return false
 	if (value.kind !== "par" || value.groupId !== identity.runtimeNodeId) return false
 	if (typeof value.pinCommit !== "string" || value.pinCommit.length === 0) return false
+	if (value.maxConcurrency !== undefined && value.maxConcurrency !== null && (!Number.isInteger(value.maxConcurrency) || Number(value.maxConcurrency) < 1)) return false
 	if (value.state !== "open" && value.state !== "completed" && value.state !== "exhausted") return false
 	if (!isRecord(value.reopen) || !Number.isInteger(value.reopen.count) || Number(value.reopen.count) < 0 || typeof value.reopen.budgetRef !== "string" || value.reopen.budgetRef.length === 0 || !hasExactKeys(value.reopen, ["count", "budgetRef"])) return false
 	if (!isRecord(value.join) || !Number.isInteger(value.join.currentVersion) || Number(value.join.currentVersion) < 1 || !hasExactKeys(value.join, ["currentVersion", "value", "evaluation"])) return false
 	if (!isJoinValue(value.join.value) || !isJoinEvaluation(value.join.evaluation)) return false
 	return hasExactKeys(value, ["kind", "identity", "groupId", "pinCommit", "state", "reopen", "join", "children"])
+		|| hasExactKeys(value, ["kind", "identity", "groupId", "pinCommit", "maxConcurrency", "state", "reopen", "join", "children"])
 }
 
 function isJoinValue(value: unknown): value is JoinValueSnapshot {
@@ -176,4 +184,113 @@ export const TaskTreeSnapshotBoundary = arkType("unknown").narrow((value): value
 
 export function assertTaskTreeSnapshot(value: unknown): TaskTreeSnapshot {
 	return TaskTreeSnapshotBoundary.assert(value)
+}
+
+/**
+ * Returns the recursively ready leaf node ids in deterministic declaration order.
+ * Structural readiness is independent of repository/worktree identity: seq follows
+ * only its persisted cursor, while par opens every unfinished member and applies its
+ * own declaration limit after excluding closures that already own an active run.
+ */
+export function collectReadyTaskLeaves(node: TaskNodeSnapshot, activeClosureIds: ReadonlySet<string>): string[] {
+	return collectTaskDispatchDecisions(node, activeClosureIds)
+		.flatMap((decision) => decision.kind === "reopen" || decision.kind === "resume" ? [decision.runtimeNodeId] : [])
+}
+
+/**
+ * The complete closure-lifecycle dispatch decision. Creation belongs to task-tree
+ * instantiation rather than scheduler spawn, but keeping the absent case in this
+ * ADT makes that ownership explicit and gives every lifecycle state one decision.
+ */
+export type ClosureDispatchDecision =
+	| { kind: "create" }
+	| { kind: "reopen"; closureId: string }
+	| { kind: "resume"; closureId: string }
+	| { kind: "deny-active-live"; closureId: string }
+	| { kind: "never-spawn"; closureId: string; reason: "consumed" }
+
+export function decideClosureDispatch(closure: ClosureSnapshot | null, hasLiveRun: boolean): ClosureDispatchDecision {
+	if (closure === null) return { kind: "create" }
+	if (closure.lifecycle === "consumed") return { kind: "never-spawn", closureId: closure.closureId, reason: "consumed" }
+	if (hasLiveRun) return { kind: "deny-active-live", closureId: closure.closureId }
+	if (closure.lifecycle === "suspended") return { kind: "reopen", closureId: closure.closureId }
+	return { kind: "resume", closureId: closure.closureId }
+}
+
+export type TaskDispatchDecision =
+	| { kind: "reopen"; runtimeNodeId: string; closureId: string }
+	| { kind: "resume"; runtimeNodeId: string; closureId: string }
+	| { kind: "deny-active-live"; runtimeNodeId: string; closureId: string }
+	| { kind: "never-spawn"; runtimeNodeId: string; closureId: string; reason: "consumed" }
+
+/**
+ * Returns closure-keyed dispatch decisions in declaration order. Suspended
+ * closures remain dispatchable through the explicit reopen branch. Active
+ * closures without a live run resume, active/live closures produce an audited
+ * denial, and consumed closures remain an explicit never-spawn observation.
+ */
+export function collectTaskDispatchDecisions(node: TaskNodeSnapshot, activeClosureIds: ReadonlySet<string>): TaskDispatchDecision[] {
+	switch (node.kind) {
+		case "leaf": {
+			if ((node.state ?? "pending") !== "pending") return []
+			const decision = decideClosureDispatch(node.closure, activeClosureIds.has(node.closure.closureId))
+			switch (decision.kind) {
+				case "create":
+					throw new Error(`persisted task leaf ${node.identity.runtimeNodeId} unexpectedly lacks closure identity`)
+				case "reopen":
+				case "resume":
+				case "deny-active-live":
+					return [{ ...decision, runtimeNodeId: node.identity.runtimeNodeId }]
+				case "never-spawn":
+					return [{ ...decision, runtimeNodeId: node.identity.runtimeNodeId }]
+				default:
+					return assertNever(decision)
+			}
+		}
+		case "seq": {
+			if (node.cursor.kind === "complete") return []
+			const cursorNodeId = node.cursor.nodeId
+			const current = node.children.find((child) => child.identity.runtimeNodeId === cursorNodeId)
+			return current === undefined ? [] : collectTaskDispatchDecisions(current, activeClosureIds)
+		}
+		case "par": {
+			if (node.state !== "open") return []
+			const decisions = node.children.flatMap((child) => collectTaskDispatchDecisions(child, activeClosureIds))
+			if (node.maxConcurrency === undefined || node.maxConcurrency === null) return decisions
+			const activeChildren = node.children.reduce((count, child) => count + countActiveTaskClosures(child, activeClosureIds), 0)
+			let remaining = Math.max(0, node.maxConcurrency - activeChildren)
+			return decisions.filter((decision) => {
+				if (decision.kind === "deny-active-live" || decision.kind === "never-spawn") return true
+				if (remaining === 0) return false
+				remaining -= 1
+				return true
+			})
+		}
+		default:
+			return assertNever(node)
+	}
+}
+
+export function taskNodeTerminal(node: TaskNodeSnapshot): boolean {
+	switch (node.kind) {
+		case "leaf": return node.state === "completed" || node.state === "exhausted"
+		case "seq": return node.cursor.kind === "complete"
+		case "par": return node.state === "completed" || node.state === "exhausted"
+		default: return assertNever(node)
+	}
+}
+
+function countActiveTaskClosures(node: TaskNodeSnapshot, activeClosureIds: ReadonlySet<string>): number {
+	switch (node.kind) {
+		case "leaf": return activeClosureIds.has(node.closure.closureId) ? 1 : 0
+		case "seq":
+		case "par":
+			return node.children.reduce((count, child) => count + countActiveTaskClosures(child, activeClosureIds), 0)
+		default:
+			return assertNever(node)
+	}
+}
+
+function assertNever(value: never): never {
+	throw new Error(`unhandled task runtime variant: ${JSON.stringify(value)}`)
 }

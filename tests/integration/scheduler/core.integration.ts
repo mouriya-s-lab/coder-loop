@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
 	chmod, cleanupSchedulerChainWorktrees, closureBranchName, consumeSchedulerClosure, createChain, createDeferred, createFixture, createGitWorktreeManager,
-	createItem, existsSync, gitOutput, historicalRunExtra, initGitTarget, itemExtraToJsonObject, listActiveRuns, loadPreset,
+	createItem, existsSync, fixtureTaskLeaf, fixtureTransitionRunId, gitOutput, historicalRunExtra, initGitTarget, itemExtraToJsonObject, listActiveRuns, loadPreset,
 	loadedPresetFromDir,
 	makeChainFixture, makeItemFixture, markRunPendingRecycle, maxConcurrentRunnerEvents, mkdir,
 	persistedObservabilityOptions, presetExecutionContentIdentity, promiseSettledWithin, queryObservabilityEvents,
@@ -29,13 +29,10 @@ describe("scheduler", () => {
 			if (activeRun === undefined) throw new Error("scheduler did not spawn identity fixture")
 			const run = fixture.store.getRunByRunId(activeRun.runId)
 			const tree = fixture.store.getTaskTree(chain.id)
-			if (run === null || tree?.root.kind !== "seq") throw new Error("scheduler did not persist runtime tree identity")
-			const leaf = tree.root.children.find((node) => node.kind === "leaf" && node.closure.itemRowId === item.id && node.closure.phase === "iteration")
-			if (leaf?.kind !== "leaf") throw new Error("scheduler did not persist iteration leaf")
-			const compiled = await loadPreset(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"))
-			const compiledLeaf = compiled.tasks.children.find((phaseTree) => phaseTree.phase === "iteration")?.children[0]
-			if (compiledLeaf === undefined) throw new Error("compiled preset omitted iteration leaf")
-			expect(leaf.identity.definitionNodeId).toBe(compiledLeaf.identity)
+			if (run === null || tree?.root.kind !== "par") throw new Error("scheduler did not persist chain task root identity")
+			const leaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "iteration")
+			if (leaf === null) throw new Error("scheduler did not persist iteration leaf")
+			expect(leaf.identity.definitionNodeId).toBe("iteration")
 			expect(run.runtimeNodeId).toBe(leaf.identity.runtimeNodeId)
 			expect(fixture.schedulerEvents.some((event) => event.type === "phase.start" && event.runId === run.runId)).toBe(true)
 			await activeRun.closed
@@ -209,15 +206,13 @@ describe("scheduler", () => {
 		const fixture = await createFixture("closure-branch-identity")
 		try {
 			const chain = createChain(fixture.store, "closure-branch-identity-chain")
-			createItem(fixture.store, chain, { issueNumber: 55801, repoCwd: "/repo/closure-branch", writeStatus: null })
+			const item = createItem(fixture.store, chain, { issueNumber: 55801, repoCwd: "/repo/closure-branch", writeStatus: null })
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
 			const tree = fixture.store.getTaskTree(chain.id)
-			expect(tree?.root.kind).toBe("seq")
-			if (tree?.root.kind !== "seq") throw new Error("expected fixture task tree seq root")
-			const leaf = tree.root.children[0]
-			expect(leaf?.kind).toBe("leaf")
-			if (leaf?.kind !== "leaf") throw new Error("expected fixture task tree leaf")
+			expect(tree?.root.kind).toBe("par")
+			const leaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "iteration")
+			if (leaf === null) throw new Error("expected fixture task tree leaf")
 			expect(leaf.closure.branchName).toBe(closureBranchName(chain.name, leaf.closure.closureId))
 			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
 		} finally { fixture.store.close() }
@@ -226,14 +221,18 @@ describe("scheduler", () => {
 	test("single chain single repo serial", async () => {
 		const fixture = await createFixture("serial")
 		try {
-			const chain = createChain(fixture.store, "serial-chain")
-			// #405: pin iteration's status write to `done` so each item terminates in a single
-			// iteration run, mirroring the historical test cadence. Without the override the new
-			// (post-verdict-retirement) flow would legitimately advance iteration → review per
-			// item and double the spawn count — captured in dedicated multi-phase tests.
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 181, repoCwd: "/repo/a", writeStatus: "done" })
+			const chain = createChain(fixture.store, "serial-chain", {
+				metadata: {
+					bindings: {
+						umbrellaIssue: 176,
+						umbrellaRepo: "mouriya-s-lab/coder-loop",
+						maxConcurrency: 1,
+					},
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
+			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
+			createItem(fixture.store, chain, { issueNumber: 181, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -265,8 +264,8 @@ describe("scheduler", () => {
 			initializeFixtureGitWorktree(firstRepo)
 			initializeFixtureGitWorktree(secondRepo)
 			const chain = createChain(fixture.store, "multi-repo-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: firstRepo, sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: secondRepo, sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: firstRepo, sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done", taskPhases: ["review"] })
+			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: secondRepo, sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done", taskPhases: ["review"] })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(2)
@@ -287,7 +286,7 @@ describe("scheduler", () => {
 			const invalid = createChain(fixture.store, "..")
 			const valid = createChain(fixture.store, "valid-chain")
 			createItem(fixture.store, invalid, { issueNumber: 178, repoCwd: "/repo/a" })
-			createItem(fixture.store, valid, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, valid, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
@@ -361,7 +360,9 @@ describe("scheduler", () => {
 					expect(status.status, stage).toBe("queued")
 				}
 				expect(fixture.store.getCurrentRun(chain.id), stage).toBeNull()
-				expect(fixture.state.slots.get(`${chain.id}\u0000/repo/a`)?.activeRun, stage).toBeNull()
+				const leaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "iteration")
+				if (leaf === null) throw new Error(`expected ${stage} iteration leaf`)
+				expect(fixture.state.closureLanes.get(`${chain.id}\u0000${leaf.closure.closureId}`)?.activeRun, stage).toBeNull()
 				const failedItem = fixture.store.getItem(item.id)
 				expect(failedItem?.extra.schedulerSpawnError, stage).toMatchObject({
 					at: now,
@@ -421,12 +422,20 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("contained spawn failure releases repo scheduling", async () => {
+	test("contained spawn failure releases sibling scheduling in the same tick", async () => {
 		const fixture = await createFixture("contained-spawn-releases-repo")
 		try {
-			const chain = createChain(fixture.store, "contained-spawn-releases-repo-chain")
+			const chain = createChain(fixture.store, "contained-spawn-releases-repo-chain", {
+				metadata: {
+					bindings: {
+						umbrellaIssue: 176,
+						umbrellaRepo: "mouriya-s-lab/coder-loop",
+						maxConcurrency: 1,
+					},
+				},
+			})
 			const failed = createItem(fixture.store, chain, { issueNumber: 535_301, repoCwd: "/repo/a" })
-			const sibling = createItem(fixture.store, chain, { issueNumber: 535_302, repoCwd: "/repo/a", writeStatus: "done" })
+			const sibling = createItem(fixture.store, chain, { issueNumber: 535_302, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 			const base = fixture.options({
 				now: () => 1_900_535_300,
 				prompt: (context) => {
@@ -436,14 +445,13 @@ describe("scheduler", () => {
 			})
 
 			const failedTick = await schedulerTick(base)
-			expect(failedTick.spawnedRuns).toHaveLength(0)
-			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
-			expect(fixture.state.slots.get(`${chain.id}\u0000/repo/a`)?.activeRun).toBeNull()
+			expect(failedTick.spawnedRuns.map((run) => run.itemId)).toEqual([sibling.id])
+			expect(fixture.store.getCurrentRun(chain.id)?.runId).toBe(failedTick.spawnedRuns[0]?.runId)
+			const failedLeaf = fixtureTaskLeaf(fixture.store, chain.id, failed.id, "iteration")
+			if (failedLeaf === null) throw new Error("expected failed sibling iteration leaf")
+			expect(fixture.state.closureLanes.get(`${chain.id}\u0000${failedLeaf.closure.closureId}`)?.activeRun).toBeNull()
 			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted" && event.itemId === failed.id)).toHaveLength(1)
-
-			const siblingTick = await schedulerTick(base)
-			expect(siblingTick.spawnedRuns.map((run) => run.itemId)).toEqual([sibling.id])
-			await siblingTick.spawnedRuns[0]!.closed
+			await failedTick.spawnedRuns[0]!.closed
 		} finally {
 			await stopFixture(fixture)
 		}
@@ -467,10 +475,18 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("slot busy skip", async () => {
+	test("active closure and declared global cap skip duplicate dispatch", async () => {
 		const fixture = await createFixture("busy")
 		try {
-			const chain = createChain(fixture.store, "busy-chain")
+			const chain = createChain(fixture.store, "busy-chain", {
+				metadata: {
+					bindings: {
+						umbrellaIssue: 176,
+						umbrellaRepo: "mouriya-s-lab/coder-loop",
+						maxConcurrency: 1,
+					},
+				},
+			})
 			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80 })
 			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 80 })
 
@@ -479,7 +495,12 @@ describe("scheduler", () => {
 			expect(firstTick.spawnedRuns).toHaveLength(1)
 			expect(secondTick.spawnedRuns).toHaveLength(0)
 			expect(fixture.store.getCurrentRun(chain.id)?.extra).toMatchObject({ itemId: firstTick.spawnedRuns[0]?.itemId, pid: firstTick.spawnedRuns[0]?.pid })
-			expect(fixture.schedulerEvents.some((event) => event.type === "slot.busy")).toBe(true)
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "closure.dispatch_denied",
+				itemId: firstTick.spawnedRuns[0]?.itemId,
+				runId: firstTick.spawnedRuns[0]?.runId,
+				reason: "active-live-run",
+			}))
 			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["queued", "queued"])
 			await firstTick.spawnedRuns[0]!.closed
 		} finally {
@@ -490,9 +511,17 @@ describe("scheduler", () => {
 	test("advance after terminal", async () => {
 		const fixture = await createFixture("advance")
 		try {
-			const chain = createChain(fixture.store, "advance-chain")
-			const first = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
-			const second = createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
+			const chain = createChain(fixture.store, "advance-chain", {
+				metadata: {
+					bindings: {
+						umbrellaIssue: 176,
+						umbrellaRepo: "mouriya-s-lab/coder-loop",
+						maxConcurrency: 1,
+					},
+				},
+			})
+			const first = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done", taskPhases: ["review"] })
+			const second = createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done", taskPhases: ["review"] })
 
 			const firstTick = await schedulerTick(fixture.options())
 			await firstTick.spawnedRuns[0]!.closed
@@ -514,7 +543,7 @@ describe("scheduler", () => {
 			await mkdir(repoCwd, { recursive: true })
 			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "completion-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd, writeStatus: "done", taskPhases: ["review"] })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -531,7 +560,13 @@ describe("scheduler", () => {
 		await initGitTarget(target)
 		try {
 			const chain = createChain(fixture.store, "completion-cleanup-idempotent-chain")
-			createItem(fixture.store, chain, { issueNumber: 351_001, repoCwd: target, writeStatus: "done" })
+			createItem(fixture.store, chain, {
+				issueNumber: 351_001,
+				repoCwd: target,
+				writeStatus: "done",
+				taskPhases: ["review"],
+				taskBaseCommit: gitOutput(target, ["rev-parse", "HEAD"]),
+			})
 
 			await runSchedulerUntilIdle(fixture.options({
 				worktreeManager: createGitWorktreeManager({ loopDataRoot: fixture.loopDataRoot }),
@@ -540,9 +575,11 @@ describe("scheduler", () => {
 			const completed = fixture.store.getChain(chain.id)
 			if (completed === null) throw new Error("expected completed chain")
 			const root = fixture.store.getTaskTree(completed.id)?.root
-			if (root?.kind !== "seq") throw new Error("expected seq task tree")
-			const closure = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
-			if (closure?.kind !== "leaf") throw new Error("expected iteration closure")
+			if (root?.kind !== "par") throw new Error("expected chain par task tree")
+			const item = fixture.store.listItems(chain.id)[0]
+			if (item === undefined) throw new Error("expected completed fixture item")
+			const closure = fixtureTaskLeaf(fixture.store, chain.id, item.id, "review")
+			if (closure === null) throw new Error("expected review closure")
 			const worktreePath = closureWorktreePath(fixture.loopDataRoot, completed.name, target, closure.closure.closureId)
 			const branchName = closureBranchName(completed.name, closure.closure.closureId)
 			expect(completed.status).toBe("completed")
@@ -580,27 +617,36 @@ describe("scheduler", () => {
 			const repoCwd = resolve(fixture.loopDataRoot, "missing-repository")
 			await mkdir(repoCwd, { recursive: true })
 			await writeFile(resolve(repoCwd, ".git"), "invalid git metadata\n")
-			const item = createItem(fixture.store, chain, { issueNumber: 351_002, repoCwd, writeStatus: "done" })
-			fixture.store.recordRun({ runId: "consume-cleanup-failure-run", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1, extra: historicalRunExtra() })
+			const item = createItem(fixture.store, chain, { issueNumber: 351_002, repoCwd, writeStatus: "done", taskPhases: ["review"] })
+			fixture.store.recordRun({ runId: "consume-cleanup-failure-run", chainId: chain.id, itemId: item.id, phase: "review", startedAt: 1, extra: historicalRunExtra() })
 			fixture.store.updateItem(item.id, { status: runtimeStatus("done") })
-			const tree = fixture.store.getTaskTree(chain.id)
-			const closure = tree?.root.kind === "seq" && tree.root.children[0]?.kind === "leaf" ? tree.root.children[0].closure : null
-			if (closure === null) throw new Error("expected closure")
+			const leaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "review")
+			if (leaf === null) throw new Error("expected closure")
+			const closure = leaf.closure
+				fixture.store.commitTaskTransition({
+					sourceRunId: fixtureTransitionRunId(fixture.store, chain.id, item.id, "review"),
+					sourceClosureId: closure.closureId,
+				targetRuntimeNodeId: null,
+				pathId: "fixture-terminal",
+				exitPayload: { status: "done" },
+				resolvedBindings: {},
+				createdAt: 2,
+				itemUpdate: { kind: "none" },
+			})
 			const worktreePath = closureWorktreePath(fixture.loopDataRoot, chain.name, repoCwd, closure.closureId)
 			const branchName = closureBranchName(chain.name, closure.closureId)
-			fixture.store.setClosureResources(closure.closureId, { worktreePath, branchName, updatedAt: 2 })
+			fixture.store.setClosureResources(closure.closureId, { worktreePath, branchName, updatedAt: 3 })
 
 			const result = await consumeSchedulerClosure({
 				chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd,
 				closure: { ...closure, worktreePath, branchName },
 				authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] },
-				updatedAt: 3, loopDataRootOptions: { loopDataRoot: fixture.loopDataRoot }, store: fixture.store, emit: () => {},
+				updatedAt: 4, loopDataRootOptions: { loopDataRoot: fixture.loopDataRoot }, store: fixture.store, emit: () => {},
 			})
 
 			expect(result.cleanup?.error).not.toBeNull()
 			expect(result.complete).toBe(false)
-			const persistedTree = fixture.store.getTaskTree(chain.id)
-			const persisted = persistedTree?.root.kind === "seq" ? persistedTree.root.children.find((node) => node.kind === "leaf" && node.closure.closureId === closure.closureId) : null
+			const persisted = fixtureTaskLeaf(fixture.store, chain.id, item.id, "review")
 			expect(persisted).toMatchObject({ closure: { lifecycle: "consumed", worktreePath, branchName } })
 		} finally { await stopFixture(fixture) }
 	})
@@ -671,7 +717,7 @@ describe("scheduler", () => {
 			await mkdir(repoCwd, { recursive: true })
 			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "completion-trigger-chain")
-			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd, writeStatus: "done", taskPhases: ["review"] })
 			const observedChainStatuses: string[] = []
 
 			await runSchedulerUntilIdle(fixture.options({
@@ -691,6 +737,7 @@ describe("scheduler", () => {
 				"recycle.natural_exit",
 				"agent.exit",
 				"phase.end",
+				"closure.lifecycle_changed",
 				"queue.terminal",
 				"chain.complete_trigger",
 				"closure.consumed",
@@ -708,7 +755,7 @@ describe("scheduler", () => {
 			await mkdir(repoCwd, { recursive: true })
 			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
-			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd, writeStatus: "done", taskPhases: ["review"] })
 			const triggerStarted = createDeferred()
 			const releaseTrigger = createDeferred()
 			let triggerCalls = 0
@@ -751,7 +798,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger-active")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-active-chain")
-			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 			let triggerCalls = 0
 			const options = fixture.options({
 				chainCompleteTrigger: () => {
@@ -782,8 +829,20 @@ describe("scheduler", () => {
 			expect(triggerCalls).toBe(1)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
 
-			const followUp = createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
+			const followUp = createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a", taskPhases: ["review"] })
 			fixture.store.updateItem(followUp.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_999 })
+			const followUpLeaf = fixtureTaskLeaf(fixture.store, chain.id, followUp.id, "review")
+			if (followUpLeaf === null) throw new Error("expected follow-up review leaf")
+				fixture.store.commitTaskTransition({
+					sourceRunId: fixtureTransitionRunId(fixture.store, chain.id, followUp.id, "review"),
+					sourceClosureId: followUpLeaf.closure.closureId,
+				targetRuntimeNodeId: null,
+				pathId: "fixture-follow-up-terminal",
+				exitPayload: { status: "done" },
+				resolvedBindings: {},
+				createdAt: 1_800_001_000,
+				itemUpdate: { kind: "none" },
+			})
 			const thirdTick = await schedulerTick(options)
 			expect(thirdTick.spawnedRuns).toHaveLength(0)
 			expect(thirdTick.completedChainIds).toEqual([])
@@ -796,7 +855,7 @@ describe("scheduler", () => {
 		const followUpFixture = await createFixture("completion-trigger-follow-up")
 		try {
 			const chain = createChain(followUpFixture.store, "completion-trigger-follow-up-chain")
-			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 
 			const tick = await schedulerTick(followUpFixture.options({
 				chainCompleteTrigger: ({ chain: triggerChain }) => {
@@ -816,7 +875,7 @@ describe("scheduler", () => {
 		const failingFixture = await createFixture("completion-trigger-failing")
 		try {
 			const chain = createChain(failingFixture.store, "completion-trigger-failing-chain")
-			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 
 			const tick = await schedulerTick(failingFixture.options({
 				chainCompleteTrigger: () => {
@@ -842,8 +901,22 @@ describe("scheduler", () => {
 		const fixture = await createFixture("manual-terminal-completion")
 		try {
 			const chain = createChain(fixture.store, "manual-terminal-completion-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 249, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { issueNumber: 249, repoCwd: "/repo/a", taskPhases: ["review"] })
 			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
+			const leaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "review")
+			if (leaf === null) throw new Error("expected manual-terminal review leaf")
+				fixture.store.commitTaskTransition({
+					sourceRunId: fixtureTransitionRunId(fixture.store, chain.id, item.id, "review"),
+					sourceClosureId: leaf.closure.closureId,
+				targetRuntimeNodeId: null,
+				pathId: "fixture-manual-terminal",
+				exitPayload: { status: "done" },
+				resolvedBindings: {},
+				createdAt: 1_800_000_501,
+				itemUpdate: { kind: "none" },
+			})
+			fixture.store.setClosureLifecycle(leaf.closure.closureId, { kind: "consume", updatedAt: 1_800_000_502 })
+			fixture.store.setClosureResources(leaf.closure.closureId, { worktreePath: null, branchName: null, updatedAt: 1_800_000_503 })
 
 			const tick = await schedulerTick(fixture.options())
 
@@ -863,13 +936,25 @@ describe("scheduler", () => {
 			await mkdir(repoCwd, { recursive: true })
 			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "terminal-preserve-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd, sleepMs: 5_000 })
+			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd, sleepMs: 5_000, taskPhases: ["review"] })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 
 			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
+			const leaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "review")
+			if (leaf === null) throw new Error("expected terminal-preserve review leaf")
+				fixture.store.commitTaskTransition({
+					sourceRunId: fixtureTransitionRunId(fixture.store, chain.id, item.id, "review"),
+					sourceClosureId: leaf.closure.closureId,
+				targetRuntimeNodeId: null,
+				pathId: "fixture-user-terminal",
+				exitPayload: { status: "done" },
+				resolvedBindings: {},
+				createdAt: 1_800_000_501,
+				itemUpdate: { kind: "none" },
+			})
 			const closed = await tick.spawnedRuns[0]!.terminate({ forceAfterMs: 200 })
 
 			expect(closed.exitCode).toBe(1)
@@ -905,8 +990,8 @@ describe("scheduler", () => {
 		await writeEmptySuccessPreset(presetDir)
 		try {
 			const chain = createChain(fixture.store, "empty-success-statuses-chain", { preset: "empty-success" })
-			const target = createItem(fixture.store, chain, { issueNumber: 710_001, repoCwd: "/repo/a" })
-			const dependent = createItem(fixture.store, chain, { issueNumber: 710_002, repoCwd: "/repo/a" })
+			const target = createItem(fixture.store, chain, { issueNumber: 710_001, repoCwd: "/repo/a", taskPhases: ["run"] })
+			const dependent = createItem(fixture.store, chain, { issueNumber: 710_002, repoCwd: "/repo/a", taskPhases: ["run"] })
 			fixture.store.updateItem(target.id, { status: runtimeStatus("done"), updatedAt: 1_800_710_001 })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
@@ -939,7 +1024,7 @@ describe("scheduler", () => {
 			const tick = await schedulerTick(fixture.options())
 
 			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(fixture.state.slots.size).toBe(0)
+			expect(fixture.state.closureLanes.size).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
 			await stopFixture(fixture)
@@ -956,7 +1041,7 @@ describe("scheduler", () => {
 
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(tick.completedChainIds).toEqual([])
-			expect(fixture.state.slots.size).toBe(0)
+			expect(fixture.state.closureLanes.size).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("stopped")
 		} finally {
@@ -994,7 +1079,7 @@ describe("scheduler", () => {
 			const tick = await schedulerTick(fixture.options())
 
 			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(fixture.state.slots.size).toBe(0)
+			expect(fixture.state.closureLanes.size).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
 			await stopFixture(fixture)
@@ -1005,7 +1090,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("subprocess")
 		try {
 			const chain = createChain(fixture.store, "subprocess-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 
 			const tick = await schedulerTick(fixture.options())
 			const closed = await tick.spawnedRuns[0]!.closed
@@ -1056,19 +1141,17 @@ describe("scheduler", () => {
 			await mkdir(repoCwd, { recursive: true })
 			initializeFixtureGitWorktree(repoCwd)
 			const chain = createChain(fixture.store, "run-artifacts-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd, writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd, writeStatus: "done", taskPhases: ["review"] })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
-			// #405: runIdFactory is now phase-aware (`run-<chainId>-<itemId>-<phase>-<attempt>`)
-			// so a single iteration run on a fresh item yields attempt 1 of the iteration phase.
-			const runId = `run-${chain.id}-${item.id}-iteration-1`
+			const runId = `run-${chain.id}-${item.id}-review-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const status = RunStatusFixtureBoundary.assert(JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")))
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
-			const phaseStdout = await readFile(paths.runPhaseStdoutFile(runId, "iteration"), "utf-8")
-			const phaseStderr = await readFile(paths.runPhaseStderrFile(runId, "iteration"), "utf-8")
+			const phaseStdout = await readFile(paths.runPhaseStdoutFile(runId, "review"), "utf-8")
+			const phaseStderr = await readFile(paths.runPhaseStderrFile(runId, "review"), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
 
 			expect(status).toMatchObject({
@@ -1079,7 +1162,7 @@ describe("scheduler", () => {
 				// and `issueNumber: int` pre-#419.
 				rowId: item.id,
 				itemId: "203",
-				phase: "iteration",
+				phase: "review",
 				exitCode: 0,
 				status: runtimeStatus("done"),
 			})
@@ -1111,15 +1194,11 @@ describe("scheduler", () => {
 		const fixture = await createFixture("phase-events")
 		try {
 			const chain = createChain(fixture.store, "phase-events-chain")
-			// #405: pin iteration's write to `done` so the test's "single phase event run"
-			// assertion stays single. Previously the retired verdict mapper coincidentally
-			// landed iteration at done via the default REVIEW SUMMARY token; explicitly
-			// requesting it via `writeStatus` is the principled mirror under the new model.
-			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a", writeStatus: "done", taskPhases: ["review"] })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
-			const runId = `run-${chain.id}-${item.id}-iteration-1`
+			const runId = `run-${chain.id}-${item.id}-review-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			expect(existsSync(paths.runEventsFile(runId))).toBe(false)
 			const persisted = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
@@ -1145,7 +1224,7 @@ describe("scheduler", () => {
 				runId,
 				chain: chain.name,
 				item: item.id,
-				phase: "iteration",
+				phase: "review",
 				payload: { repoCwd: "/repo/a" },
 			})
 			expect(typeof phaseStart.ts).toBe("string")
@@ -1157,7 +1236,7 @@ describe("scheduler", () => {
 				runId,
 				chain: chain.name,
 				item: item.id,
-				phase: "iteration",
+				phase: "review",
 				payload: { exitCode: 0, status: runtimeStatus("done") },
 			})
 			expect(typeof phaseEnd.ts).toBe("string")
@@ -1226,6 +1305,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 				// status directly via `extra.writeStatus`, mirroring the real agent's
 				// `coder-loop item update --status` write through the typed phase-exits face.
 				writeStatus: "moot",
+				taskPhases: ["review"],
 			})
 
 			const tick = await schedulerTick(fixture.options())
@@ -1286,7 +1366,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 		const fixture = await createFixture("status-agent-over-stdout")
 		try {
 			const chain = createChain(fixture.store, "status-agent-over-stdout-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 5005, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { issueNumber: 5005, repoCwd: "/repo/a", taskPhases: ["review"] })
 
 			// The agent prints a verdict=retry SUMMARY line (which the deleted v2 inference would have
 			// mapped to changes_requested) but writes `done` to the store. v1 reads the written status.

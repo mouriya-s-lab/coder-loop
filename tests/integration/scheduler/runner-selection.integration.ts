@@ -1,12 +1,34 @@
 import { describe, expect, test } from "bun:test"
 import {
 	buildRunnerInvocation, chmod, createChain, createFixture, createItem, fixtureCaptureRoots, fixturePresetDirs,
-	loadPreset, makeChainFixture, mkdir, optionsWithoutRunner, readFile, REPO_ROOT, resolve,
+	fixtureTaskLeaf, fixtureTransitionRunId, loadPreset, makeChainFixture, mkdir, optionsWithoutRunner, readFile, REPO_ROOT, resolve,
 	resolveChainRuntimePaths, resolvePhaseRunnerFromChain, runPresetChainCompleteTriggerPhases,
 	runnerAuthorizationForTest, runtimeStatus, schedulerTick, seedSessionClosure, stopFixture, storedChainMetadata,
 	writeBunMarkerRunner, writeFile, writeShellFinalizerMarkerScript, writeShellMarkerScript,
 	type AgentRunnerSelection, type SchedulerPhaseRunner,
 } from "./harness"
+
+function advanceRunnerFixtureToReview(
+	store: Parameters<typeof fixtureTaskLeaf>[0],
+	chainId: number,
+	itemId: number,
+): void {
+	const iteration = fixtureTaskLeaf(store, chainId, itemId, "iteration")
+	const review = fixtureTaskLeaf(store, chainId, itemId, "review")
+	if (iteration === null || review === null) {
+		throw new Error(`runner fixture item ${itemId} must persist iteration and review task leaves`)
+	}
+	store.commitTaskTransition({
+		sourceRunId: fixtureTransitionRunId(store, chainId, itemId, "iteration"),
+		sourceClosureId: iteration.closure.closureId,
+		targetRuntimeNodeId: review.identity.runtimeNodeId,
+		pathId: "runner-selection:iteration-complete",
+		exitPayload: {},
+		resolvedBindings: {},
+		createdAt: 1_950_287_000,
+		itemUpdate: { kind: "none" },
+	})
+}
 
 describe("scheduler", () => {
 	test("runner projections reach scheduler fresh and resume paths for every runner", async () => {
@@ -212,7 +234,8 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const fixture = await createFixture("phase-runner-review")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-review-chain")
-			createItem(fixture.store, chain, { issueNumber: 287_102, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { issueNumber: 287_102, repoCwd: "/repo/a" })
+			advanceRunnerFixtureToReview(fixture.store, chain.id, item.id)
 
 			const fakeIter = resolve(fixture.loopDataRoot, "..", "fake-codex-review.ts")
 			const fakeReview = resolve(fixture.loopDataRoot, "..", "fake-claude-review.ts")
@@ -264,13 +287,14 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const fixture = await createFixture("phase-runner-fallback")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-fallback-chain")
-			createItem(fixture.store, chain, { issueNumber: 287_103, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { issueNumber: 287_103, repoCwd: "/repo/a", writeStatus: "done" })
+			advanceRunnerFixtureToReview(fixture.store, chain.id, item.id)
 
 			const tick = await schedulerTick(fixture.options())
 			const closed = await tick.spawnedRuns[0]!.closed
 
 			expect(closed.exitCode).toBe(0)
-			expect(fixture.store.getItem(fixture.store.listItems(chain.id)[0]!.id)?.status).toBe("done")
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
 		} finally {
 			await stopFixture(fixture)
 		}

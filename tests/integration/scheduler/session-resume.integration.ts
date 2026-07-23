@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
 	ArgvEventBoundary, buildRunnerInvocation, chmod, createChain, createFixture, createItem, fixtureCaptureRoots,
-	loadPreset, makeChainFixture, makeItemFixture, makeRunId, mkdir, readArgvEvents, readFile,
+	fixtureTaskLeaf, loadPreset, makeChainFixture, makeItemFixture, makeRunId, mkdir, readArgvEvents, readFile,
 	renderSchedulerSpawnPrompt, REPO_ROOT, resolve, resolveChainRuntimePaths, resumeDecisionForItem,
 	runnerAuthorizationForTest, runtimeStatus, schedulerTick, seedSessionClosure, stopFixture, writeFakeClaudeArgvEchoRunner,
 	writeFakeClaudeInvalidOnceRunner, writeFakeClaudeNormalSessionRunner, writeFakeClaudeSessionRunner,
@@ -293,13 +293,26 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 						: { kind: "claude", source: "review-default", binary: "bun", extraArgs: [fakeClaude], model: null },
 				runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}`,
 			})
-			// Drive the two phases explicitly: the fake session runners write no status, so
-			// run-until-idle would auto-advance iteration→review reusing the runId. Between ticks,
-			// set the item to a pending-eligible status so the explicit review tick selects it.
-			const iterTick = await schedulerTick({ ...sessionOptions, phase: "iteration" })
-			await iterTick.spawnedRuns[0]!.closed
+			// The fake session runners write no status, so commit the fixture's durable
+			// iteration → review transition between ticks. Tree readiness, not an explicit
+			// flat phase override, selects the second phase.
+			const iterTick = await schedulerTick(sessionOptions)
+			const iterClosed = await iterTick.spawnedRuns[0]!.closed
+			const iterationLeaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "iteration")
+			const reviewLeaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "review")
+			if (iterationLeaf === null || reviewLeaf === null) throw new Error("session fixture lost its two-phase task leaves")
+			fixture.store.commitTaskTransition({
+				sourceRunId: iterClosed.runId,
+				sourceClosureId: iterationLeaf.closure.closureId,
+				targetRuntimeNodeId: reviewLeaf.identity.runtimeNodeId,
+				pathId: "session-fixture:iteration-complete",
+				exitPayload: {},
+				resolvedBindings: {},
+				createdAt: 1_800_000_499,
+				itemUpdate: { kind: "none" },
+			})
 			fixture.store.updateItem(item.id, { status: runtimeStatus("changes_requested"), updatedAt: 1_800_000_500 })
-			const reviewTick = await schedulerTick({ ...sessionOptions, phase: "review" })
+			const reviewTick = await schedulerTick(sessionOptions)
 			await reviewTick.spawnedRuns[0]!.closed
 
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-iteration-311")

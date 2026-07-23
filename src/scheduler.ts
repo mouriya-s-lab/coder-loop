@@ -77,7 +77,7 @@ import {
 	type RepositoryGitCoordinator,
 	type RepositoryGitSingleflightResult,
 } from "./closure-lifecycle"
-import type { ClosureSnapshot, TaskNodeSnapshot } from "./task-runtime"
+import { collectTaskDispatchDecisions, taskNodeTerminal, type ClosureSnapshot, type TaskLeafNodeSnapshot, type TaskNodeSnapshot } from "./task-runtime"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // Under the unified completion protocol (#451) the agent
@@ -147,7 +147,7 @@ export type SchedulerCompletedRun = {
 	status: InternalStatus
 }
 
-export type SchedulerSlot = {
+export type SchedulerClosureLane = {
 	key: string
 	chainId: number
 	chainName: string
@@ -165,7 +165,7 @@ export type SchedulerSlot = {
 export type SchedulerRecycleTrigger = () => void
 
 export type SchedulerState = {
-	slots: Map<string, SchedulerSlot>
+	closureLanes: Map<string, SchedulerClosureLane>
 	finalizingItemStatuses: Map<number, InternalStatus>
 	finalizingChainIds: Set<number>
 	pendingCloseHandlers: Set<Promise<SchedulerCompletedRun>>
@@ -184,7 +184,8 @@ export type SchedulerStore = Pick<
 	SqliteStateStore,
 	| "listChains"
 	| "listItems"
-	| "listRuns"
+		| "listRuns"
+		| "listCurrentRuns"
 	| "getNextPendingItem"
 	| "updateChain"
 	| "getItem"
@@ -198,6 +199,9 @@ export type SchedulerStore = Pick<
 	| "getCurrentRun"
 	| "clearCurrentRun"
 	| "getTaskTree"
+	| "commitTaskTransition"
+	| "listTaskTransitions"
+	| "exhaustTaskLeaf"
 	| "setClosureLifecycle"
 	| "setClosureResources"
 	| "assessClosureConsumption"
@@ -208,12 +212,14 @@ export type SchedulerStore = Pick<
 export type SchedulerSpawnContext = {
 	chain: ChainRecord
 	item: ItemRecord
-	slot: SchedulerSlot
+	slot: SchedulerClosureLane
 	runId: string
 	worktreePath: string
 	presetDir: string
 	loadedPreset: SchedulerLoadedPreset
 	phase: string
+	closureId: string
+	runtimeNodeId: string
 }
 
 type SchedulerWorktreeContextBase = {
@@ -240,6 +246,7 @@ export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Pr
 
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
+	| { type: "closure.dispatch_denied"; chainId: number; itemId: number; phase: string; closureId: string; runtimeNodeId: string; runId: string; reason: "active-live-run" }
 	| { type: "closure.resource_prepared"; chainId: number; itemId: number; phase: string; closureId: string; worktreePath: string; branchName: string; baseCommit: string; freshness: OriginFreshness }
 	| { type: "closure.lifecycle_changed"; chainId: number; itemId: number; phase: string; closureId: string; from: "active" | "suspended"; to: "active" | "suspended"; reason: "phase-left" | "phase-entered" }
 	| { type: "closure.consumed"; chainId: number; closureId: string; evidence: ClosureConsumptionEvidence; freshness: OriginFreshness }
@@ -350,6 +357,12 @@ export type SchedulerSpawnFailureBackoffConfig = {
 	maxSeconds: number
 }
 
+export type SchedulerBoundPrompt = {
+	kind: "bound"
+	template: string
+	bindings: JsonObject
+}
+
 export type SchedulerOptions = {
 	store: SchedulerStore
 	state: SchedulerState
@@ -367,7 +380,7 @@ export type SchedulerOptions = {
 	phase?: string
 	prompt:
 		| string
-		| ((context: SchedulerSpawnContext) => string | Promise<string>)
+		| ((context: SchedulerSpawnContext) => string | SchedulerBoundPrompt | Promise<string | SchedulerBoundPrompt>)
 	worktreeManager?: SchedulerWorktreeManager
 	loopDataRootOptions?: LoopDataRootOptions
 	now?: () => number
@@ -462,7 +475,7 @@ let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
 	return {
-		slots: new Map(),
+		closureLanes: new Map(),
 		finalizingItemStatuses: new Map(),
 		finalizingChainIds: new Set(),
 		pendingCloseHandlers: new Set(),
@@ -484,18 +497,24 @@ export function markRunPendingRecycle(state: SchedulerState, runId: string): voi
 }
 
 export function maxItemAttemptsFromChainMetadata(metadata: ChainRecord["metadata"]): number {
-	const value = metadata.maxItemAttempts
-	if (isPositiveInteger(value)) return value
+	const bindingValue = metadataBindings(metadata).maxItemAttempts
+	if (isPositiveInteger(bindingValue)) return bindingValue
+	if (isPositiveInteger(metadata.maxItemAttempts)) return metadata.maxItemAttempts
 	return DEFAULT_MAX_ITEM_ATTEMPTS
 }
 
 export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpawns?: number }): Promise<SchedulerTickResult> {
-	const activeChains = options.store
-		.listChains()
+	const chains = options.store.listChains()
+	const activeChains = chains
 		.filter((chain) => chain.status === "active" && hasValidChainName(chain.name))
 	const activeChainIds = new Set(activeChains.map((chain) => chain.id))
 	const spawnedRuns: SchedulerActiveRun[] = []
 	const completedChainIds: number[] = []
+	// A declared maxConcurrency is daemon-global, so its occupied slots are the durable
+	// active runs owned by every chain, not just chains that are currently dispatchable.
+	// Stopping a chain does not end its already-running process or clear active_runs; excluding
+	// that owner here would let another chain exceed the global cap until the stopped run closes.
+	let daemonActiveRunCount = chains.reduce((count, chain) => count + options.store.listCurrentRuns(chain.id).length, 0)
 
 	removeIdleSlotsForInactiveChains(options.state, activeChainIds)
 
@@ -522,50 +541,71 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			&& !itemBackoffReady(chainPreparationItem, nowSeconds(options))
 		) continue
 		let chainStatuses: SchedulerChainStatuses
-		let phasePlan: SchedulerPhasePlan
 		try {
 			chainStatuses = await schedulerStatusesForChainWithItems(options, chain, items)
-			phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
 		} catch (error) {
 			if (chainPreparationItem === undefined) throw error
-			const slot = getOrCreateSlot(options.state, chain, chainPreparationItem.repoCwd)
+			const slot = getOrCreateClosureLane(options.state, chain, chainPreparationItem.repoCwd)
 			await containSchedulerPreparationFailure(options, chain, chainPreparationItem, slot, { kind: "chain-plan" }, error)
 			continue
 		}
-		const runs = options.store.listRuns(chain.id)
-		const repoCwds = distinct(items.map((item) => item.repoCwd))
-
-		for (const repoCwd of repoCwds) {
-			if (spawnCapped()) break
-			const slot = getOrCreateSlot(options.state, chain, repoCwd)
-			if (slot.activeRun !== null) {
-				await emit(options, {
-					type: "slot.busy",
-					slotKey: slot.key,
-					chainId: chain.id,
-					repoCwd,
-					activeRunId: slot.activeRun.runId,
-				})
+		for (const repoCwd of distinct(items.map((item) => item.repoCwd))) {
+			items = await exhaustItemsOverAttemptLimitForRepo(options, chain, repoCwd, items, chainStatuses)
+			await emitRepoWaitingDecisions(options, chain, repoCwd, items, chainStatuses, nowSeconds(options))
+		}
+		const tree = options.store.getTaskTree(chain.id)
+		if (tree === null) {
+			if (chainPreparationItem !== undefined) {
+				const lane = getOrCreateClosureLane(options.state, chain, chainPreparationItem.repoCwd, `missing-tree:${chainPreparationItem.id}`)
+				await containSchedulerPreparationFailure(options, chain, chainPreparationItem, lane, { kind: "chain-plan" }, new SchedulerError("spawn_failed", `chain ${chain.name} has items but no persisted runtime task tree`))
+			}
+			continue
+		}
+		const activeRunByClosure = new Map(tree.activeRuns.map((run) => [run.closureId, run]))
+		const activeClosureIds = new Set(activeRunByClosure.keys())
+		const decisions = collectTaskDispatchDecisions(tree.root, activeClosureIds)
+		const itemByRowId = new Map(items.map((item) => [item.id, item]))
+		const pendingStatuses = new Set(chainStatuses.pending)
+		const terminalStatuses = new Set(chainStatuses.terminal)
+		const dependencyWaitIds = new Set(listDependencyWaitReasons(items, {
+			statuses: chainStatuses.pending,
+			terminalStatusNames: chainStatuses.terminal,
+			dependencySuccessStatusNames: chainStatuses.success,
+			resolveDependency: (id) => options.store.getItem(id),
+		}).map((wait) => wait.rowId))
+		const declaredGlobalLimit = schedulerGlobalConcurrencyLimit(chain)
+		for (const decision of decisions) {
+			const leaf = findTaskLeafByRuntimeNodeId(tree.root, decision.runtimeNodeId)
+			if (leaf === null) continue
+			const item = itemByRowId.get(leaf.closure.itemRowId)
+			if (item === undefined) continue
+			if (decision.kind === "deny-active-live") {
+				const active = activeRunByClosure.get(decision.closureId)
+				if (active !== undefined) {
+					await emit(options, { type: "closure.dispatch_denied", chainId: chain.id, itemId: item.id, phase: leaf.closure.phase, closureId: decision.closureId, runtimeNodeId: decision.runtimeNodeId, runId: active.runId, reason: "active-live-run" })
+				}
 				continue
 			}
-			if (hasFinalizingItemForRepo(options.state, items, repoCwd)) continue
-
-			items = await exhaustItemsOverAttemptLimitForRepo(options, chain, repoCwd, items, chainStatuses)
-			const now = nowSeconds(options)
-			await emitRepoWaitingDecisions(options, chain, repoCwd, items, chainStatuses, now)
-			const next = selectNextItemAndPhase({
-				repoCwd,
-				items,
-				runs,
-				chainStatuses,
-				phasePlan,
-				explicitPhase: options.phase,
-				now,
-			})
-			if (next === null) continue
-
-			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan)
-			if (activeRun !== null) spawnedRuns.push(activeRun)
+			if (decision.kind === "never-spawn") continue
+			if (spawnCapped() || (declaredGlobalLimit !== null && daemonActiveRunCount >= declaredGlobalLimit)) break
+			const eligibility = await taskLeafDispatchEligibility(
+				options,
+				chain,
+				item,
+				leaf,
+				pendingStatuses,
+				terminalStatuses,
+			)
+			if (eligibility.kind === "ineligible") continue
+			if (dependencyWaitIds.has(item.id) || !itemBackoffReady(item, nowSeconds(options))) continue
+			if (options.state.finalizingItemStatuses.has(item.id)) continue
+			const lane = getOrCreateClosureLane(options.state, chain, item.repoCwd, leaf.closure.closureId)
+			if (lane.activeRun !== null) continue
+			const activeRun = await spawnSchedulerRun(options, chain, item, lane, leaf)
+			if (activeRun !== null) {
+				spawnedRuns.push(activeRun)
+				daemonActiveRunCount += 1
+			}
 		}
 
 		// Restore dependency-unblocked terminal items AFTER selection so a freshly-unblocked item is
@@ -589,9 +629,7 @@ type SchedulerItemTriggerPhase = {
 	whenStatus: InternalStatus
 }
 
-type SchedulerPhasePlan = {
-	firstPhase: string
-	nonTriggerPhases: readonly string[]
+type LegacyPhaseAdapter = {
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
 
@@ -599,126 +637,70 @@ type SchedulerPhasePlan = {
 // chain-only variant (`resolvePhasePlanForChain`) was removed once mixed-preset chains became
 // legal — when chain.preset != items[0].preset, the chain-seed phase plan disagreed with the
 // per-item preset load and rendered runs failed with `phase_not_found_in_preset`.
-async function resolvePhasePlanForChainWithItems(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	items: readonly ItemRecord[],
-): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { firstPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
-	const { preset } = await schedulerLoadedPresetForChainItems(options, chain, items)
-	return buildPhasePlanFromPreset(preset)
-}
-
-function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerPhasePlan {
-	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
-	const firstPhase = nonTriggerPhases[0]
-	if (firstPhase === undefined) throw new Error(`preset ${preset.name} has no non-trigger phases`)
+function buildLegacyPhaseAdapter(preset: SchedulerLoadedPreset["preset"]): LegacyPhaseAdapter {
 	const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
 		const trigger = phase.trigger
 		if (trigger === null) return []
 		if (!("afterPhase" in trigger)) return []
 		return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
 	})
-	return { firstPhase, nonTriggerPhases, itemTriggerPhases }
+	return { itemTriggerPhases }
 }
 
-type SelectNextItemAndPhaseInput = {
-	repoCwd: string
-	items: readonly ItemRecord[]
-	runs: readonly RunRecord[]
-	chainStatuses: SchedulerChainStatuses
-	phasePlan: SchedulerPhasePlan
-	explicitPhase: string | undefined
-	now: number
+type PersistedLegacyItemTrigger = {
+	trigger: SchedulerItemTriggerPhase
+	sourceRunId: string
 }
 
-function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: ItemRecord; phase: string } | null {
-	if (input.explicitPhase !== undefined) {
-		const pending = selectNextPendingItemFromSnapshot({
-			items: input.items,
-			repoCwd: input.repoCwd,
-			statuses: input.chainStatuses.pending,
-			terminalStatuses: input.chainStatuses.terminal,
-			now: input.now,
-		})
-		return pending === null ? null : { item: pending, phase: input.explicitPhase }
-	}
+type TaskLeafDispatchEligibility =
+	| { kind: "continuable" }
+	| { kind: "legacy-item-trigger"; trigger: PersistedLegacyItemTrigger }
+	| { kind: "ineligible" }
 
-	const repoItems = input.items.filter((item) => item.repoCwd === input.repoCwd)
-	const runsById = new Map(input.runs.map((run) => [run.runId, run]))
-	for (const triggerPhase of input.phasePlan.itemTriggerPhases) {
-		const triggered = repoItems.find((item) =>
-			item.phase === triggerPhase.afterPhase &&
-			item.status === triggerPhase.whenStatus &&
-			item.phase !== triggerPhase.name,
-		)
-		if (triggered !== undefined) return { item: triggered, phase: triggerPhase.name }
-	}
-
-	if (repoItems.some((item) => hasUnfinishedCurrentPhaseRun(item, runsById))) return null
-
-	const phaseContinuation = repoItems
-		.flatMap((item) => {
-			const nextPhase = nextNonTriggerPhaseForItem({
-				item,
-				runsById,
-				phasePlan: input.phasePlan,
-				pendingStatuses: input.chainStatuses.pending,
-				terminalStatuses: input.chainStatuses.terminal,
-				now: input.now,
-			})
-			return nextPhase === null ? [] : [{ item, phase: nextPhase }]
-		})
-		.sort((left, right) => comparePendingItems(left.item, right.item))[0]
-	if (phaseContinuation !== undefined) return phaseContinuation
-
-	const pending = selectNextPendingItemFromSnapshot({
-		items: input.items,
-		repoCwd: input.repoCwd,
-		statuses: input.chainStatuses.pending,
-		terminalStatuses: input.chainStatuses.terminal,
-		now: input.now,
-	})
-	return pending === null ? null : { item: pending, phase: input.phasePlan.firstPhase }
+async function persistedLegacyItemTriggerForLeaf(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	leaf: TaskLeafNodeSnapshot,
+): Promise<PersistedLegacyItemTrigger | null> {
+	const transition = options.store.listTaskTransitions(chain.id)
+		.find((candidate) => candidate.targetRuntimeNodeId === leaf.identity.runtimeNodeId)
+	if (transition === undefined) return null
+	const sourceRun = options.store.getRunByRunId(transition.sourceRunId)
+	if (
+		sourceRun === null
+		|| sourceRun.chainId !== chain.id
+		|| sourceRun.itemId !== item.id
+		|| transition.sourceClosureId !== sourceRun.closureId
+		|| transition.sourceRuntimeNodeId !== sourceRun.runtimeNodeId
+	) return null
+	const { preset } = await schedulerLoadedPresetForItem(options, chain, item)
+	if (preset.taskDeclaration !== null) return null
+	const triggerStatus = transition.exitPayload["status"]
+	if (typeof triggerStatus !== "string") return null
+	const trigger = buildLegacyPhaseAdapter(preset).itemTriggerPhases.find((candidate) =>
+		candidate.name === leaf.closure.phase
+		&& candidate.afterPhase === sourceRun.phase
+		&& candidate.whenStatus === triggerStatus)
+	if (
+		trigger === undefined
+		|| transition.pathId !== `legacy-status:${sourceRun.phase}:${triggerStatus}`
+	) return null
+	return { trigger, sourceRunId: sourceRun.runId }
 }
 
-function nextNonTriggerPhaseForItem(input: {
-	item: ItemRecord
-	runsById: ReadonlyMap<string, RunRecord>
-		phasePlan: SchedulerPhasePlan
-		pendingStatuses: readonly InternalStatus[]
-		terminalStatuses: readonly InternalStatus[]
-		now: number
-	}): string | null {
-	if (!itemBackoffReady(input.item, input.now)) return null
-	if (input.item.phase === null || input.item.lastRunId === null) return null
-	if (input.terminalStatuses.includes(input.item.status)) return null
-	const latestRun = input.runsById.get(input.item.lastRunId)
-	if (latestRun === undefined) return null
-	if (latestRun.itemId !== input.item.id) return null
-	if (latestRun.phase !== input.item.phase) return null
-	if (latestRun.endedAt === null) return null
-	const currentPhaseIndex = input.phasePlan.nonTriggerPhases.indexOf(input.item.phase)
-	if (currentPhaseIndex < 0) return null
-	if (currentPhaseIndex === input.phasePlan.nonTriggerPhases.length - 1) {
-		const startStatus = latestRun.extra.startStatus ?? null
-		const startStatusUpdatedAt = typeof latestRun.extra.startStatusUpdatedAt === "number" ? latestRun.extra.startStatusUpdatedAt : null
-		const statusWrittenAfterRunStart = startStatusUpdatedAt !== null
-			&& input.item.statusUpdatedAt !== startStatusUpdatedAt
-			&& input.item.statusUpdatedAt >= latestRun.startedAt
-		if (startStatus === input.item.status && !statusWrittenAfterRunStart && input.pendingStatuses.includes(input.item.status)) return input.item.phase
-	}
-	if (latestRun.exitCode !== 0) return null
-	return input.phasePlan.nonTriggerPhases[currentPhaseIndex + 1] ?? null
-}
-
-function hasUnfinishedCurrentPhaseRun(item: ItemRecord, runsById: ReadonlyMap<string, RunRecord>): boolean {
-	if (item.phase === null || item.lastRunId === null) return false
-	const latestRun = runsById.get(item.lastRunId)
-	return latestRun !== undefined
-		&& latestRun.itemId === item.id
-		&& latestRun.phase === item.phase
-		&& latestRun.endedAt === null
+async function taskLeafDispatchEligibility(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	leaf: TaskLeafNodeSnapshot,
+	pendingStatuses: ReadonlySet<InternalStatus>,
+	terminalStatuses: ReadonlySet<InternalStatus>,
+): Promise<TaskLeafDispatchEligibility> {
+	const trigger = await persistedLegacyItemTriggerForLeaf(options, chain, item, leaf)
+	if (trigger !== null) return { kind: "legacy-item-trigger", trigger }
+	if (pendingStatuses.has(item.status) && !terminalStatuses.has(item.status)) return { kind: "continuable" }
+	return { kind: "ineligible" }
 }
 
 export type SchedulerPendingSelectionInput = {
@@ -761,6 +743,7 @@ async function emitRepoWaitingDecisions(
 		repoCwd,
 		statuses: chainStatuses.pending,
 		terminalStatusNames: chainStatuses.terminal,
+		dependencySuccessStatusNames: chainStatuses.success,
 		resolveDependency: (id) => options.store.getItem(id),
 	})) {
 		await emit(options, {
@@ -777,7 +760,7 @@ async function emitRepoWaitingDecisions(
 	const pending = new Set(chainStatuses.pending)
 	for (const item of items) {
 		if (item.repoCwd !== repoCwd || !pending.has(item.status)) continue
-			const backoff = itemSchedulerBackoff(item.extra)
+		const backoff = itemSchedulerBackoff(item.extra)
 		if (backoff === null || backoff.nextRunAt <= now) continue
 		await emit(options, {
 			type: "item.backoff",
@@ -809,16 +792,29 @@ async function exhaustItemsOverAttemptLimitForRepo(
 	// is a member of `statuses.terminal`, so the engine no longer guards against the preset
 	// vocabulary missing it. No more engine-side terminal-set injection.
 	const exhaustedStatus = chainStatuses.exhausted
+	const tree = options.store.getTaskTree(chain.id)
+	const activeItemIds = tree === null
+		? new Set<number>()
+		: new Set(tree.activeRuns.flatMap((active) => {
+			const closure = findClosure(tree.root, active.closureId)
+			return closure === null ? [] : [closure.itemRowId]
+		}))
 	let changed = false
 	for (const item of items) {
 		if (item.repoCwd !== repoCwd) continue
 		if (terminalStatuses.has(item.status)) continue
 		if (!pendingStatuses.has(item.status)) continue
 		if (item.attempts < maxItemAttempts) continue
+		if (activeItemIds.has(item.id)) continue
 
 		const exhaustedAt = nowSeconds(options)
-			const extra = clearItemSchedulerBackoff(item.extra)
-		options.store.updateItem(item.id, {
+		if (tree === null) continue
+		const selected = selectAttemptExhaustionLeaf(tree.root, item, options.store.listRuns(chain.id))
+		if (selected === null) continue
+		const extra = clearItemSchedulerBackoff(item.extra)
+		const exhausted = options.store.exhaustTaskLeaf({
+			itemId: item.id,
+			runtimeNodeId: selected.runtimeNodeId,
 			// #397: brand the preset-derived exhausted status at the call site. Exhausting on
 			// max attempts is an engine-lifecycle write (no caller-provided status), so it
 			// bypasses the per-phase request gate and brands through the narrow engine-lifecycle
@@ -829,6 +825,7 @@ async function exhaustItemsOverAttemptLimitForRepo(
 			updatedAt: exhaustedAt,
 		})
 		changed = true
+		if (!exhausted.itemTerminal) continue
 		// #402 / #411: engine-driven transitions emit an audit-classified event under the unified
 		// observability stream (daemon mapping in schedulerEventToObservabilityEvent: queue.terminal
 		// → kind=audit, subject={kind:"engine"}). The transition source is implied by the run-id
@@ -836,7 +833,7 @@ async function exhaustItemsOverAttemptLimitForRepo(
 		await emit(options, {
 			type: "queue.terminal",
 			ts: nowIso(options),
-			runId: item.lastRunId ?? makeAttemptLimitRunId(chain, item, exhaustedAt),
+			runId: selected.runId ?? item.lastRunId ?? makeAttemptLimitRunId(chain, item, exhaustedAt),
 			chainId: chain.id,
 			// #419 review I2: items.id rowid is `rowId` (audit `itemId` is reserved for the
 			// opaque preset-declared string identity used by split-shape `item.*` events).
@@ -845,6 +842,47 @@ async function exhaustItemsOverAttemptLimitForRepo(
 		})
 	}
 	return changed ? options.store.listItems(chain.id) : [...items]
+}
+
+export type AttemptExhaustionLeaf = {
+	runtimeNodeId: string
+	runId: string
+	reason: "failed-run"
+}
+
+/**
+ * Attribute an item-level attempt cap to one concrete ready leaf. Parallel
+ * siblings share the item's attempt counter, so exhausting every pending leaf
+ * would turn one failed member into implicit failure propagation. Prefer the
+ * ready leaf with the newest failed run, then progressively weaker durable run
+ * identity. When no failed durable run owns a ready leaf there is no valid
+ * exhaustion target: in particular, an already-exhausted failed member must
+ * never cause an unattempted sibling to be selected on a later tick.
+ */
+export function selectAttemptExhaustionLeaf(
+	root: TaskNodeSnapshot,
+	item: Pick<ItemRecord, "id">,
+	runs: readonly RunRecord[],
+): AttemptExhaustionLeaf | null {
+	const ready = collectTaskDispatchDecisions(root, new Set())
+		.flatMap((decision) => decision.kind === "reopen" || decision.kind === "resume"
+			? [findTaskLeafByRuntimeNodeId(root, decision.runtimeNodeId)]
+			: [])
+		.filter((leaf): leaf is TaskLeafNodeSnapshot => leaf !== null && leaf.closure.itemRowId === item.id)
+	if (ready.length === 0) return null
+	const readyIds = new Set(ready.map((leaf) => leaf.identity.runtimeNodeId))
+	const attempted = runs
+		.filter((run) => run.itemId === item.id && readyIds.has(run.runtimeNodeId) && run.endedAt !== null)
+		.sort(compareRunRecency)
+	const failed = attempted.find((run) => run.exitCode !== null && run.exitCode !== 0)
+	if (failed !== undefined) return { runtimeNodeId: failed.runtimeNodeId, runId: failed.runId, reason: "failed-run" }
+	return null
+}
+
+function compareRunRecency(left: RunRecord, right: RunRecord): number {
+	const ended = (right.endedAt ?? Number.NEGATIVE_INFINITY) - (left.endedAt ?? Number.NEGATIVE_INFINITY)
+	if (ended !== 0) return ended
+	return right.id - left.id
 }
 
 function makeAttemptLimitRunId(chain: ChainRecord, item: ItemRecord, exhaustedAt: number): string {
@@ -869,8 +907,8 @@ export async function runSchedulerUntilIdle(options: SchedulerOptions, maxTicks 
 	throw new SchedulerError("max_ticks_exceeded", `scheduler did not become idle after ${maxTicks} ticks`)
 }
 
-export function schedulerSlotKey(chainId: number, repoCwd: string): string {
-	return `${chainId}\u0000${repoCwd}`
+export function schedulerClosureLaneKey(chainId: number, identity: string): string {
+	return `${chainId}\u0000${identity}`
 }
 
 const repositoryGitCoordinator = createRepositoryGitCoordinator()
@@ -1525,7 +1563,7 @@ export async function consumeSchedulerClosure(input: ConsumeSchedulerClosureInpu
 }
 
 export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
-	return [...state.slots.values()].flatMap((slot) => (slot.activeRun === null ? [] : [slot.activeRun]))
+	return [...state.closureLanes.values()].flatMap((slot) => (slot.activeRun === null ? [] : [slot.activeRun]))
 }
 
 export function listPendingCloseHandlers(state: SchedulerState): Promise<SchedulerCompletedRun>[] {
@@ -1537,16 +1575,6 @@ function findClosure(node: TaskNodeSnapshot | null, closureId: string): ClosureS
 	if (node.kind === "leaf") return node.closure.closureId === closureId ? node.closure : null
 	for (const child of node.children) {
 		const found = findClosure(child, closureId)
-		if (found !== null) return found
-	}
-	return null
-}
-
-function findClosureForItemPhase(node: TaskNodeSnapshot | null, itemRowId: number, phase: string): ClosureSnapshot | null {
-	if (node === null) return null
-	if (node.kind === "leaf") return node.closure.itemRowId === itemRowId && node.closure.phase === phase ? node.closure : null
-	for (const child of node.children) {
-		const found = findClosureForItemPhase(child, itemRowId, phase)
 		if (found !== null) return found
 	}
 	return null
@@ -1566,10 +1594,10 @@ async function spawnSchedulerRun(
 	options: SchedulerOptions,
 	chain: ChainRecord,
 	item: ItemRecord,
-	slot: SchedulerSlot,
-	phase: string,
-	phasePlan: SchedulerPhasePlan,
+	slot: SchedulerClosureLane,
+	leaf: TaskLeafNodeSnapshot,
 ): Promise<SchedulerActiveRun | null> {
+	const phase = leaf.closure.phase
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	const attribution: SchedulerSpawnErrorAttribution = { kind: "phase", phase }
 	let worktreePath = slot.worktreePath
@@ -1578,20 +1606,30 @@ async function spawnSchedulerRun(
 	let credential: SchedulerRunCredential | null = null
 	let credentialContext: SchedulerRunCredentialContext | null = null
 	let activeRun: SchedulerPreparingRun | null = null
-	let closureId = `closure:${item.id}:${phase}`
+	let closureId = leaf.closure.closureId
 	try {
-		const existingClosure = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, phase)
-		closureId = existingClosure?.closureId ?? closureId
+		const existingClosure = findClosure(options.store.getTaskTree(chain.id)?.root ?? null, closureId)
+		if (existingClosure === null || existingClosure.itemRowId !== item.id) {
+			throw new SchedulerError("spawn_failed", `task leaf ${leaf.identity.runtimeNodeId} lost closure ${closureId}`)
+		}
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
 		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
+		const phaseDeclaration = loadedPreset.preset.phases.find((entry) => entry.name === phase)
+		if (phaseDeclaration === undefined) throw new SchedulerError("spawn_failed", `scheduler: preset ${loadedPreset.preset.name} does not define phase ${phase}`)
 		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
 		const persistedSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
 		const resumeDecision: ResumeDecision = persistedSessionId === null ? freshResume() : { kind: "resume", sessionId: persistedSessionId }
-		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
+		const priorItemRuns = options.store.listRuns(chain.id).filter((run) => run.itemId === item.id)
+		const hasRecordedClosureRun = priorItemRuns.some((run) => run.closureId === closureId)
+		// Attempts count fresh execution cycles, not movement to a newly reached leaf.
+		// First-open siblings/successors, trigger phases, and session resumes stay in the
+		// current attempt.
+		const startsAttempt = phaseDeclaration.trigger === null
+			&& resumeDecision.kind === "fresh"
+			&& (priorItemRuns.length === 0 || hasRecordedClosureRun)
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
-		const hasRecordedPhaseRun = options.store.listRuns(chain.id).some((run) => run.itemId === item.id && run.phase === phase)
-		const managed = existingClosure !== null && hasRecordedPhaseRun
+		const managed = existingClosure !== null && hasRecordedClosureRun
 			? await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, resourceState: "reopen", existing: existingClosure })
 			: await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, resourceState: "first-open", existing: existingClosure })
 		const resources = typeof managed === "string"
@@ -1644,22 +1682,25 @@ async function spawnSchedulerRun(
 			startedAt,
 			extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
 		})
+		const currentItem = options.store.getItem(item.id) ?? item
 		const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
-			attempts: item.attempts + (startsAttempt ? 1 : 0),
+			attempts: currentItem.attempts + (startsAttempt ? 1 : 0),
 			lastRunId: runId,
 			agentCwd: worktreePath,
 			phase,
 			updatedAt: startedAt,
 		}
-		const extraWithoutSpawnError = clearItemSchedulerSpawnError(item.extra)
-		if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
+		const extraWithoutSpawnError = clearItemSchedulerSpawnError(currentItem.extra)
+		if (extraWithoutSpawnError !== currentItem.extra) spawnUpdate.extra = extraWithoutSpawnError
 		options.store.updateItem(item.id, spawnUpdate)
 
 		const presetDir = loadedPreset.preset.presetDir
-		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
-		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
+		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase, closureId, runtimeNodeId: leaf.identity.runtimeNodeId }
+		const promptSource = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
+		const rawPrompt = typeof promptSource === "string" ? promptSource : promptSource.template
 		const renderedPrompt = await renderSchedulerSpawnPrompt({
 			rawPrompt,
+			...(typeof promptSource === "string" ? {} : { injectedBindings: promptSource.bindings }),
 			preset: loadedPreset.preset,
 			phase,
 			chain,
@@ -1671,13 +1712,11 @@ async function spawnSchedulerRun(
 			runner: runner.kind,
 		})
 		const finalPrompt = renderedPrompt + phaseExitsEpilogue()
-		const authorizationPhase = loadedPreset.preset.phases.find((entry) => entry.name === phase)
-		if (authorizationPhase === undefined) throw new SchedulerError("spawn_failed", `scheduler: preset ${loadedPreset.preset.name} does not define phase ${phase}`)
 		const runnerPlan = buildRunnerInvocation(
 			runner,
 			finalPrompt,
 			resumeDecision,
-			invocationAuthorization(chain, item, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root, authorizationPhase),
+			invocationAuthorization(chain, item, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root, phaseDeclaration),
 		)
 		for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
 		await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
@@ -1703,7 +1742,7 @@ async function spawnSchedulerRun(
 			env: spawnEnv,
 		})
 		await waitForChildSpawn(child)
-		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, phasePlan, child, runner, credential, credentialContext)
+		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
 		slot.activeRun = activeRun
 		options.store.setCurrentRun({
 			chainId: chain.id,
@@ -1760,38 +1799,11 @@ async function enterClosurePhase(
 	closureId: string,
 	updatedAt: number,
 ): Promise<void> {
-	if (item.phase !== null && item.phase !== phase) {
-		const previous = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, item.phase)
-		if (previous?.lifecycle === "active") {
-			options.store.setClosureLifecycle(previous.closureId, { kind: "suspend", updatedAt })
-			await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase: item.phase, closureId: previous.closureId, from: "active", to: "suspended", reason: "phase-left" })
-		}
-	}
 	const current = findClosure(options.store.getTaskTree(chain.id)?.root ?? null, closureId)
 	if (current?.lifecycle === "suspended") {
 		options.store.setClosureLifecycle(closureId, { kind: "activate", updatedAt })
 		await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase, closureId, from: "suspended", to: "active", reason: "phase-entered" })
 	}
-}
-
-function runLeavesPhase(input: {
-	itemAtSpawn: ItemRecord
-	currentItem: ItemRecord | null
-	phase: string
-	phasePlan: SchedulerPhasePlan
-	chainStatuses: SchedulerChainStatuses
-	exitCode: number
-	startedAt: number
-}): boolean {
-	if (input.exitCode !== 0 || input.currentItem === null || input.chainStatuses.terminal.includes(input.currentItem.status)) return false
-	const index = input.phasePlan.nonTriggerPhases.indexOf(input.phase)
-	if (index < 0) return false
-	if (index < input.phasePlan.nonTriggerPhases.length - 1) return true
-	const statusChanged = input.currentItem.statusUpdatedAt !== input.itemAtSpawn.statusUpdatedAt
-		&& input.currentItem.statusUpdatedAt >= input.startedAt
-	return statusChanged
-		&& input.currentItem.status !== input.itemAtSpawn.status
-		&& input.chainStatuses.pending.includes(input.currentItem.status)
 }
 
 async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void> {
@@ -1820,7 +1832,7 @@ async function cleanupFailedRunPreparation(
 	options: SchedulerOptions,
 	chain: ChainRecord,
 	item: ItemRecord,
-	slot: SchedulerSlot,
+	slot: SchedulerClosureLane,
 	resources: FailedRunPreparationResources,
 	failure: unknown,
 ): Promise<Error> {
@@ -1886,7 +1898,7 @@ async function containSchedulerPreparationFailure(
 	options: SchedulerOptions,
 	chain: ChainRecord,
 	item: ItemRecord,
-	slot: SchedulerSlot,
+	slot: SchedulerClosureLane,
 	attribution: SchedulerSpawnErrorAttribution,
 	failure: unknown,
 ): Promise<void> {
@@ -1917,16 +1929,117 @@ async function containSchedulerPreparationFailure(
 	})
 }
 
+async function commitSuccessfulLegacyRunTransition(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	runId: string,
+	phase: string,
+	exitCode: number,
+	terminalStatuses: ReadonlySet<InternalStatus>,
+	createdAt: number,
+): Promise<void> {
+	if (exitCode !== 0) return
+	const currentItem = options.store.getItem(item.id)
+	if (currentItem === null) return
+	const { preset } = await schedulerLoadedPresetForItem(options, chain, currentItem)
+	if (preset.taskDeclaration !== null) return
+	if (options.store.listTaskTransitions(chain.id).some((transition) => transition.sourceRunId === runId)) return
+
+	const run = options.store.getRunByRunId(runId)
+	if (
+		run === null
+		|| run.chainId !== chain.id
+		|| run.itemId !== item.id
+		|| run.phase !== phase
+	) {
+		throw new SchedulerError("spawn_failed", `legacy run ${runId} lost its durable task identity`)
+	}
+	const tree = options.store.getTaskTree(chain.id)
+	if (tree === null) throw new SchedulerError("spawn_failed", `legacy run ${runId} has no persisted task tree`)
+	const source = findTaskLeafByRuntimeNodeId(tree.root, run.runtimeNodeId)
+	if (
+		source === null
+		|| source.closure.closureId !== run.closureId
+		|| source.closure.itemRowId !== item.id
+	) {
+		throw new SchedulerError("spawn_failed", `legacy run ${runId} does not own its persisted task leaf`)
+	}
+	if ((source.state ?? "pending") !== "pending") return
+	const trigger = await persistedLegacyItemTriggerForLeaf(options, chain, currentItem, source)
+	if (trigger !== null) {
+		options.store.commitTaskTransition({
+			sourceRunId: runId,
+			sourceClosureId: run.closureId,
+			targetRuntimeNodeId: null,
+			pathId: `legacy-trigger-run-success:${phase}`,
+			exitPayload: {},
+			resolvedBindings: {},
+			createdAt,
+			itemUpdate: { kind: "none" },
+		})
+		return
+	}
+	if (terminalStatuses.has(currentItem.status)) return
+	const runtimePhases = preset.phases.filter((candidate) => candidate.trigger === null)
+	const sourcePhaseIndex = runtimePhases.findIndex((candidate) => candidate.name === phase)
+	if (sourcePhaseIndex < 0) {
+		throw new SchedulerError("spawn_failed", `legacy run ${runId} phase ${phase} is absent from preset ${preset.name}`)
+	}
+	if (sourcePhaseIndex === runtimePhases.length - 1) return
+	const expectedDefinitionIdentity = `sha256:${preset.sourceHash}`
+	if (
+		source.identity.definitionRef.kind !== "preset"
+		|| source.identity.definitionRef.contentIdentity !== expectedDefinitionIdentity
+	) return
+	const itemRoot = findItemTaskRootForDependency(tree.root, item.id)
+	if (itemRoot === null || itemRoot.kind !== "seq") {
+		throw new SchedulerError("spawn_failed", `legacy item ${item.itemId} runtime root is not a seq`)
+	}
+	const leaves: TaskLeafNodeSnapshot[] = []
+	for (const child of itemRoot.children) {
+		if (child.kind !== "leaf") {
+			throw new SchedulerError("spawn_failed", `legacy item ${item.itemId} runtime seq contains ${child.kind}`)
+		}
+		leaves.push(child)
+	}
+	if (
+		leaves.length !== runtimePhases.length
+		|| leaves.some((leaf, index) =>
+			leaf.closure.itemRowId !== item.id
+			|| leaf.closure.phase !== runtimePhases[index]?.name)
+	) {
+		throw new SchedulerError("spawn_failed", `legacy item ${item.itemId} runtime seq does not match preset phase order`)
+	}
+	const sourceLeaf = leaves[sourcePhaseIndex]
+	const targetLeaf = leaves[sourcePhaseIndex + 1]
+	if (
+		sourceLeaf?.identity.runtimeNodeId !== source.identity.runtimeNodeId
+		|| targetLeaf === undefined
+	) {
+		throw new SchedulerError("spawn_failed", `legacy run ${runId} runtime cursor does not match phase ${phase}`)
+	}
+	options.store.commitTaskTransition({
+		sourceRunId: runId,
+		sourceClosureId: run.closureId,
+		targetRuntimeNodeId: targetLeaf.identity.runtimeNodeId,
+		pathId: `legacy-run-success:${phase}`,
+		exitPayload: {},
+		resolvedBindings: {},
+		createdAt,
+		itemUpdate: { kind: "none" },
+	})
+}
+
 function attachRunCloseHandler(
 	options: SchedulerOptions,
 	chain: ChainRecord,
 	item: ItemRecord,
-	slot: SchedulerSlot,
+	slot: SchedulerClosureLane,
 	runId: string,
 	worktreePath: string,
 	startedAt: number,
 	phase: string,
-	phasePlan: SchedulerPhasePlan,
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
 	// #406: the credential minted at spawn for this run, revoked here when the run closes
@@ -2087,17 +2200,26 @@ function attachRunCloseHandler(
 						status,
 					})
 					const previousSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
-					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
-						const itemForBackoff = currentItem ?? item
+					const itemForBackoff = options.store.getItem(item.id) ?? currentItem ?? item
+					const treeBeforeRunTransition = options.store.getTaskTree(chain.id)
+					const completedSourceLeaf = completedRun === null || treeBeforeRunTransition === null
+						? null
+						: findTaskLeafByRuntimeNodeId(treeBeforeRunTransition.root, completedRun.runtimeNodeId)
+					const legacyTriggerRun = completedSourceLeaf === null
+						? null
+						: await persistedLegacyItemTriggerForLeaf(options, chain, itemForBackoff, completedSourceLeaf)
+					if (legacyTriggerRun !== null || !terminalStatuses.has(itemForBackoff.status)) {
 						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
 						// #478: rate-limit exits do not consume an attempt slot (roll the spawn-time
 						// +1 back to the pre-spawn value via explicit `attempts: item.attempts`) and
 						// do not enter the blind exponential spawn-failure backoff — the account
-						// cooldown is owned by the daemon-level gate. Non-rate-limit exits flow
-						// through `extraAfterRunCompletion` exactly as before.
+						// cooldown is owned by the daemon-level gate. A successful concurrent
+						// sibling may clear only the backoff generation it observed when it
+						// spawned; otherwise it would erase a newer failure recorded while the
+						// sibling was running and immediately re-dispatch that failed leaf.
 						const extra = rateLimitExit
-							? clearItemSchedulerBackoff(itemForBackoff.extra)
-							: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt)
+							? clearObservedSchedulerBackoff(itemForBackoff.extra, item.extra)
+							: extraAfterRunCompletion(options, chain, itemForBackoff, item.extra, exitCode, status, terminalStatuses, endedAt, legacyTriggerRun !== null)
 						const update: Parameters<typeof options.store.updateItem>[1] = {
 							// #397: when the agent wrote a status via the gated `item.update` during the
 							// run, the scheduler forwards that same status back into store on the
@@ -2143,8 +2265,21 @@ function attachRunCloseHandler(
 					} else if (parsedSessionId !== null) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
 					}
-					if (runLeavesPhase({ itemAtSpawn: item, currentItem, phase, phasePlan, chainStatuses, exitCode, startedAt })) {
-						const closure = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, phase)
+					// Legacy presets predate authored task paths: a successful non-final phase
+					// historically advanced from the run ledger without writing item status.
+					// Preserve only that compatibility edge by committing an engine-owned
+					// transition into the same tree scheduler used by authored paths. Failed
+					// runs, final phases, terminal items, and runs that already committed a
+					// transition remain untouched. Session persistence intentionally precedes
+					// this commit so the successor can resume the exact legacy execution cycle.
+					await commitSuccessfulLegacyRunTransition(options, chain, item, runId, phase, exitCode, terminalStatuses, endedAt)
+					const currentTree = options.store.getTaskTree(chain.id)
+					const durableRun = options.store.getRunByRunId(runId)
+					const structurallyLeft = currentTree !== null
+						&& durableRun !== null
+						&& taskLeafHasTerminalState(currentTree.root, durableRun.runtimeNodeId)
+					if (structurallyLeft) {
+						const closure = durableRun === null ? null : findClosure(currentTree?.root ?? null, durableRun.closureId)
 						if (closure?.lifecycle === "active") {
 							options.store.setClosureLifecycle(closure.closureId, { kind: "suspend", updatedAt: endedAt })
 							await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase, closureId: closure.closureId, from: "active", to: "suspended", reason: "phase-left" })
@@ -2629,6 +2764,7 @@ async function unblockDependencySatisfiedItems(
 	const success = new Set(chainStatuses.success)
 	if (success.size === 0) return items
 	const terminal = new Set(chainStatuses.terminal)
+	const tree = options.store.getTaskTree(chain.id)
 	let changed = false
 	for (const item of items) {
 		if (!terminal.has(item.status)) continue
@@ -2639,6 +2775,15 @@ async function unblockDependencySatisfiedItems(
 			return target !== null && success.has(target.status)
 		})
 		if (!allSuccess) continue
+		const itemTaskRoot = tree === null ? null : findItemTaskRootForDependency(tree.root, item.id)
+		if (itemTaskRoot !== null && taskNodeIsTerminal(itemTaskRoot)) {
+			options.store.updateItem(item.id, {
+				extra: itemExtraWithoutKeys(item.extra, ["dependsOn"]),
+				updatedAt: nowSeconds(options),
+			})
+			changed = true
+			continue
+		}
 		// Clear the now-satisfied dependsOn record. The snapshot selection path
 		// (selectNextPendingItemFromSnapshot) resolves deps only within the per-chain snapshot, so
 		// leaving a cross-chain dependsOn on the restored item would re-gate it and it would never
@@ -2665,6 +2810,29 @@ async function unblockDependencySatisfiedItems(
 	return changed ? options.store.listItems(chain.id) : items
 }
 
+function taskNodeContainsItem(node: TaskNodeSnapshot, itemId: number): boolean {
+	switch (node.kind) {
+		case "leaf": return node.closure.itemRowId === itemId
+		case "seq":
+		case "par": return node.children.some((child) => taskNodeContainsItem(child, itemId))
+		default: return assertNeverTaskNode(node)
+	}
+}
+
+function findItemTaskRootForDependency(root: TaskNodeSnapshot, itemId: number): TaskNodeSnapshot | null {
+	if (root.kind === "leaf") return root.closure.itemRowId === itemId ? root : null
+	return root.children.find((child) => taskNodeContainsItem(child, itemId)) ?? null
+}
+
+function taskNodeIsTerminal(node: TaskNodeSnapshot): boolean {
+	switch (node.kind) {
+		case "leaf": return node.state === "completed" || node.state === "exhausted"
+		case "seq": return node.cursor.kind === "complete"
+		case "par": return node.state === "completed" || node.state === "exhausted"
+		default: return assertNeverTaskNode(node)
+	}
+}
+
 // True when some item in the chain still has a dependsOn target that exists and is not yet
 // terminal — i.e. an in-flight dependency that could still resolve to success and unblock the
 // item. Used to keep the chain active so the daemon keeps ticking until the dependency settles.
@@ -2681,7 +2849,7 @@ function hasInflightDependency(options: SchedulerOptions, items: readonly ItemRe
 }
 
 async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string, terminalStatuses?: readonly InternalStatus[]): Promise<boolean> {
-	if (hasActiveSlotForChain(options.state, chain.id, runId)) return false
+	if (hasActiveClosureLaneForChain(options.state, chain.id, runId)) return false
 	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
 	if (current?.status !== "active") return false
@@ -2690,6 +2858,8 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	if (runId === undefined && hasFinalizingItemForChain(options.state, items)) return false
 	if (hasInflightDependency(options, items, effectiveTerminalStatuses)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
+	const taskTree = options.store.getTaskTree(chain.id)
+	if (taskTree === null || !taskNodeTerminal(taskTree.root)) return false
 	if (options.state.finalizingChainIds.has(chain.id)) return false
 	// #456: the legacy `reviewOnEmptyLockExistsForChain` gate is retired with the review-on-empty
 	// path. Chain-drain side effects (the bundled gh-issue-pr-iteration umbrella finalizer, for
@@ -2698,18 +2868,14 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	// `keep-active` semantics that delay completion as long as the trigger demands it.
 	options.state.finalizingChainIds.add(chain.id)
 	try {
-		// #412 mixed-preset chain: phase plan must come from a representative item's preset (matching
-		// the tick loop at L326), not the chain's seed. Without this, `hasPendingItemLevelTrigger` reads
-		// item-trigger phases from the wrong preset and either gates completion incorrectly or misses a
-		// pending trigger phase from the real preset.
-		const phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
-		if (hasPendingItemLevelTrigger(options, chain.id, phasePlan)) return false
 		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
 		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
 		if (refreshed?.status !== "active") return false
 		const completionItems = options.store.listItems(chain.id)
 		if (completionItems.length === 0) return false
 		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
+		const completionTree = options.store.getTaskTree(chain.id)
+		if (completionTree === null || !taskNodeTerminal(completionTree.root)) return false
 		if (!await consumeCompletedChainClosures(options, current, completionItems, effectiveTerminalStatuses)) return false
 		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 		await emit(options, { type: "chain.completed", chainId: current.id, chainName: current.name, ...(runId === undefined ? {} : { runId }) })
@@ -2722,7 +2888,7 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 
 async function consumeCompletedChainClosures(options: SchedulerOptions, chain: ChainRecord, items: readonly ItemRecord[], terminalStatuses: readonly InternalStatus[]): Promise<boolean> {
 	const tree = options.store.getTaskTree(chain.id)
-	if (tree === null) return true
+	if (tree === null) return false
 	const closures = collectClosures(tree.root)
 	const repoByItem = new Map(items.map((item) => [item.id, item.repoCwd]))
 	let consumable = true
@@ -2919,15 +3085,32 @@ function extraAfterRunCompletion(
 	options: SchedulerOptions,
 	chain: ChainRecord,
 	item: ItemRecord,
+	observedExtra: ItemRecord["extra"],
 	exitCode: number,
 	status: InternalStatus,
 	terminalStatuses: ReadonlySet<InternalStatus>,
 	endedAt: number,
+	retryableAfterFailure = false,
 ): ItemRecord["extra"] {
-	if (exitCode !== 0 && !terminalStatuses.has(status)) {
+	if (exitCode !== 0 && (retryableAfterFailure || !terminalStatuses.has(status))) {
 		return withNextSchedulerBackoff(item.extra, endedAt, spawnFailureBackoffForChain(options, chain))
 	}
-	return clearItemSchedulerBackoff(item.extra)
+	return clearObservedSchedulerBackoff(item.extra, observedExtra)
+}
+
+function clearObservedSchedulerBackoff(
+	currentExtra: ItemRecord["extra"],
+	observedExtra: ItemRecord["extra"],
+): ItemRecord["extra"] {
+	const current = itemSchedulerBackoff(currentExtra)
+	if (current === null) return currentExtra
+	const observed = itemSchedulerBackoff(observedExtra)
+	if (
+		observed === null
+		|| observed.failureCount !== current.failureCount
+		|| observed.nextRunAt !== current.nextRunAt
+	) return currentExtra
+	return clearItemSchedulerBackoff(currentExtra)
 }
 
 function itemBackoffReady(item: ItemRecord, now: number): boolean {
@@ -2970,21 +3153,6 @@ function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId:
 	return listItemsIncludingFinalizing(options, chainId).every((item) => terminal.has(item.status))
 }
 
-function hasPendingItemLevelTrigger(options: SchedulerOptions, chainId: number, phasePlan: SchedulerPhasePlan): boolean {
-	if (phasePlan.itemTriggerPhases.length === 0) return false
-	const items = listItemsIncludingFinalizing(options, chainId)
-	for (const item of items) {
-		for (const triggerPhase of phasePlan.itemTriggerPhases) {
-			if (
-				item.phase === triggerPhase.afterPhase &&
-				item.status === triggerPhase.whenStatus &&
-				item.phase !== triggerPhase.name
-			) return true
-		}
-	}
-	return false
-}
-
 function listItemsIncludingFinalizing(options: SchedulerOptions, chainId: number): ItemRecord[] {
 	return options.store.listItems(chainId).map((item) => {
 		const finalizingStatus = options.state.finalizingItemStatuses.get(item.id)
@@ -2992,11 +3160,11 @@ function listItemsIncludingFinalizing(options: SchedulerOptions, chainId: number
 	})
 }
 
-function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: string): SchedulerSlot {
-	const key = schedulerSlotKey(chain.id, repoCwd)
-	const existing = state.slots.get(key)
+function getOrCreateClosureLane(state: SchedulerState, chain: ChainRecord, repoCwd: string, identity = repoCwd): SchedulerClosureLane {
+	const key = schedulerClosureLaneKey(chain.id, identity)
+	const existing = state.closureLanes.get(key)
 	if (existing) return existing
-	const slot: SchedulerSlot = {
+	const slot: SchedulerClosureLane = {
 		key,
 		chainId: chain.id,
 		chainName: chain.name,
@@ -3004,20 +3172,50 @@ function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: str
 		worktreePath: null,
 		activeRun: null,
 	}
-	state.slots.set(key, slot)
+	state.closureLanes.set(key, slot)
 	return slot
 }
 
-function hasActiveSlotForChain(state: SchedulerState, chainId: number, ignoreRunId?: string): boolean {
-	return [...state.slots.values()].some((slot) =>
+function findTaskLeafByRuntimeNodeId(node: TaskNodeSnapshot, runtimeNodeId: string): TaskLeafNodeSnapshot | null {
+	switch (node.kind) {
+		case "leaf": return node.identity.runtimeNodeId === runtimeNodeId ? node : null
+		case "seq":
+		case "par":
+			for (const child of node.children) {
+				const found = findTaskLeafByRuntimeNodeId(child, runtimeNodeId)
+				if (found !== null) return found
+			}
+			return null
+		default: return assertNeverTaskNode(node)
+	}
+}
+
+function taskLeafHasTerminalState(node: TaskNodeSnapshot, runtimeNodeId: string): boolean {
+	switch (node.kind) {
+		case "leaf":
+			return node.identity.runtimeNodeId === runtimeNodeId
+				&& (node.state === "completed" || node.state === "exhausted")
+		case "seq":
+		case "par": return node.children.some((child) => taskLeafHasTerminalState(child, runtimeNodeId))
+		default: return assertNeverTaskNode(node)
+	}
+}
+
+function assertNeverTaskNode(node: never): never {
+	throw new SchedulerError("spawn_failed", `unhandled task node: ${JSON.stringify(node)}`)
+}
+
+function schedulerGlobalConcurrencyLimit(chain: ChainRecord): number | null {
+	const value = metadataBindings(chain.metadata).maxConcurrency
+	return isPositiveInteger(value) ? value : null
+}
+
+function hasActiveClosureLaneForChain(state: SchedulerState, chainId: number, ignoreRunId?: string): boolean {
+	return [...state.closureLanes.values()].some((slot) =>
 		slot.chainId === chainId
 		&& slot.activeRun !== null
 		&& slot.activeRun.runId !== ignoreRunId,
 	)
-}
-
-function hasFinalizingItemForRepo(state: SchedulerState, items: readonly ItemRecord[], repoCwd: string): boolean {
-	return items.some((item) => item.repoCwd === repoCwd && state.finalizingItemStatuses.has(item.id))
 }
 
 function hasFinalizingItemForChain(state: SchedulerState, items: readonly ItemRecord[]): boolean {
@@ -3025,8 +3223,8 @@ function hasFinalizingItemForChain(state: SchedulerState, items: readonly ItemRe
 }
 
 function removeIdleSlotsForInactiveChains(state: SchedulerState, activeChainIds: Set<number>): void {
-	for (const [key, slot] of state.slots.entries()) {
-		if (!activeChainIds.has(slot.chainId) && slot.activeRun === null) state.slots.delete(key)
+	for (const [key, slot] of state.closureLanes.entries()) {
+		if (!activeChainIds.has(slot.chainId) && slot.activeRun === null) state.closureLanes.delete(key)
 	}
 }
 
@@ -3114,6 +3312,7 @@ function invocationAuthorization(chain: ChainRecord, item: ItemRecord, agentCwd:
 
 export type SchedulerPromptRenderInput = {
 	rawPrompt: string
+	injectedBindings?: JsonObject
 	preset: Preset
 	phase: string
 	chain: ChainRecord
@@ -3139,7 +3338,7 @@ export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInp
 		loopDataRootOptions: input.loopDataRootOptions,
 		resume: input.resume ?? (input.runner === undefined ? freshResume() : resumeDecisionForItem(input.item, input.phase, input.runner)),
 	})
-	return renderPrompt(input.rawPrompt, presetPhase, ctx)
+	return renderPrompt(input.rawPrompt, presetPhase, ctx, input.injectedBindings)
 }
 
 export function buildSchedulerResolveContext(input: {

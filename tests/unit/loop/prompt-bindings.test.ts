@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
+import { lookupItemField, phaseExitsEpilogue } from "../../../src/loop"
 import {
 	extractPromptPlaceholders,
 	getItemId,
@@ -102,6 +103,31 @@ describe("ItemRecord prompt bindings", () => {
 		expect(resolveBinding({ kind: "chain", field: "missingFlag", fallback: { kind: "value", value: false } }, ctx)).toBe("false")
 	})
 
+	test("engine-owned item bindings take precedence over spoofed extra fields", () => {
+		const item = makeItem({
+			id: 42,
+			status: parseInternalStatus("done", "test.status"),
+			agentCwd: "/authoritative/worktree",
+			runner: "codex",
+			phase: "review",
+			extra: {
+				id: "spoofed-id",
+				status: "spoofed-status",
+				agentCwd: "/spoofed/worktree",
+				runner: "claude",
+				phase: "iteration",
+				context: { nested: "declared-extra" },
+			},
+		})
+
+		expect(lookupItemField(item, "id")).toBe(42)
+		expect(lookupItemField(item, "status")).toBe("done")
+		expect(lookupItemField(item, "agentCwd")).toBe("/authoritative/worktree")
+		expect(lookupItemField(item, "runner")).toBe("codex")
+		expect(lookupItemField(item, "phase")).toBe("review")
+		expect(lookupItemField(item, "context.nested")).toBe("declared-extra")
+	})
+
 	test("parsePreset accepts nested ItemRecord fields but rejects unknown roots", () => {
 		const preset = makePreset({
 			item: { idField: "issue", fields: { sessionIds: "json" } },
@@ -120,6 +146,24 @@ describe("ItemRecord prompt bindings", () => {
 	})
 })
 
+describe("phase exit completion protocol", () => {
+	test("documents every exit discriminator and its complete typed writer", () => {
+		const epilogue = phaseExitsEpilogue()
+
+		expect(epilogue).toContain('kind: "task-path"')
+		expect(epilogue).toContain('kind: "item-status"')
+		expect(epilogue).toContain('kind: "chain-action"')
+		expect(epilogue).toContain(
+			"coder-loop item transition <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --path <chosen-path> --exit-json '<json-object>'",
+		)
+		expect(epilogue).toContain(
+			"coder-loop item update <CHAIN> --issue <ISSUE> --status <chosen-status>",
+		)
+		expect(epilogue).toContain(
+			"coder-loop item exit-action <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --action <chosen-action>",
+		)
+	})
+})
 
 describe("renderPrompt placeholder validation (issue #399)", () => {
 	function makePhase(variables: ReadonlyArray<readonly [string, ReturnType<typeof parsePreset>["phases"][number]["variables"][number]["source"]]>): PresetPhase {
@@ -174,6 +218,18 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
 		const out = renderPrompt("before {{QUOTED}} after", phase, ctx)
 		expect(out).toBe("before literal {{NOT_A_KEY}} content after")
+	})
+
+	test("renderPrompt treats committed transition bindings as one-pass values", () => {
+		const phase = makePhase([])
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
+		const out = renderPrompt(
+			"result={{RESULT}} json={{DETAILS}}",
+			phase,
+			ctx,
+			{ RESULT: "literal {{NOT_A_KEY}} content", DETAILS: { ok: true } },
+		)
+		expect(out).toBe('result=literal {{NOT_A_KEY}} content json={"ok":true}')
 	})
 
 	test("renderPrompt renders escape `\\{{KEY}}` as literal `{{KEY}}`", () => {

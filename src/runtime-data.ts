@@ -40,6 +40,7 @@ export type EngineLifecycleAdmissionReason =
 	| "scheduler.recovery-entry-restore"
 	| "queue.unblock-entry-restore"
 	| "item.created-default-from-preset"
+	| "task-transition.complete"
 	| "test"
 
 export type RuntimeDataIssue = {
