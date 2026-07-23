@@ -32,13 +32,15 @@ describe("bundled moat-experiment-loop preset", () => {
 			when: "Restore cannot complete automatically; publish exact recovery instructions and stop the chain without claiming cleanup.",
 		})
 		// #753: review is the terminal routed-verdict phase — every exit is a routed
-		// item-status (retry_*/done/blocked/moot) or the `stop` chain-action. The
-		// scheduler exhausts the item on a clean-exit trap; review-entry.md documents
-		// that contract. If a completed edge is later added here, review-entry.md must
-		// match it (moat-experiment-preset "review-entry.md ... clean-exit" assertions).
+		// item-status (retry_*/done/blocked/moot). Review declares no chain-action;
+		// only restore does. The scheduler exhausts the item on a clean-exit trap;
+		// review-entry.md documents that contract. If a completed edge or chain-action
+		// is later added here, review-entry.md must match it (moat-experiment-preset
+		// "review-entry.md ... clean-exit" assertions).
 		const review = preset.phases.find((phase) => phase.name === "review")
 		expect(review).toBeDefined()
 		expect(review!.next.some((candidate) => candidate.kind === "completed")).toBe(false)
+		expect(review!.exits.some((exit) => exit.kind === "chain-action")).toBe(false)
 	})
 
 	test("ships every declared prompt fragment and hard-codes the retry budgets", async () => {
@@ -66,10 +68,25 @@ describe("bundled moat-experiment-loop preset", () => {
 		// legitimately advance on a completed edge; review, being the final routed-verdict
 		// phase, must not tell the agent to clean-exit. The completion protocol asserts
 		// preset↔entry-doc consistency by declaring "no `on = \"completed\"` next edge"
-		// and forbidding clean-exit — both must survive edits.
-		expect(reviewEntry).toContain("declares no `on = \"completed\"` next edge")
-		expect(reviewEntry).toContain("Never clean-exit without writing a routed status or selecting a chain-action")
+		// and forbidding clean-exit — both must survive edits. The stop chain-action
+		// belongs to restore, not review, so the doc must not tell reviewers to invoke it.
+		expect(reviewEntry).toContain("declares no `on = \"completed\"` next edge and no chain-action exit")
+		expect(reviewEntry).toContain("Never clean-exit without writing a routed status")
 		expect(reviewEntry).not.toContain("For the completed edge, exit cleanly without writing a status.")
+		// The doc must not tell reviewers to invoke a chain-action (which review does not declare).
+		expect(reviewEntry).not.toMatch(/item exit-action[^\n]*--action stop/)
+		expect(reviewEntry).not.toContain("`stop` chain-action")
+		// Orthogonal budget: phase-local retry (three self-entries) and review-visible
+		// identical-gap cap (two) are complementary and must both be documented in review-entry.md.
+		expect(reviewEntry).toContain("orthogonal to each producer's own phase-local retry budget")
+		// #Finding4: restore is the sole chain-action holder; its entry doc must invoke
+		// stop via `item exit-action --action stop`, and stages/stop must ship.
+		const restoreEntry = fs.readFileSync(path.join(presetDir, "restore-entry.md"), "utf8")
+		expect(restoreEntry).toContain("stages/stop")
+		expect(restoreEntry).toContain("item exit-action")
+		expect(restoreEntry).toContain("--action stop")
+		expect(fs.existsSync(path.join(presetDir, "stages", "stop.md"))).toBe(true)
+		expect(fs.existsSync(path.join(presetDir, "review", "actions", "stop.md"))).toBe(false)
 		expect(fs.readFileSync(path.join(presetDir, "umbrella-finalizer-entry.md"), "utf8")).toContain(
 			"FINALIZER SUMMARY: decision=<complete|keep-active>",
 		)

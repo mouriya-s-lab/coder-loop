@@ -608,6 +608,12 @@ path = "stages/restore.md"
 
 
 [[fragments]]
+id = "stages/stop"
+role = "stage"
+path = "stages/stop.md"
+
+
+[[fragments]]
 id = "stages/writeback"
 role = "stage"
 path = "stages/writeback.md"
@@ -659,12 +665,6 @@ path = "review/actions/accept.md"
 id = "review/actions/moot"
 role = "review"
 path = "review/actions/moot.md"
-
-
-[[fragments]]
-id = "review/actions/stop"
-role = "review"
-path = "review/actions/stop.md"
 
 
 [[fragments]]
