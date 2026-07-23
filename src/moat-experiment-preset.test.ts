@@ -52,6 +52,13 @@ describe("bundled moat-experiment-loop preset", () => {
 			.join("\n")
 		expect(allMarkdown).not.toContain("in_progress")
 		expect(allMarkdown).not.toMatch(/(?<!\{)\{(?:REPO|ISSUE|RUNTIME_INPUTS_DOC|PROMPT_FRAGMENT_INDEX|CHAIN_NAME|RUN_ID)\}(?!\})/)
+		// #753 audit finding: `blocked-responder-entry.md:5` had `{{{RUNTIME_INPUTS_DOC}}}`
+		// (triple-brace on each side). The renderer's placeholder regex is `\{\{KEY\}\}`,
+		// so a triple-brace matches the inner `{{KEY}}` and leaves a literal `{`/`}` on each
+		// side of the substituted value — visible in the agent's prompt. Existing single-brace
+		// guard above didn't catch it because the inner `{KEY}` is preceded by `{`, failing
+		// the `(?<!\{)` lookbehind. Guard the shape directly.
+		expect(allMarkdown).not.toMatch(/\{\{\{[A-Za-z_]/)
 		for (const phase of ["prepare", "deploy", "experiment", "export", "restore", "writeback"]) {
 			const entry = fs.readFileSync(path.join(presetDir, `${phase}-entry.md`), "utf8")
 			expect(entry).toContain("three")
@@ -67,9 +74,24 @@ describe("bundled moat-experiment-loop preset", () => {
 		// phase, must not tell the agent to clean-exit. The completion protocol asserts
 		// preset↔entry-doc consistency by declaring "no `on = \"completed\"` next edge"
 		// and forbidding clean-exit — both must survive edits.
-		expect(reviewEntry).toContain("declares no `on = \"completed\"` next edge")
-		expect(reviewEntry).toContain("Never clean-exit without writing a routed status or selecting a chain-action")
+		expect(reviewEntry).toContain("declares no `on = \"completed\"` next edge and no chain-action exit")
+		expect(reviewEntry).toContain("Never clean-exit without writing a routed status")
 		expect(reviewEntry).not.toContain("For the completed edge, exit cleanly without writing a status.")
+		// #753 follow-up (audit finding): review-entry.md must not reference the
+		// `stop` chain-action or the `review/actions/stop` fragment. moat-experiment-loop's
+		// preset.toml declares chainAction = "stop" only on the `restore` phase — review
+		// has no such exit. An earlier iteration of this PR wrote both into the entry doc,
+		// which would let agents invoke `item exit-action --action stop` on review and get
+		// a daemon default-deny (`review` phase has no chain-action exits declared).
+		expect(reviewEntry).not.toContain("review/actions/stop")
+		expect(reviewEntry).not.toContain("item exit-action --action stop")
+		// #753 follow-up: `preset.toml` still declares the `review/actions/stop` fragment,
+		// but only the review phase referenced it and review no longer does. Also verify
+		// that no `chainAction` exit is declared on review (defense-in-depth against a
+		// future edit that would revive the mismatch).
+		const reviewPhase = preset.phases.find((phase) => phase.name === "review")
+		expect(reviewPhase).toBeDefined()
+		expect(reviewPhase!.exits.some((exit) => exit.kind === "chain-action")).toBe(false)
 		expect(fs.readFileSync(path.join(presetDir, "umbrella-finalizer-entry.md"), "utf8")).toContain(
 			"FINALIZER SUMMARY: decision=<complete|keep-active>",
 		)
