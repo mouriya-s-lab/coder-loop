@@ -6,6 +6,7 @@ import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 
 import {
+	buildPhasePlanFromPreset,
 	cleanupSchedulerChainWorktrees,
 	createGitWorktreeManager,
 	createSchedulerState,
@@ -13,6 +14,7 @@ import {
 	listActiveRuns,
 	makeRunId,
 	markRunPendingRecycle,
+	nextNonTriggerPhaseForItem,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	runSchedulerChainCompleteTriggerPhases,
@@ -24,6 +26,7 @@ import {
 	type SchedulerLifecycleEventPersistenceFailure,
 	type SchedulerLoadedPreset,
 	type SchedulerOptions,
+	type SchedulerPhaseContinuation,
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
@@ -39,7 +42,7 @@ import {
 	type JsonObject,
 } from "./loop"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
-import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, type ItemRecord, type RunRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { engineLifecycleAdmittedItemStatus, itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
@@ -2458,7 +2461,14 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		}
 	})
 
-	test("no-status review exit retries review for the same item", async () => {
+	test("no-status review exit exhausts the item (issue #753 supersedes #289's re-pick behavior)", async () => {
+		// #289 originally treated a clean-exit review run (exit 0 without writing a status)
+		// as "retry the same phase" because the startStatus was still continuable. #753
+		// reclassified the same shape — phase declares no `on = "completed"` edge, no
+		// routed candidate for the current status — as a preset↔agent contract violation:
+		// moat-experiment-loop item #44 spent ~1.5 hours in that trap doing real ~15 min
+		// review cycles that could never advance. The scheduler now exhausts the item on
+		// detection so the loop reaches a fixed point instead of re-spawning the phase.
 		const fixture = await createFixture("phase-review-incomplete")
 		try {
 			const chain = createChain(fixture.store, "phase-review-incomplete-chain")
@@ -2489,21 +2499,24 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-retry`,
 			}))
 
-			expect(tick.spawnedRuns).toHaveLength(1)
-			expect(tick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-review-retry`)
-			const spawned = fixture.store.getItem(item.id)
-			expect(spawned?.phase).toBe("review")
-			expect(spawned?.status).toBe("queued")
-			expect(spawned?.attempts).toBe(2)
-
-			await tick.spawnedRuns[0]!.closed
+			expect(tick.spawnedRuns).toHaveLength(0)
+			const exhausted = fixture.store.getItem(item.id)
+			expect(exhausted?.phase).toBe("review")
+			expect(exhausted?.status).toBe("exhausted")
+			expect(exhausted?.attempts).toBe(2)
 
 			const phaseStarts = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 					event.type === "phase.start" && event.itemId === item.id,
 				)
 				.map((event) => event.phase)
-			expect(phaseStarts).toEqual(["review"])
+			expect(phaseStarts).toEqual([])
+			const terminalEvents = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> =>
+					event.type === "queue.terminal" && event.rowId === item.id,
+				)
+			expect(terminalEvents).toHaveLength(1)
+			expect(terminalEvents[0]?.terminalStatus).toBe("exhausted")
 		} finally {
 			fixture.store.close()
 		}
@@ -5150,5 +5163,82 @@ describe("per-run summary tag", () => {
 			resume: { kind: "fresh" },
 		})
 		expect(rendered).toBe("business-key-e2e-ok")
+	})
+})
+
+// #753 regression: `nextNonTriggerPhaseForItem`'s clean-exit fallback previously
+// returned the current phase name when the phase declared no `on = "completed"`
+// next edge and the agent exited cleanly without writing a routed status. The
+// startStatus was still continuable (e.g. review's `review_required`), so the
+// scheduler re-spawned the same phase every tick — moat-experiment-loop item #44
+// saw ~1.5 hours of ~15-minute review cycles. The fix returns a `clean-exit-trap`
+// signal instead; the tick's pre-selection sweep exhausts the item.
+describe("nextNonTriggerPhaseForItem clean-exit trap (issue #753)", () => {
+	test("moat-experiment-loop review clean-exit no longer retries the same phase", async () => {
+		const presetDir = resolve(REPO_ROOT, "presets", "moat-experiment-loop")
+		const preset = await loadPreset(presetDir)
+		const phasePlan = buildPhasePlanFromPreset(preset)
+		const reviewRequired = parseInternalStatus("review_required", "test.status")
+		const runId = "run-753-review-clean-exit"
+		const itemStatusUpdatedAt = 1_800_000_500
+		const item: ItemRecord = {
+			id: 44,
+			chainId: 13,
+			itemId: "27",
+			repoCwd: "/fake",
+			status: reviewRequired,
+			attempts: 6,
+			position: 0,
+			title: "moat-experiments-lab#27",
+			priority: null,
+			lastRunId: runId,
+			sessionIds: {},
+			issueFile: null,
+			evidenceDir: null,
+			agentCwd: null,
+			runner: null,
+			phase: "review",
+			preset: "moat-experiment-loop",
+			presetPath: null,
+			extra: storedItemExtra({}),
+			createdAt: 1_800_000_000,
+			updatedAt: itemStatusUpdatedAt,
+			statusUpdatedAt: itemStatusUpdatedAt,
+		}
+		const cleanExitRun: RunRecord = {
+			id: 1,
+			runId,
+			chainId: item.chainId,
+			itemId: item.id,
+			phase: "review",
+			status: reviewRequired,
+			startedAt: itemStatusUpdatedAt - 900,
+			endedAt: itemStatusUpdatedAt + 60,
+			exitCode: 0,
+			extra: storedItemExtra({
+				startStatus: reviewRequired,
+				startStatusUpdatedAt: itemStatusUpdatedAt,
+				startPhase: "review",
+			}),
+		}
+		const runsById = new Map<string, RunRecord>([[cleanExitRun.runId, cleanExitRun]])
+		const continuation: SchedulerPhaseContinuation = nextNonTriggerPhaseForItem({
+			item,
+			runsById,
+			phasePlan,
+			pendingStatuses: preset.statuses.continuable,
+			terminalStatuses: preset.statuses.terminal,
+			now: cleanExitRun.endedAt! + 1,
+		})
+		expect(continuation).toEqual({ kind: "clean-exit-trap" })
+		if (continuation.kind === "advance") expect(continuation.phase).not.toBe("review")
+	})
+
+	test("moat-experiment-loop review preset has no completed edge (preset↔entry-doc consistency)", async () => {
+		const presetDir = resolve(REPO_ROOT, "presets", "moat-experiment-loop")
+		const preset = await loadPreset(presetDir)
+		const review = preset.phases.find((phase) => phase.name === "review")
+		expect(review).toBeDefined()
+		expect(review!.next.some((candidate) => candidate.kind === "completed")).toBe(false)
 	})
 })

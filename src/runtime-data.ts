@@ -32,6 +32,12 @@ export type AdmittedItemStatus = InternalStatus & { readonly [admittedItemStatus
 // = declaring a new engine-lifecycle status-write path is intentional.
 export type EngineLifecycleAdmissionReason =
 	| "scheduler.exhausted-on-max-attempts"
+	// #753: scheduler.tick pre-selection sweep detected a preset↔agent clean-exit
+	// contract violation (run exited 0 without writing a routed status, phase declares
+	// no `on = "completed"` next edge, startStatus still continuable). The engine writes
+	// the preset's `exhausted` terminal so the loop reaches a fixed point instead of
+	// re-spawning the same phase every tick.
+	| "scheduler.exhausted-on-clean-exit-trap"
 	| "scheduler.spawn-aborted-entry-restore"
 	| "scheduler.run-status-forwarded"
 	| "scheduler.dependency-unblock-restore"

@@ -555,6 +555,30 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 
 			const now = nowSeconds(options)
 			await emitRepoWaitingDecisions(options, chain, repoCwd, items, chainStatuses, now)
+			// #753 pre-selection sweep: exhaust items caught in the clean-exit trap
+			// (phase declares no `on = "completed"` edge, latest run exited 0 without
+			// writing a routed status, and the startStatus is still continuable). One
+			// exhaustion per pass because the store write reshapes the item list; the
+			// same item never re-enters the trap on the next scan since its status
+			// moves to the preset's `exhausted` terminal.
+			let trapRunsById = new Map(runs.map((run) => [run.runId, run]))
+			while (true) {
+				const trapped = items.find((item) => {
+					if (item.repoCwd !== repoCwd) return false
+					const continuation = nextNonTriggerPhaseForItem({
+						item,
+						runsById: trapRunsById,
+						phasePlan,
+						pendingStatuses: chainStatuses.pending,
+						terminalStatuses: chainStatuses.terminal,
+						now,
+					})
+					return continuation.kind === "clean-exit-trap"
+				})
+				if (trapped === undefined) break
+				items = await exhaustItemOnCleanExitTrap(options, chain, trapped, chainStatuses)
+				trapRunsById = new Map(options.store.listRuns(chain.id).map((run) => [run.runId, run]))
+			}
 			// DESIGN-six-phase-split §8.3: the attempt budget is checked AFTER selection and only
 			// gates a graph entry into a startsAttempt phase. A successor phase (review after the
 			// budget-spending iteration) and a recover-run are never truncated — exhaustion happens
@@ -613,7 +637,7 @@ type SchedulerItemTriggerPhase = {
 	whenStatus: InternalStatus
 }
 
-type SchedulerPhasePlan = {
+export type SchedulerPhasePlan = {
 	entryPhase: string
 	startsAttemptPhases: ReadonlySet<string>
 	nonTriggerPhases: readonly string[]
@@ -621,7 +645,7 @@ type SchedulerPhasePlan = {
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
 
-type SchedulerPhaseNext =
+export type SchedulerPhaseNext =
 	| { kind: "completed"; phase: string }
 	| { kind: "item-status"; phase: string; status: InternalStatus }
 
@@ -639,7 +663,7 @@ async function resolvePhasePlanForChainWithItems(
 	return buildPhasePlanFromPreset(preset)
 }
 
-function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerPhasePlan {
+export function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerPhasePlan {
 	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
 	const entryPhase = preset.phases.find((phase) => phase.entry)?.name
 	if (entryPhase === undefined) throw new Error(`preset ${preset.name} has no entry phase`)
@@ -709,7 +733,7 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): SchedulerSe
 
 	const phaseContinuation = repoItems
 		.flatMap((item) => {
-			const nextPhase = nextNonTriggerPhaseForItem({
+			const continuation = nextNonTriggerPhaseForItem({
 				item,
 				runsById,
 				phasePlan: input.phasePlan,
@@ -717,7 +741,11 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): SchedulerSe
 				terminalStatuses: input.chainStatuses.terminal,
 				now: input.now,
 			})
-			return nextPhase === null ? [] : [{ item, phase: nextPhase }]
+			// #753: `wait` and `clean-exit-trap` both skip selection here. Trap items are
+			// exhausted by the tick's pre-selection sweep before selectNextItemAndPhase is
+			// called, so seeing one at this point means the sweep is scheduled for the
+			// next tick — either way the item does not spawn on this tick.
+			return continuation.kind === "advance" ? [{ item, phase: continuation.phase }] : []
 		})
 		.sort((left, right) => comparePendingItems(left.item, right.item))[0]
 	if (phaseContinuation !== undefined) {
@@ -758,25 +786,34 @@ function entryKindForContinuation(item: ItemRecord, phase: string, runsById: Rea
 	return GRAPH_ENTRY
 }
 
-function nextNonTriggerPhaseForItem(input: {
+// #753: three-way outcome instead of the previous `string | null`. The old shape
+// collapsed "advance to this phase" and "clean-exit trap — no valid successor and
+// pretending to re-run the same phase infinite-loops" into the same `string` case,
+// so the scheduler tick could not tell the trap apart from a legitimate resume.
+export type SchedulerPhaseContinuation =
+	| { kind: "advance"; phase: string }
+	| { kind: "wait" }
+	| { kind: "clean-exit-trap" }
+
+export function nextNonTriggerPhaseForItem(input: {
 	item: ItemRecord
 	runsById: ReadonlyMap<string, RunRecord>
 		phasePlan: SchedulerPhasePlan
 		pendingStatuses: readonly InternalStatus[]
 		terminalStatuses: readonly InternalStatus[]
 		now: number
-	}): string | null {
-	if (!itemBackoffReady(input.item, input.now)) return null
-	if (input.item.phase === null) return null
-	if (input.terminalStatuses.includes(input.item.status)) return null
-	if (!input.phasePlan.nonTriggerPhases.includes(input.item.phase)) return null
-	if (input.item.lastRunId === null) return input.item.phase
+	}): SchedulerPhaseContinuation {
+	if (!itemBackoffReady(input.item, input.now)) return { kind: "wait" }
+	if (input.item.phase === null) return { kind: "wait" }
+	if (input.terminalStatuses.includes(input.item.status)) return { kind: "wait" }
+	if (!input.phasePlan.nonTriggerPhases.includes(input.item.phase)) return { kind: "wait" }
+	if (input.item.lastRunId === null) return { kind: "advance", phase: input.item.phase }
 	const latestRun = input.runsById.get(input.item.lastRunId)
-	if (latestRun === undefined) return input.item.phase
-	if (latestRun.itemId !== input.item.id) return input.item.phase
-	if (latestRun.phase !== input.item.phase) return input.item.phase
-	if (latestRun.endedAt === null) return null
-	if (latestRun.exitCode !== 0) return input.item.phase
+	if (latestRun === undefined) return { kind: "advance", phase: input.item.phase }
+	if (latestRun.itemId !== input.item.id) return { kind: "advance", phase: input.item.phase }
+	if (latestRun.phase !== input.item.phase) return { kind: "advance", phase: input.item.phase }
+	if (latestRun.endedAt === null) return { kind: "wait" }
+	if (latestRun.exitCode !== 0) return { kind: "advance", phase: input.item.phase }
 	const startStatus = latestRun.extra.startStatus ?? null
 	const startStatusUpdatedAt = typeof latestRun.extra.startStatusUpdatedAt === "number" ? latestRun.extra.startStatusUpdatedAt : null
 	const statusWrittenAfterRunStart = startStatusUpdatedAt !== null
@@ -785,12 +822,23 @@ function nextNonTriggerPhaseForItem(input: {
 	const candidates = input.phasePlan.nextByPhase.get(input.item.phase) ?? []
 	if (statusWrittenAfterRunStart || startStatus !== input.item.status) {
 		const routed = candidates.find((candidate) => candidate.kind === "item-status" && candidate.status === input.item.status)
-		if (routed !== undefined) return routed.phase
-		return input.pendingStatuses.includes(input.item.status) ? input.item.phase : null
+		if (routed !== undefined) return { kind: "advance", phase: routed.phase }
+		return input.pendingStatuses.includes(input.item.status)
+			? { kind: "advance", phase: input.item.phase }
+			: { kind: "wait" }
 	}
 	const completed = candidates.find((candidate) => candidate.kind === "completed")
-	if (completed !== undefined) return completed.phase
-	return input.pendingStatuses.includes(input.item.status) ? input.item.phase : null
+	if (completed !== undefined) return { kind: "advance", phase: completed.phase }
+	// #753: clean-exit fallback. Agent finished the run with exit 0 and did not write a
+	// status, and the phase declares no `on = "completed"` edge. There is no valid next
+	// phase to advance to. The previous fallback returned `input.item.phase` on the
+	// assumption that a continuable startStatus meant "retry this phase"; for a routed-only
+	// decision phase like moat-experiment-loop review that produced an infinite retry loop
+	// because the same startStatus recurred every tick. Signal the trap explicitly so the
+	// scheduler tick can exhaust the item once and reach a terminal state.
+	return input.pendingStatuses.includes(input.item.status)
+		? { kind: "clean-exit-trap" }
+		: { kind: "wait" }
 }
 
 function hasUnfinishedCurrentPhaseRun(item: ItemRecord, runsById: ReadonlyMap<string, RunRecord>): boolean {
@@ -920,6 +968,44 @@ async function exhaustItemOnAttemptBudget(
 
 function makeAttemptLimitRunId(chain: ChainRecord, item: ItemRecord, exhaustedAt: number): string {
 	return `run-${exhaustedAt}-max-attempts-chain-${chain.id}-item-${item.id}`
+}
+
+// #753: exhaust an item caught in a preset↔agent clean-exit contract violation. The
+// scheduler detected that the latest run for the item's current phase ended with
+// `exitCode === 0` without writing a routed status, and the phase declares no
+// `on = "completed"` next edge while the startStatus is still in the continuable
+// vocabulary. Without this exhaustion the old `nextNonTriggerPhaseForItem` fallback
+// re-spawned the same phase every tick (moat-experiment-loop item #44 saw ~1.5 hours
+// of ~15 min review cycles). Falling to the preset's `exhausted` terminal keeps the
+// audit trail (`queue.terminal`) unified with the attempt-budget exhaustion path and
+// distinguishes intent only through the engine-lifecycle source string.
+async function exhaustItemOnCleanExitTrap(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	chainStatuses: SchedulerChainStatuses,
+): Promise<ItemRecord[]> {
+	const exhaustedStatus = chainStatuses.exhausted
+	const exhaustedAt = nowSeconds(options)
+	const extra = clearItemSchedulerBackoff(item.extra)
+	options.store.updateItem(item.id, {
+		status: engineLifecycleAdmittedItemStatus(exhaustedStatus, "scheduler.exhausted-on-clean-exit-trap"),
+		extra,
+		updatedAt: exhaustedAt,
+	})
+	await emit(options, {
+		type: "queue.terminal",
+		ts: nowIso(options),
+		runId: item.lastRunId ?? makeCleanExitTrapRunId(chain, item, exhaustedAt),
+		chainId: chain.id,
+		rowId: item.id,
+		terminalStatus: exhaustedStatus,
+	})
+	return options.store.listItems(chain.id)
+}
+
+function makeCleanExitTrapRunId(chain: ChainRecord, item: ItemRecord, exhaustedAt: number): string {
+	return `run-${exhaustedAt}-clean-exit-trap-chain-${chain.id}-item-${item.id}`
 }
 
 export async function runSchedulerUntilIdle(options: SchedulerOptions, maxTicks = 100): Promise<SchedulerActiveRun[]> {
