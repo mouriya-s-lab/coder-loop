@@ -31,6 +31,14 @@ describe("bundled moat-experiment-loop preset", () => {
 			action: "stop",
 			when: "Restore cannot complete automatically; publish exact recovery instructions and stop the chain without claiming cleanup.",
 		})
+		// #753: review is the terminal routed-verdict phase — every exit is a routed
+		// item-status (retry_*/done/blocked/moot) or the `stop` chain-action. The
+		// scheduler exhausts the item on a clean-exit trap; review-entry.md documents
+		// that contract. If a completed edge is later added here, review-entry.md must
+		// match it (moat-experiment-preset "review-entry.md ... clean-exit" assertions).
+		const review = preset.phases.find((phase) => phase.name === "review")
+		expect(review).toBeDefined()
+		expect(review!.next.some((candidate) => candidate.kind === "completed")).toBe(false)
 	})
 
 	test("ships every declared prompt fragment and hard-codes the retry budgets", async () => {
@@ -52,9 +60,16 @@ describe("bundled moat-experiment-loop preset", () => {
 		expect(fs.readFileSync(path.join(presetDir, "contract-enrichment-entry.md"), "utf8")).toContain(
 			"never use it merely because the incoming packet needed enrichment",
 		)
-		expect(fs.readFileSync(path.join(presetDir, "review-entry.md"), "utf8")).toContain(
-			"two occurrences per identical gap",
-		)
+		const reviewEntry = fs.readFileSync(path.join(presetDir, "review-entry.md"), "utf8")
+		expect(reviewEntry).toContain("two occurrences per identical gap")
+		// #753: review-entry.md was previously copied from other phase templates that
+		// legitimately advance on a completed edge; review, being the final routed-verdict
+		// phase, must not tell the agent to clean-exit. The completion protocol asserts
+		// preset↔entry-doc consistency by declaring "no `on = \"completed\"` next edge"
+		// and forbidding clean-exit — both must survive edits.
+		expect(reviewEntry).toContain("declares no `on = \"completed\"` next edge")
+		expect(reviewEntry).toContain("Never clean-exit without writing a routed status or selecting a chain-action")
+		expect(reviewEntry).not.toContain("For the completed edge, exit cleanly without writing a status.")
 		expect(fs.readFileSync(path.join(presetDir, "umbrella-finalizer-entry.md"), "utf8")).toContain(
 			"FINALIZER SUMMARY: decision=<complete|keep-active>",
 		)
