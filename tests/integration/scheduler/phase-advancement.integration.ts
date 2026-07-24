@@ -1,52 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import {
-	commitFixtureLegacyItemTrigger, createChain, createFixture, createItem, fixtureTaskLeaf, fixtureTransitionRunId, historicalRunExtra, itemExtraToJsonObject, loadedPresetFromDir,
+	createChain, createFixture, createItem, historicalRunExtra, itemExtraToJsonObject, loadedPresetFromDir,
 	initializeFixtureGitWorktree, mkdir, readFile, readRunnerEvents, resolve, resolveChainRuntimePaths, runSchedulerUntilIdle, runtimeStatus,
 	schedulerTick, stopFixture, storedItemExtra, writeFile, writeThreeStepPreset, type SchedulerEvent,
 } from "./harness"
-
-let fixtureTransitionTimestamp = 1_900_289_000
-
-function commitFixturePhaseTransition(
-	store: Parameters<typeof fixtureTaskLeaf>[0],
-	chainId: number,
-	itemId: number,
-	sourcePhase: string,
-	targetPhase: string | null,
-	pathId: string,
-): void {
-	const source = fixtureTaskLeaf(store, chainId, itemId, sourcePhase)
-	if (source === null) throw new Error(`expected ${sourcePhase} task leaf for item ${itemId}`)
-	const target = targetPhase === null ? null : fixtureTaskLeaf(store, chainId, itemId, targetPhase)
-	if (targetPhase !== null && target === null) throw new Error(`expected ${targetPhase} task leaf for item ${itemId}`)
-	store.commitTaskTransition({
-		sourceRunId: fixtureTransitionRunId(store, chainId, itemId, sourcePhase),
-		sourceClosureId: source.closure.closureId,
-		targetRuntimeNodeId: target?.identity.runtimeNodeId ?? null,
-		pathId,
-		exitPayload: {},
-		resolvedBindings: {},
-		createdAt: fixtureTransitionTimestamp++,
-		itemUpdate: { kind: "none" },
-	})
-}
-
-function completeFixtureReviewTask(
-	store: Parameters<typeof fixtureTaskLeaf>[0],
-	chainId: number,
-	itemId: number,
-	pathPrefix: string,
-	updatedAt: number,
-): void {
-	commitFixturePhaseTransition(store, chainId, itemId, "iteration", "review", `${pathPrefix}-iteration`)
-	commitFixtureLegacyItemTrigger(store, chainId, itemId, "review", "blocked-responder", "blocked", updatedAt)
-	for (const phase of ["iteration", "review"]) {
-		const leaf = fixtureTaskLeaf(store, chainId, itemId, phase)
-		if (leaf === null) throw new Error(`expected completed ${phase} task leaf for item ${itemId}`)
-		store.setClosureLifecycle(leaf.closure.closureId, { kind: "consume", updatedAt })
-		store.setClosureResources(leaf.closure.closureId, { worktreePath: null, branchName: null, updatedAt })
-	}
-}
 
 describe("scheduler", () => {
 	test("active-child final trigger preparation abort remains retryable", async () => {
@@ -61,13 +18,6 @@ describe("scheduler", () => {
 				lastRunId: "run-pre-blocked-review",
 				updatedAt: 1_900_535_400,
 			})
-			completeFixtureReviewTask(
-				fixture.store,
-				chain.id,
-				item.id,
-				"active-child-final-trigger",
-				1_900_535_400,
-			)
 			const activeChildRunner = resolve(fixture.loopDataRoot, "final-trigger-active-child-runner.ts")
 			await writeFile(activeChildRunner, "await new Promise((resolve) => setTimeout(resolve, 60_000))\n")
 			let now = 1_900_535_401
@@ -103,7 +53,6 @@ describe("scheduler", () => {
 			expect(failedItem?.status).toBe("blocked")
 			expect(failedItem?.statusUpdatedAt).toBe(preAttemptStatusUpdatedAt)
 			expect(failedItem?.phase).toBe("review")
-			expect(failedItem?.attempts).toBe(2)
 			expect(failedItem?.extra.schedulerSpawnError).toMatchObject({
 				attribution: { kind: "phase", phase: "blocked-responder" },
 				message: "final trigger spawn observability failed",
@@ -117,9 +66,7 @@ describe("scheduler", () => {
 			expect(retryTick.spawnedRuns).toHaveLength(1)
 			expect(retryTick.spawnedRuns[0]?.runId).toBe("active-child-final-trigger-2")
 			expect(fixture.store.getItem(item.id)?.phase).toBe("blocked-responder")
-			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
 			await retryTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
 		} finally {
 			await stopFixture(fixture)
 		}
@@ -176,13 +123,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				exitCode: null,
 				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
-			fixture.store.setCurrentRun({
-				chainId: chain.id,
-				phase: "iteration",
-				runId: "run-active-iteration-ledger",
-				startedAt: 1_800_000_700,
-				extra: storedItemExtra({ itemId: item.id, repoCwd: item.repoCwd }),
-			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("in_progress"),
 				phase: "iteration",
@@ -224,14 +164,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const iterClosed = await iterTick.spawnedRuns[0]!.closed
 			expect(iterClosed.status).toBe("queued")
 			expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"iteration",
-				"review",
-				"phase-ac4-iteration-complete",
-			)
 
 			const reviewTick = await schedulerTick(baseOptions)
 			expect(reviewTick.spawnedRuns).toHaveLength(1)
@@ -260,12 +192,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		await writeThreeStepPreset(presetDir)
 		try {
 			const chain = createChain(fixture.store, "phase-order-three-step-chain", { preset: "three-step" })
-			const item = createItem(fixture.store, chain, {
-				issueNumber: 371_001,
-				repoCwd: "/repo/a",
-				summary: null,
-				taskPhases: ["alpha", "beta", "gamma"],
-			})
+			const item = createItem(fixture.store, chain, { issueNumber: 371_001, repoCwd: "/repo/a", summary: null })
 			const baseOptions = fixture.options({
 				loadedPreset: await loadedPresetFromDir(presetDir),
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}`,
@@ -288,27 +215,11 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			expect(alphaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-alpha`)
 			await alphaTick.spawnedRuns[0]!.closed
 			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "alpha", attempts: 1 })
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"alpha",
-				"beta",
-				"three-step-alpha-complete",
-			)
 
 			const betaTick = await schedulerTick(baseOptions)
 			expect(betaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-beta`)
 			await betaTick.spawnedRuns[0]!.closed
 			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "beta", attempts: 1 })
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"beta",
-				"gamma",
-				"three-step-beta-complete",
-			)
 
 			const gammaTick = await schedulerTick(baseOptions)
 			expect(gammaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-gamma`)
@@ -347,14 +258,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				exitCode: 0,
 				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"iteration",
-				"review",
-				"phase-ac5-pre-crash-iteration-complete",
-			)
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
 				phase: "iteration",
@@ -409,14 +312,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				exitCode: 0,
 				extra: historicalRunExtra({ startStatus: "queued", startStatusUpdatedAt: item.statusUpdatedAt }),
 			})
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"iteration",
-				"review",
-				"phase-review-incomplete-enter-review",
-			)
 			fixture.store.updateItem(item.id, {
 				phase: "review",
 				attempts: 2,
@@ -433,7 +328,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const spawned = fixture.store.getItem(item.id)
 			expect(spawned?.phase).toBe("review")
 			expect(spawned?.status).toBe("queued")
-			expect(spawned?.attempts).toBe(3)
+			expect(spawned?.attempts).toBe(2)
 
 			await tick.spawnedRuns[0]!.closed
 
@@ -456,17 +351,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				issueNumber: 31401,
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=retry; issue=#31401; reason=review-retry",
-			})
-			fixture.store.recordRun({
-				runId: "run-pre-review-retry-iteration",
-				chainId: chain.id,
-				itemId: item.id,
-				phase: "iteration",
-				status: runtimeStatus("queued"),
-				startedAt: 1_800_002_250,
-				endedAt: 1_800_002_275,
-				exitCode: 0,
-				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
 			const beforeReview = fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
@@ -580,14 +464,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				exitCode: 0,
 				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"iteration",
-				"review",
-				"phase-ac6-iteration-complete",
-			)
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
 				phase: "iteration",
@@ -633,13 +509,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				lastRunId: "run-pre-blocked-review",
 				updatedAt: 1_800_003_000,
 			})
-			completeFixtureReviewTask(
-				fixture.store,
-				chain.id,
-				item.id,
-				"trigger-b3-blocked-spawn",
-				1_800_003_000,
-			)
 
 			const baseOptions = fixture.options({
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-b3`,
@@ -677,132 +546,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		}
 	})
 
-	test("failed persisted trigger run backs off, retries the same closure without consuming an attempt, and clears backoff on success", async () => {
-		const fixture = await createFixture("trigger-b3-run-backoff")
-		try {
-			const chain = createChain(fixture.store, "trigger-b3-run-backoff-chain")
-			const item = createItem(fixture.store, chain, {
-				issueNumber: 29007,
-				repoCwd: "/repo/a",
-				exitCode: 1,
-			})
-			fixture.store.updateItem(item.id, {
-				status: runtimeStatus("blocked"),
-				phase: "review",
-				attempts: 2,
-				lastRunId: "run-pre-trigger-backoff-review",
-				updatedAt: 1_800_003_100,
-			})
-			completeFixtureReviewTask(
-				fixture.store,
-				chain.id,
-				item.id,
-				"trigger-b3-run-backoff",
-				1_800_003_100,
-			)
-
-			let now = 1_800_003_101
-			let runSequence = 0
-			const options = fixture.options({
-				now: () => now,
-				runIdFactory: () => `trigger-backoff-${++runSequence}`,
-			})
-
-			const failedTick = await schedulerTick(options)
-			expect(failedTick.spawnedRuns).toHaveLength(1)
-			const failedRun = await failedTick.spawnedRuns[0]!.closed
-			expect(failedRun.exitCode).toBe(1)
-			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
-			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
-				failureCount: 1,
-				nextRunAt: now + 60,
-			})
-			expect(fixtureTaskLeaf(fixture.store, chain.id, item.id, "blocked-responder")?.state ?? "pending").toBe("pending")
-			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
-
-			const immediateTick = await schedulerTick(options)
-			expect(immediateTick.spawnedRuns).toHaveLength(0)
-
-			now += 60
-			const beforeRetry = fixture.store.getItem(item.id)
-			if (beforeRetry === null) throw new Error(`expected trigger item ${item.id} before retry`)
-			fixture.store.updateItem(item.id, {
-				extra: storedItemExtra({
-					...itemExtraToJsonObject(beforeRetry.extra),
-					exitCode: 0,
-				}),
-				updatedAt: now,
-			})
-			const retryTick = await schedulerTick(options)
-			expect(retryTick.spawnedRuns).toHaveLength(1)
-			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
-			const successfulRetry = await retryTick.spawnedRuns[0]!.closed
-			expect(successfulRetry.exitCode).toBe(0)
-
-			const triggerRuns = fixture.store.listRuns(chain.id).filter((run) => run.phase === "blocked-responder")
-			expect(triggerRuns).toHaveLength(2)
-			expect(new Set(triggerRuns.map((run) => run.closureId)).size).toBe(1)
-			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
-			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toBeUndefined()
-			expect(fixtureTaskLeaf(fixture.store, chain.id, item.id, "blocked-responder")?.state).toBe("completed")
-			const completedTree = fixture.store.getTaskTree(chain.id)
-			expect(completedTree?.root.kind === "par" ? completedTree.root.state : null).toBe("completed")
-			const completionTick = await schedulerTick(options)
-			expect(completionTick.spawnedRuns).toHaveLength(0)
-		} finally {
-			await stopFixture(fixture)
-		}
-	})
-
-	test("terminal legacy status without a persisted trigger target neither synthesizes a trigger nor gates chain completion", async () => {
-		const fixture = await createFixture("trigger-b3-no-persisted-target")
-		try {
-			const chain = createChain(fixture.store, "trigger-b3-no-persisted-target-chain")
-			const item = createItem(fixture.store, chain, {
-				issueNumber: 29008,
-				repoCwd: "/repo/a",
-			})
-			fixture.store.updateItem(item.id, {
-				status: runtimeStatus("blocked"),
-				phase: "review",
-				attempts: 1,
-				lastRunId: "run-pre-trigger-no-target-review",
-				updatedAt: 1_800_003_200,
-			})
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"iteration",
-				"review",
-				"trigger-b3-no-target-iteration",
-			)
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"review",
-				null,
-				"trigger-b3-no-target-review",
-			)
-			for (const phase of ["iteration", "review"]) {
-				const leaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, phase)
-				if (leaf === null) throw new Error(`expected completed ${phase} task leaf for item ${item.id}`)
-				fixture.store.setClosureLifecycle(leaf.closure.closureId, { kind: "consume", updatedAt: 1_800_003_201 })
-				fixture.store.setClosureResources(leaf.closure.closureId, { worktreePath: null, branchName: null, updatedAt: 1_800_003_201 })
-			}
-
-			const tick = await schedulerTick(fixture.options())
-			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(tick.completedChainIds).toEqual([chain.id])
-			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
-			expect(fixture.store.listTaskTransitions(chain.id)).toHaveLength(2)
-			expect(fixtureTaskLeaf(fixture.store, chain.id, item.id, "blocked-responder")).toBeNull()
-		} finally {
-			await stopFixture(fixture)
-		}
-	})
-
 	test("trigger phase terminal: blocked item triggered, phase exit 0 keeps terminal status and is not pulled back into iteration", async () => {
 		const fixture = await createFixture("trigger-b3-unblock")
 		try {
@@ -825,13 +568,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				lastRunId: "run-pre-blocked-review",
 				updatedAt: 1_800_004_000,
 			})
-			completeFixtureReviewTask(
-				fixture.store,
-				chain.id,
-				item.id,
-				"trigger-b3-terminal",
-				1_800_004_000,
-			)
 
 			const baseOptions = fixture.options({
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-b3`,
@@ -871,11 +607,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-no-match")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-no-match-chain")
-			const item = createItem(fixture.store, chain, {
-				issueNumber: 29004,
-				repoCwd: "/repo/a",
-				taskPhases: ["iteration"],
-			})
+			const item = createItem(fixture.store, chain, { issueNumber: 29004, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("blocked"),
 				phase: "iteration",
@@ -883,18 +615,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				lastRunId: "run-pre-blocked-iter",
 				updatedAt: 1_800_005_000,
 			})
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"iteration",
-				null,
-				"trigger-b3-no-match-terminal",
-			)
-			const iterationLeaf = fixtureTaskLeaf(fixture.store, chain.id, item.id, "iteration")
-			if (iterationLeaf === null) throw new Error("expected terminal iteration closure")
-			fixture.store.setClosureLifecycle(iterationLeaf.closure.closureId, { kind: "consume", updatedAt: 1_800_005_001 })
-			fixture.store.setClosureResources(iterationLeaf.closure.closureId, { worktreePath: null, branchName: null, updatedAt: 1_800_005_001 })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(0)
@@ -1095,18 +815,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 
 			const opts = fixture.options({
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-e2e`,
-				prompt: ({ chain: c, item: i, runId, worktreePath, phase }) =>
-					JSON.stringify({
-						itemId: i.id,
-						issueNumber: Number(i.itemId),
-						chainName: c.name,
-						runId,
-						worktreePath,
-						eventLog: fixture.eventLogForChain(c.name),
-						sleepMs: 5,
-						exitCode: 0,
-						writeStatus: phase === "iteration" ? "changes_requested" : "done",
-					}),
 			})
 
 			// Drive like the daemon: keep ticking past idle. The tick that unblocks the dependent
@@ -1139,14 +847,15 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(unblockedEvents[0]?.toStatus).toBe("queued")
 			expect(unblockedEvents[0]?.dependsOn).toEqual([blocker.id])
 
-			// The dependent's real work phases only ran AFTER recovery, never while blocked. The
-			// fake runner commits the continuable iteration exit before the terminal review exit.
+			// The dependent's real work phase only ran AFTER recovery, never while blocked. The fake
+			// runner emits verdict=accepted on its single iteration run, so the item reaches done in
+			// one phase (scheduler.ts maps exit 0 + accepted → done regardless of phase).
 			const phaseStarts = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 					event.type === "phase.start" && event.itemId === dependent.id,
 				)
 				.map((event) => event.phase)
-			expect(phaseStarts).toEqual(["iteration", "review"])
+			expect(phaseStarts).toEqual(["iteration"])
 		} finally {
 			await stopFixture(fixture)
 		}
@@ -1178,16 +887,11 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				exitCode: 0,
 				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
-			commitFixturePhaseTransition(
-				fixture.store,
-				chain.id,
-				item.id,
-				"iteration",
-				"review",
-				"trigger-b3-race-iteration-complete",
-			)
-			const historicalIteration = fixtureTaskLeaf(fixture.store, chain.id, item.id, "iteration")
-			if (historicalIteration === null) throw new Error("expected historical iteration closure")
+			const historicalTree = fixture.store.getTaskTree(chain.id)
+			const historicalIteration = historicalTree?.root.kind === "seq"
+				? historicalTree.root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+				: undefined
+			if (historicalIteration?.kind !== "leaf") throw new Error("expected historical iteration closure")
 			fixture.store.setClosureLifecycle(historicalIteration.closure.closureId, { kind: "consume", updatedAt: 1_800_005_951 })
 			fixture.store.setClosureResources(historicalIteration.closure.closureId, { worktreePath: null, branchName: null, updatedAt: 1_800_005_951 })
 			fixture.store.updateItem(item.id, {
@@ -1252,13 +956,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				lastRunId: "run-pre-real-spawn-review",
 				updatedAt: 1_800_007_000,
 			})
-			completeFixtureReviewTask(
-				fixture.store,
-				chain.id,
-				item.id,
-				"trigger-b3-real-spawn",
-				1_800_007_000,
-			)
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)

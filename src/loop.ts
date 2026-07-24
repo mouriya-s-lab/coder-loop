@@ -6070,12 +6070,7 @@ export function validatePresetPhaseTemplate(
 	return findings
 }
 
-export function renderPrompt(
-	template: string,
-	phase: PresetPhase,
-	ctx: ResolveContext & { item: ItemRecord },
-	injectedBindings: Readonly<JsonObject> = {},
-): string {
+export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext & { item: ItemRecord }): string {
 	const stripped = stripRoleEntryFrontmatter(template)
 	const matches = extractPromptPlaceholders(stripped)
 	const declared = new Map(phase.variables.map((variable) => [variable.key, variable.source] as const))
@@ -6086,15 +6081,6 @@ export function renderPrompt(
 		if (match.kind === "escape") {
 			// Emit the literal `{{KEY}}` (drop the leading backslash).
 			parts.push(stripped.slice(match.start + 1, match.end))
-			cursor = match.end
-			continue
-		}
-		if (Object.hasOwn(injectedBindings, match.key)) {
-			const value = injectedBindings[match.key]
-			if (value === undefined) throw new Error(`renderPrompt: injected binding ${match.key} is missing`)
-			const serialized = typeof value === "string" ? value : JSON.stringify(value)
-			if (serialized === undefined) throw new Error(`renderPrompt: injected binding ${match.key} cannot be serialized`)
-			parts.push(serialized)
 			cursor = match.end
 			continue
 		}
@@ -6306,7 +6292,7 @@ export function phaseExitsEpilogue(): string {
 		"     ```",
 		"     选返回集合以外的 action（或绕过此通道直接调 `coder-loop chain stop`）都会被引擎拒绝。",
 		"",
-		"`exits` 为空时不要写 status、path 或 action。对未声明 `[tasks]` 的旧式 preset，成功退出非最终 phase 会由引擎提交窄兼容 transition；失败仍留在当前 leaf，最终 phase 无写回时也不会自动推进。",
+		"`exits` 为空时不要写 status、path 或 action。",
 		"",
 		"协议对所有 phase 一致：先查询，再只选择返回集合中的一条出边。不要凭空捏造任何元数据未声明的状态、路径或动作。",
 	].join("\n")

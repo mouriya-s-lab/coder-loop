@@ -416,45 +416,6 @@ children = [
  { id = "ok2", kind = "phase", phase = "ok2", paths = [{ id = "finish-ok2" }] }
 ]
 `)
-	const legacyName = "c11"
-	result.c11 = writePreset(ctx, legacyName, `name = "${legacyName}"
-[item]
-idField = "fixtureId"
-[item.fields]
-fixtureId = "string"
-[statuses]
-continuable = ["queued", "retry"]
-terminal = ["done", "exhausted"]
-success = ["done"]
-entry = "queued"
-retry = "retry"
-exhausted = "exhausted"
-[[phases]]
-name = "iteration"
-prompt = "iteration.md"
-runner = "claude"
-[phases.variables]
-CHAIN = "runtime.chainName"
-ITEM = "item.fixtureId"
-RUN = "runtime.runId"
-[[phases]]
-name = "review"
-prompt = "review.md"
-runner = "claude"
-[[phases.exits]]
-status = "retry"
-when = "Credential-bound retry to the first legacy phase."
-[[phases.exits]]
-status = "done"
-when = "Credential-bound terminal completion."
-[phases.variables]
-CHAIN = "runtime.chainName"
-ITEM = "item.fixtureId"
-RUN = "runtime.runId"
-`, {
-		"iteration.md": "FIXTURE scenario=c11 phase=iteration chain={{CHAIN}} item={{ITEM}} run={{RUN}}\n",
-		"review.md": "FIXTURE scenario=c11 phase=review chain={{CHAIN}} item={{ITEM}} run={{RUN}}\n",
-	})
 	return result
 }
 
@@ -576,26 +537,6 @@ if (scenario === "c03" && phase === "a" && attempt === 1) {
 } else if (scenario === "c10" && phase === "fail") {
   event("intentional-failure")
   process.exitCode = 1
-} else if (scenario === "c11" && phase === "iteration" && attempt === 1) {
-  process.stdout.write(JSON.stringify({ type: "system", session_id: "c11-iteration-session" }) + "\\n")
-  event("legacy-failure", { session: "c11-iteration-session" })
-  process.exitCode = 1
-} else if (scenario === "c11" && phase === "iteration" && attempt === 2) {
-  process.stdout.write(JSON.stringify({ type: "system", session_id: "c11-iteration-session" }) + "\\n")
-  event("legacy-implicit-success", { resumed: argv.includes("c11-iteration-session") })
-} else if (scenario === "c11" && phase === "iteration") {
-  event("legacy-post-retry-iteration", { resumed: argv.includes("c11-iteration-session") })
-  await wait("review-session-persisted")
-  process.stdout.write(JSON.stringify({ type: "system", session_id: "c11-iteration-session" }) + "\\n")
-} else if (scenario === "c11" && phase === "review" && attempt === 1) {
-  process.stdout.write(JSON.stringify({ type: "system", session_id: "c11-review-session" }) + "\\n")
-  const result = invoke(["item", "update", chain, "--issue", item, "--status", "retry", "--json"])
-  event("legacy-retry", { resumed: argv.includes("c11-review-session"), session: "c11-review-session", result })
-  if (result.exitCode !== 0) throw new Error("legacy retry failed: " + result.stderr)
-} else if (scenario === "c11" && phase === "review") {
-  const result = invoke(["item", "update", chain, "--issue", item, "--status", "done", "--json"])
-  event("legacy-terminal", { resumed: argv.includes("c11-review-session"), result })
-  if (result.exitCode !== 0) throw new Error("legacy terminal failed: " + result.stderr)
 } else {
   transition()
 }
@@ -1401,122 +1342,6 @@ async function runC10(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	log("C10", "attempt=20/backoff survived sibling success; failed leaf ran once; only failed leaf exhausted; drain completed")
 }
 
-async function runC11(ctx: RuntimeContext, presets: Readonly<Record<string, string>>, chains: string[]): Promise<void> {
-	const chain = createStagedChain(ctx, "c11")
-	chains.push(chain)
-	const item = addItem(ctx, presets, chain, "c11-item", "c11")
-	await resumeChain(ctx, chain)
-	await waitForRunnerEvent(ctx, { type: "legacy-failure", scenario: "c11", item: item.item_id, phase: "iteration", attempt: 1 })
-	const firstFailure = await until(
-		() => ({ row: itemRow(ctx, chain, item.item_id), runs: runRows(ctx, chain) }),
-		(value) => value.runs.some((run) => run.phase === "iteration" && run.exit_code === 1 && run.ended_at !== null) && schedulerBackoff(value.row) !== null,
-		"C11 first failure persistence",
-	)
-	const firstRun = firstFailure.runs.find((run) => run.phase === "iteration")!
-	const firstBackoff = schedulerBackoff(firstFailure.row)!
-	assert(Number(firstBackoff.nextRunAt) - Number(firstRun.ended_at) === 60, "C11 did not persist the declared 60-second scheduler retry delay")
-	const iterationSession = dbGet<{ session_id: string }>(ctx, `SELECT closure_sessions.session_id
-		FROM closure_sessions
-		INNER JOIN task_closures ON task_closures.closure_id = closure_sessions.closure_id
-		INNER JOIN items ON items.id = task_closures.item_row_id
-		INNER JOIN chains ON chains.id = items.chain_id
-		WHERE chains.name = $chain AND task_closures.phase = 'iteration'`, { chain })
-	assert(iterationSession?.session_id === "c11-iteration-session", "C11 failed run session was not persisted")
-	log("C11", `failure persisted attempts=${firstFailure.row.attempts} backoff=60s session=${iterationSession.session_id}`)
-
-	const firstSuccess = await waitForRunnerEvent(ctx, { type: "legacy-implicit-success", scenario: "c11", item: item.item_id, phase: "iteration", attempt: 2 }, 75_000)
-	assert(firstSuccess.resumed === true, "C11 successful iteration did not resume the persisted session")
-	const retry = await waitForRunnerEvent(ctx, { type: "legacy-retry", scenario: "c11", item: item.item_id, phase: "review", attempt: 1 })
-	assert(retry.resumed === false, "C11 first review unexpectedly resumed a session")
-	assert(eventResult(retry).exitCode === 0, `C11 review retry status failed: ${eventResult(retry).stderr}`)
-	const postRetryIteration = await waitForRunnerEvent(ctx, { type: "legacy-post-retry-iteration", scenario: "c11", item: item.item_id, phase: "iteration", attempt: 3 })
-	assert(postRetryIteration.resumed === true, "C11 post-review iteration did not preserve its session")
-	const reviewSession = await until(
-		() => dbGet<{ session_id: string }>(ctx, `SELECT closure_sessions.session_id
-			FROM closure_sessions
-			INNER JOIN task_closures ON task_closures.closure_id = closure_sessions.closure_id
-			INNER JOIN items ON items.id = task_closures.item_row_id
-			INNER JOIN chains ON chains.id = items.chain_id
-			WHERE chains.name = $chain AND task_closures.phase = 'review'`, { chain }),
-		(value) => value?.session_id === "c11-review-session",
-		"C11 review retry session persistence",
-	)
-	release(ctx, "c11", item.item_id, "iteration", "review-session-persisted")
-	const terminal = await waitForRunnerEvent(ctx, { type: "legacy-terminal", scenario: "c11", item: item.item_id, phase: "review", attempt: 2 })
-	assert(terminal.resumed === true, "C11 final review did not resume the retry review session")
-	assert(eventResult(terminal).exitCode === 0, `C11 final legacy status failed: ${eventResult(terminal).stderr}`)
-	await waitForItemTaskCompletion(ctx, chain, item.id, 30_000)
-	const runs = runRows(ctx, chain)
-	assert(runs.map((run) => run.phase).join(",") === "iteration,iteration,review,iteration,review", `C11 phase order changed: ${runs.map((run) => run.phase).join(",")}`)
-	assert(itemRow(ctx, chain, item.item_id).attempts === 1, "C11 session retry or successor incorrectly consumed another attempt")
-	assert(itemRow(ctx, chain, item.item_id).status === "done", "C11 final legacy status did not complete the item")
-	const finalTree = taskTree(ctx, chain)
-	const finalItemRoot = itemTaskRoot(finalTree, item.id)
-	assert(finalItemRoot !== null && taskNodeTerminal(finalItemRoot), "C11 item declaration tree did not reach terminal")
-	assert(leafByPhase(finalTree, item.id, "iteration").state === "completed", "C11 final iteration leaf is not completed")
-	assert(leafByPhase(finalTree, item.id, "review").state === "completed", "C11 final review leaf is not completed")
-	const transitions = transitionRows(ctx, chain)
-	assert(transitions.map((row) => row.path_id).join(",") === [
-		"legacy-run-success:iteration",
-		"legacy-status:review:retry",
-		"legacy-run-success:iteration",
-		"legacy-status:review:done",
-	].join(","), "C11 legacy transition history lost implicit success, retry, or terminal order")
-	const successfulRunIds = runs.filter((run) => run.exit_code === 0).map((run) => run.run_id)
-	assert(transitions.map((row) => row.source_run_id).join(",") === successfulRunIds.join(","), "C11 transition source identities do not match successful runs 2-5")
-	const statusAdmissionEvents = observabilityEvents(ctx, chain, "item.status.write_admission")
-	const statusAdmissions = statusAdmissionEvents.map((event, index) => asObject(event.payload, `C11 status admission payload ${index}`))
-	for (const requestedStatus of ["retry", "done"]) {
-		assert(
-			statusAdmissions.some((payload) =>
-				payload.phase === "review"
-				&& payload.requestedStatus === requestedStatus
-				&& payload.outcome === "allow"
-				&& payload.reason === "admitted"),
-			`C11 ${requestedStatus} status admission audit is missing`,
-		)
-	}
-	const lifecycleEvents = observabilityEvents(ctx, chain, "closure.lifecycle_changed")
-	const lifecycleObservations = lifecycleEvents.map((event, index) => ({
-		phase: event.phase,
-		payload: asObject(event.payload, `C11 lifecycle payload ${index}`),
-	}))
-	assert(
-		lifecycleObservations.some(({ phase, payload }) =>
-			phase === "iteration"
-				&& payload.from === "active"
-				&& payload.to === "suspended"
-				&& payload.reason === "phase-left"),
-		"C11 implicit iteration advancement did not emit phase-left lifecycle observability",
-	)
-	assert(
-		lifecycleObservations.some(({ phase, payload }) =>
-			phase === "iteration"
-				&& payload.from === "suspended"
-				&& payload.to === "active"
-				&& payload.reason === "phase-entered"),
-		"C11 retry did not emit iteration phase-entered lifecycle observability",
-	)
-	assert(
-		lifecycleObservations.some(({ phase, payload }) =>
-			phase === "review"
-				&& payload.from === "active"
-				&& payload.to === "suspended"
-				&& payload.reason === "phase-left"),
-		"C11 terminal review did not emit phase-left lifecycle observability",
-	)
-	writeEvidence(ctx, "C11-legacy.json", {
-		firstBackoff,
-		sessions: { iteration: iterationSession, review: reviewSession },
-		runs,
-		transitions,
-		statusAdmissionEvents,
-		lifecycleEvents,
-		finalTree,
-	})
-	log("C11", "no-[tasks] preset preserved failure/backoff, two session resumes, retry reset, status/lifecycle observability, terminal completion, and per-run transition history")
-}
-
 async function stopDaemon(ctx: RuntimeContext): Promise<void> {
 	cli(ctx, ["daemon", "down", "--json"], true)
 	await until(() => ctx.daemon.child.exitCode, (code) => code !== null, "isolated daemon exit", 20_000)
@@ -1582,7 +1407,7 @@ async function main(): Promise<void> {
 	const chains: string[] = []
 	let success = false
 	try {
-		log("C01-C11", `source=${SOURCE_SHA} base=${base} runtime=${layout.runtimeId} evidence=${layout.evidenceRoot}`)
+		log("C01-C10", `source=${SOURCE_SHA} base=${base} runtime=${layout.runtimeId} evidence=${layout.evidenceRoot}`)
 		await waitForDaemon(ctx)
 		await runC01(ctx, presets, chains)
 		await runC02C03(ctx, presets, chains)
@@ -1590,7 +1415,6 @@ async function main(): Promise<void> {
 		await runC08(ctx, presets, chains)
 		await runC09(ctx, presets, chains)
 		await runC10(ctx, presets, chains)
-		await runC11(ctx, presets, chains)
 		captureRunnerEvents(ctx)
 		await deleteChains(ctx, chains)
 		await stopDaemon(ctx)
@@ -1602,13 +1426,13 @@ async function main(): Promise<void> {
 			runtimeId: layout.runtimeId,
 			evidenceRoot: layout.evidenceRoot,
 			repositoryCommit: layout.repository.commit,
-			checks: ["C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10", "C11"],
+			checks: ["C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10"],
 			cleanup,
 		})
 		rmSync(layout.runtimeRoot, { recursive: true, force: true })
 		assert(!existsSync(layout.runtimeRoot), `owned runtime root remains: ${layout.runtimeRoot}`)
 		success = true
-		log("C01-C11", `PASS source=${SOURCE_SHA} runtime=${layout.runtimeId} evidence=${layout.evidenceRoot} cleanup=verified`)
+		log("C01-C10", `PASS source=${SOURCE_SHA} runtime=${layout.runtimeId} evidence=${layout.evidenceRoot} cleanup=verified`)
 	} finally {
 		if (!success) {
 			if (ctx.daemon.child.exitCode === null) await stopDaemon(ctx).catch(() => {})
