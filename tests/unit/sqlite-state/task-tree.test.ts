@@ -550,7 +550,7 @@ describe("sqlite state store", () => {
 			expectSqliteCode(() => store.createItemsWithTaskTrees(inputs, (item, index) => {
 				visited.push(index)
 				if (index === 1) return singleLeafTree(item).root
-				return twoPhaseLeafTree(item).root
+				return twoPhaseLeafTree(item, `chain:${chain.id}:tasks`).root
 			}), "invalid_input")
 
 			expect(visited).toEqual([0, 1])
@@ -571,7 +571,7 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("appending multiple item roots preserves an inert chain storage envelope", async () => {
+	test("appending multiple item roots preserves the actual chain-root par identity", async () => {
 		const { store } = await openTestStore("append-multiple-item-roots")
 		try {
 			const chain = createFullChain(store)
@@ -595,7 +595,7 @@ describe("sqlite state store", () => {
 						worktreePath: `/worktrees/${item.id}`,
 						branchName: `branch-${item.id}`,
 						baseCommit: "0123456789abcdef",
-						sourceParNodeId: null,
+						sourceParNodeId: `chain:${chain.id}:tasks`,
 						sessions: [],
 					},
 				}],
@@ -619,17 +619,12 @@ describe("sqlite state store", () => {
 					createdAt: 1_800_000_090,
 					itemUpdate: { kind: "none" },
 				})
-				expect(store.getTaskTree(chain.id)?.root).toMatchObject({
-					kind: "seq",
-					cursor: { kind: "complete" },
-					identity: { runtimeNodeId: `chain:${chain.id}:tasks` },
-					children: [{ cursor: { kind: "complete" } }],
-				})
+				expect(store.getTaskTree(chain.id)?.root).toMatchObject({ kind: "par", state: "completed" })
 				const appended = store.appendItemTaskTree(chain.id, itemRoot(second))
 
 				expect(appended.root).toMatchObject({
-					kind: "seq",
-					cursor: { kind: "complete" },
+					kind: "par",
+					state: "open",
 					identity: { runtimeNodeId: `chain:${chain.id}:tasks` },
 					children: [
 						{ identity: { runtimeNodeId: `item-${first.id}-root` }, cursor: { kind: "complete" } },

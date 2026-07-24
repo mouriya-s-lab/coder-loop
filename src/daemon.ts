@@ -3091,9 +3091,9 @@ export class CoderLoopDaemon {
 			node: prepared.declaration,
 			definitionRef: prepared.definitionRef,
 			baseCommit: prepared.baseCommit,
-			// The stable chain task root is only a persistence envelope. Only a par
-			// authored inside this item declaration may supply a closure pin.
-			sourceParNodeId: null,
+			// appendItemTaskTree owns a stable chain-level par root. Until a nested
+			// declaration par overrides it, that root is every item leaf's nearest par.
+			sourceParNodeId: `chain:${chain.id}:tasks`,
 		})
 	}
 
