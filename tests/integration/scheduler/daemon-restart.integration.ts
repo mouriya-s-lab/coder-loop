@@ -415,6 +415,117 @@ console.log("done:" + input.itemId)
 	}
 })
 
+test("counts one retry cycle in the declared attempt unit", async () => {
+	const root = resolve(TEST_ROOT, "review-retry-to-iteration")
+	const loopDataRoot = resolve(root, "loop-data")
+	const fakeRunner = resolve(root, "review-retry-runner.ts")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(
+		fakeRunner,
+		`
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+const status = input.phase === "review" ? "changes_requested" : null
+${CREDENTIALED_STATUS_WRITE_SNIPPET}
+console.log(input.phase + ":" + status)
+`,
+	)
+
+	const runtime = await startCredentialedSchedulerRuntime(root, loopDataRoot)
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: "review-retry-to-iteration-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "active",
+			metadata: storedChainMetadata({ presetPath: runtime.presetDir }),
+		})
+		const item = store.createItem({
+			chainId: chain.id,
+			itemId: "346001",
+			repoCwd: REPO_ROOT,
+			status: runtimeStatus("queued"),
+			presetPath: runtime.presetDir,
+			attempts: 0,
+			extra: storedItemExtra({}),
+		})
+		appendFixtureItemTaskTree(
+			store,
+			chain,
+			item,
+			["iteration", "review"],
+			undefined,
+			`sha256:${runtime.loadedPreset.preset.sourceHash}`,
+		)
+		const state = runtime.daemon.schedulerExecutionState()
+		const schedulerEvents: SchedulerEvent[] = []
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain: selectedChain, repoCwd, closureId }) => {
+			const worktreePath = closureWorktreePath(loopDataRoot, selectedChain.name, repoCwd, closureId)
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		let runSequence = 0
+		const options: SchedulerOptions = {
+			store,
+			state,
+			presetForChain: () => runtime.loadedPreset,
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			worktreeManager,
+			loopDataRootOptions: { loopDataRoot },
+			runCredentials: runtime.daemon.buildSchedulerRunCredentialIssuer(),
+			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,
+			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
+				itemId: selected.id,
+				issueNumber: Number(selected.itemId),
+				runId,
+				phase,
+			}),
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+		}
+
+		const iterTick = await schedulerTick(options)
+		expect(iterTick.spawnedRuns).toHaveLength(1)
+		await iterTick.spawnedRuns[0]!.closed
+		expect(store.getItem(item.id)?.phase).toBe("iteration")
+		expect(store.getItem(item.id)?.status).toBe("queued")
+		expect(store.getItem(item.id)?.attempts).toBe(1)
+
+		const reviewTick = await schedulerTick(options)
+		expect(reviewTick.spawnedRuns).toHaveLength(1)
+		await reviewTick.spawnedRuns[0]!.closed
+		expect(store.getItem(item.id)?.phase).toBe("review")
+		expect(store.getItem(item.id)?.status).toBe("changes_requested")
+		expect(store.getItem(item.id)?.attempts).toBe(1)
+
+		const retryIterTick = await schedulerTick(options)
+		expect(retryIterTick.spawnedRuns).toHaveLength(1)
+		await retryIterTick.spawnedRuns[0]!.closed
+		expect(store.getItem(item.id)?.phase).toBe("iteration")
+		expect(store.getItem(item.id)?.status).toBe("changes_requested")
+		expect(store.getItem(item.id)?.attempts).toBe(2)
+
+		expect(schedulerEvents
+			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+				event.type === "phase.start" && event.itemId === item.id,
+			)
+			.map((event) => event.phase)).toEqual(["iteration", "review", "iteration"])
+	} finally {
+		await runtime.daemon.stop()
+		store.close()
+	}
+})
+
 test("daemon restart after crash recovers in-flight item through observable socket status", async () => {
 	const root = resolve(TEST_ROOT, "daemon-crash-restart-resume")
 	const loopDataRoot = resolve(root, "loop-data")

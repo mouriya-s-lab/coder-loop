@@ -13,12 +13,14 @@ import {
 	phaseWritableStatuses,
 	runPresetChainCompleteTriggerPhases,
 	substitutePresetRootToken,
+	triggeredPhasesAfter,
 	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type CompiledRuntimeTaskNode,
 	type CompiledRuntimeTaskPhase,
 	type CompiledRuntimeTaskTree,
+	type CompiledTaskModel,
 	type CompiledTransitionBindingSource,
 	type CompiledTransitionField,
 	type JsonObject,
@@ -40,6 +42,7 @@ import {
 	reconcileClosureResources,
 	schedulerTick,
 	type SchedulerCompletedRun,
+	type SchedulerBoundPrompt,
 	type SchedulerEvent,
 	type SchedulerChainWorktreeCleanup,
 	type SchedulerLoadedPreset,
@@ -2954,9 +2957,7 @@ export class CoderLoopDaemon {
 			try {
 				const created = store.createItemsWithTaskTrees(
 					[input],
-					(candidate) => prepared === null
-						? null
-						: this.instantiatePreparedItemTaskTree(chain, candidate, prepared),
+					(candidate) => this.instantiatePreparedItemTaskTree(chain, candidate, prepared),
 				)
 				const first = created[0]
 				if (first === undefined) throw new DaemonError("internal_error", `item ${input.itemId} creation lost its result`)
@@ -3022,7 +3023,7 @@ export class CoderLoopDaemon {
 		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
-			const prepared: Array<PreparedItemTaskTree | null> = []
+			const prepared: PreparedItemTaskTree[] = []
 			for (const input of inputs) prepared.push(await this.prepareItemTaskTree(chain, input))
 			let items: ItemRecord[]
 			try {
@@ -3031,9 +3032,7 @@ export class CoderLoopDaemon {
 					if (taskTree === undefined) {
 						throw new DaemonError("internal_error", `item ${item.itemId} has no prepared task tree`)
 					}
-					return taskTree === null
-						? null
-						: this.instantiatePreparedItemTaskTree(chain, item, taskTree)
+					return this.instantiatePreparedItemTaskTree(chain, item, taskTree)
 				})
 			} catch (error) {
 				const firstDuplicate = inputs
@@ -3065,19 +3064,19 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async prepareItemTaskTree(chain: ChainRecord, input: CreateItemInput): Promise<PreparedItemTaskTree | null> {
+	private async prepareItemTaskTree(chain: ChainRecord, input: CreateItemInput): Promise<PreparedItemTaskTree> {
 		const loaded = await this.loadedPresetFromSpec(
 			chain,
 			{ preset: input.preset ?? null, presetPath: input.presetPath ?? null },
 			"item.task-tree.prepare",
 		)
-		if (loaded.preset.taskDeclaration === null) return null
 		const baseCommit = await resolveTaskTreeBaseCommit(input.repoCwd, chain.baseBranch)
+		const declaration = loaded.preset.taskDeclaration ?? legacyRuntimeTaskDeclaration(loaded.preset)
 		const definitionRef: ExecutionDefinitionRef = {
 			kind: "preset",
 			contentIdentity: `sha256:${loaded.preset.sourceHash}`,
 		}
-		return { declaration: loaded.preset.taskDeclaration, definitionRef, baseCommit }
+		return { declaration, definitionRef, baseCommit }
 	}
 
 	private instantiatePreparedItemTaskTree(
@@ -3231,10 +3230,14 @@ export class CoderLoopDaemon {
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
 		const status = optionalString(fields, "status")
+		let admittedStatus: AdmittedItemStatus | null = null
+		let statusPreset: CompiledTaskModel | null = null
 		let terminalStatusesForUpdate: ReadonlySet<InternalStatus> | null = null
 		if (status !== null) {
-			input.status = await this.admitItemStatusForRequest(chain, item, status, caller.subject)
+			admittedStatus = await this.admitItemStatusForRequest(chain, item, status, caller.subject)
+			input.status = admittedStatus
 			const { preset } = await this.loadedPresetForItem(chain, item, "item.update.terminal-statuses")
+			statusPreset = preset
 			terminalStatusesForUpdate = new Set(preset.statuses.terminal)
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
@@ -3297,7 +3300,13 @@ export class CoderLoopDaemon {
 		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
-			const updated = store.updateItem(item.id, input)
+			let updated: ItemRecord
+			if (caller.kind === "agent" && admittedStatus !== null && statusPreset !== null && statusPreset.taskDeclaration === null) {
+				updated = this.commitLegacyStatusTransition(chain, item, caller, statusPreset, admittedStatus, input)
+				markRunPendingRecycle(this.schedulerState, caller.runId)
+			} else {
+				updated = store.updateItem(item.id, input)
+			}
 			if (terminalStatusesForUpdate?.has(updated.status) === true) {
 				this.decisionFingerprints.release({ kind: "item", chainId: chain.id, rowId: item.id })
 			}
@@ -3341,6 +3350,112 @@ export class CoderLoopDaemon {
 		} finally {
 			resumeScheduler()
 		}
+	}
+
+	private commitLegacyStatusTransition(
+		chain: ChainRecord,
+		item: ItemRecord,
+		caller: Extract<ItemMutationCaller, { kind: "agent" }>,
+		preset: CompiledTaskModel,
+		status: AdmittedItemStatus,
+		itemUpdate: UpdateItemInput,
+	): ItemRecord {
+		const store = this.requireStore()
+		const run = store.getRunByRunId(caller.runId)
+		if (run === null || run.itemId !== item.id || run.phase !== caller.phase || run.endedAt !== null) {
+			throw new DaemonError("invalid_caller", `active run ${caller.runId} does not own legacy item ${item.itemId} phase ${caller.phase}`, { runId: caller.runId, itemId: item.itemId, phase: caller.phase })
+		}
+		const tree = store.getTaskTree(chain.id)
+		if (tree === null) throw new DaemonError("invalid_request", `chain ${chain.name} has no persisted runtime task tree`)
+		const sourceLeaf = findTaskLeafByRuntimeNodeId(tree.root, run.runtimeNodeId)
+		if (
+			sourceLeaf === null
+			|| sourceLeaf.closure.closureId !== run.closureId
+			|| sourceLeaf.closure.itemRowId !== item.id
+		) {
+			throw new DaemonError("invalid_caller", `run ${caller.runId} durable task identity does not own its legacy transition source`, { runId: caller.runId, runtimeNodeId: run.runtimeNodeId, closureId: run.closureId })
+		}
+		const declaration = legacyRuntimeTaskDeclaration(preset)
+		const sourceDeclaration = findCompiledRuntimeNodeByIdentity(declaration, sourceLeaf.identity.definitionNodeId)
+		if (sourceDeclaration === null || sourceDeclaration.kind !== "phase" || sourceDeclaration.phase !== caller.phase) {
+			throw new DaemonError("invalid_caller", `run ${caller.runId} definition node ${sourceLeaf.identity.definitionNodeId} is not legacy phase ${caller.phase}`, { runId: caller.runId, definitionNodeId: sourceLeaf.identity.definitionNodeId })
+		}
+		const pathId = legacyStatusPathIdentity(caller.phase, status)
+		const path = sourceDeclaration.paths.find((candidate) => candidate.identity === pathId)
+		if (path === undefined) {
+			throw new DaemonError(
+				"invalid_request",
+				`status ${status} cannot form a legacy task transition from phase ${caller.phase}; only a continuable exit to the next phase or a terminal exit from the final phase is valid`,
+				{ phase: caller.phase, status },
+			)
+		}
+		const itemRoot = findItemTaskRoot(tree.root, item.id)
+		if (itemRoot === null) throw new DaemonError("invalid_request", `item ${item.itemId} has no instantiated task root`, { itemId: item.itemId })
+		const targetRuntimeNodeId = path.target === null
+			? null
+			: findTaskNodeByDefinitionNodeId(itemRoot, path.target)?.identity.runtimeNodeId ?? null
+		if (path.target !== null && targetRuntimeNodeId === null) {
+			throw new DaemonError("invalid_request", `legacy path ${pathId} target ${path.target} has no instantiated runtime node`, { path: pathId, target: path.target })
+		}
+		const runtimePhases = preset.phases.filter((phase) => phase.trigger === null)
+		const firstRuntimePhase = runtimePhases[0]?.name ?? null
+		const finalRuntimePhase = runtimePhases.at(-1)?.name ?? null
+		const isFinalPhaseRetry = caller.phase === finalRuntimePhase
+			&& path.target === firstRuntimePhase
+			&& preset.statuses.continuable.includes(status)
+		const itemTriggerPhase = path.target === null
+			? triggeredPhasesAfter(preset, caller.phase, status)[0] ?? null
+			: null
+		if (isFinalPhaseRetry) {
+			if (targetRuntimeNodeId === null) {
+				throw new DaemonError("invalid_request", `legacy retry path ${pathId} has no first-phase runtime target`, { path: pathId })
+			}
+			store.commitLegacyTaskRetry({
+				sourceRunId: caller.runId,
+				sourceClosureId: sourceLeaf.closure.closureId,
+				targetRuntimeNodeId,
+				pathId,
+				exitPayload: { status },
+				resolvedBindings: {},
+				createdAt: unixSeconds(),
+				itemId: item.id,
+				itemUpdate,
+			})
+		} else if (itemTriggerPhase !== null) {
+			const triggerLeaf = instantiateLegacyItemTriggerLeaf({
+				chain,
+				item,
+					phase: itemTriggerPhase.name,
+					definitionRef: sourceLeaf.identity.definitionRef,
+					baseCommit: sourceLeaf.closure.baseCommit,
+					sourceParNodeId: null,
+			})
+			store.commitLegacyItemTrigger({
+				sourceRunId: caller.runId,
+				sourceClosureId: sourceLeaf.closure.closureId,
+				pathId,
+				exitPayload: { status },
+				resolvedBindings: {},
+				createdAt: unixSeconds(),
+				itemId: item.id,
+				triggerLeaf,
+				itemUpdate,
+			})
+		} else {
+			store.commitTaskTransition({
+				sourceRunId: caller.runId,
+				sourceClosureId: sourceLeaf.closure.closureId,
+				targetRuntimeNodeId,
+				pathId,
+				exitPayload: { status },
+				resolvedBindings: {},
+				createdAt: unixSeconds(),
+				itemUpdate: { kind: "always", itemId: item.id, update: itemUpdate },
+			})
+		}
+		const updated = store.getItem(item.id)
+		if (updated === null) throw new DaemonError("internal_error", `legacy transition lost item ${item.itemId}`, { itemId: item.itemId })
+		return updated
 	}
 
 	private async handleItemReorder(args: JsonObject): Promise<JsonObject> {
@@ -3952,8 +4067,8 @@ export class CoderLoopDaemon {
 		// falls back to chain-level resolution for legacy items.
 		const presetForItem: SchedulerPresetItemResolver = scheduler.presetForItem ?? ((chain: ChainRecord, item: ItemRecord) =>
 			schedulerPresetDir === undefined ? this.loadedPresetForItem(chain, item, "scheduler.tick") : this.loadedPresetFromDirForChain(chain, schedulerPresetDir, "scheduler.tick"))
-		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
-			this.resolveLoadedPresetPhasePrompt(ctx)
+			const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string | SchedulerBoundPrompt> =>
+				this.resolveLoadedPresetPhasePrompt(ctx)
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
 		const phaseRunnerSelectionForChain: SchedulerOptions["phaseRunnerSelectionForChain"] = scheduler.phaseRunnerSelectionForChain
 			?? (scheduler.phaseRunner !== undefined || scheduler.runner !== undefined
@@ -4689,7 +4804,7 @@ export class CoderLoopDaemon {
 		return new Set([...preset.statuses.continuable, ...preset.statuses.terminal])
 	}
 
-	private async resolveLoadedPresetPhasePrompt(ctx: SchedulerSpawnContext): Promise<string> {
+	private async resolveLoadedPresetPhasePrompt(ctx: SchedulerSpawnContext): Promise<string | SchedulerBoundPrompt> {
 		const { preset, presetDir } = ctx.loadedPreset
 		const presetPhase = preset.phases.find((entry) => entry.name === ctx.phase)
 		if (presetPhase === undefined) {
@@ -4700,9 +4815,38 @@ export class CoderLoopDaemon {
 		// materialized md file on disk was substituted at copy time, so this
 		// call is a no-op; kept unconditional so the daemon stays correct if
 		// materialization is disabled for a load path (e.g. test fixture).
-		let raw = await readFile(presetPhase.prompt, "utf-8")
+		let promptPath = presetPhase.prompt
+		let transitionBindings: JsonObject | null = null
+		if (preset.taskDeclaration !== null) {
+			const tree = this.requireStore().getTaskTree(ctx.chain.id)
+			const transition = tree === null
+				? undefined
+				: [...this.requireStore().listTaskTransitions(ctx.chain.id)]
+					.reverse()
+					.find((record) => {
+						if (record.targetRuntimeNodeId === null) return false
+						const target = findTaskNodeByRuntimeNodeId(tree.root, record.targetRuntimeNodeId)
+						return target !== null && taskNodeContainsRuntimeNode(target, ctx.runtimeNodeId)
+					})
+			const source = transition === undefined || tree === null
+				? null
+				: findTaskLeafByRuntimeNodeId(tree.root, transition.sourceRuntimeNodeId)
+			const sourceDeclaration = source === null
+				? null
+				: findCompiledRuntimeNodeByIdentity(preset.taskDeclaration, source.identity.definitionNodeId)
+			const path = sourceDeclaration?.kind === "phase" && transition !== undefined
+				? sourceDeclaration.paths.find((candidate) => candidate.identity === transition.pathId)
+				: undefined
+			if (path?.prompt !== null && path?.prompt !== undefined) {
+				promptPath = resolve(presetDir, path.prompt)
+				transitionBindings = transition?.resolvedBindings ?? null
+			}
+		}
+		let raw = await readFile(promptPath, "utf-8")
 		raw = substitutePresetRootToken(raw, preset.presetDir)
-		return raw
+		return transitionBindings === null
+			? raw
+			: { kind: "bound", template: raw, bindings: transitionBindings }
 	}
 
 	private async loadedPresetForChain(chain: ChainRecord, operation: string): Promise<SchedulerLoadedPreset> {
@@ -5777,6 +5921,49 @@ async function loadSchedulerPresetFromDirMaterialized(
 	return { presetDir, preset: await loadPreset(presetDir, merged) }
 }
 
+function legacyRuntimeTaskDeclaration(preset: CompiledTaskModel): CompiledRuntimeTaskTree {
+	const completeStatus = preset.statuses.success[0] ?? preset.statuses.terminal[0]
+	if (completeStatus === undefined) throw new DaemonError("invalid_request", `preset ${preset.name} has no terminal completion status`)
+	const phases = preset.phases.filter((phase) => phase.trigger === null)
+	const firstPhase = phases[0]?.name ?? null
+	return {
+		identity: "root",
+		kind: "seq",
+		completeStatus,
+		children: phases.map((phase, index) => {
+			const nextPhase = phases[index + 1]?.name ?? null
+			return {
+				identity: phase.name,
+				kind: "phase",
+				phase: phase.name,
+				paths: phaseWritableStatuses(phase).flatMap((status) => {
+					const isContinuable = preset.statuses.continuable.includes(status)
+					const isTerminal = preset.statuses.terminal.includes(status)
+					const target = nextPhase !== null && isContinuable
+						? nextPhase
+						: nextPhase === null && isTerminal
+							? null
+							: nextPhase === null && isContinuable
+								? firstPhase
+								: undefined
+					if (target === undefined || (target === null && !isTerminal)) return []
+					return [{
+						identity: legacyStatusPathIdentity(phase.name, status),
+						target,
+						fields: [],
+						bindings: [],
+						prompt: null,
+					}]
+				}),
+			}
+		}),
+	}
+}
+
+function legacyStatusPathIdentity(phase: string, status: string): string {
+	return `legacy-status:${phase}:${status}`
+}
+
 function instantiateRuntimeTaskNode(input: {
 	chain: ChainRecord
 	item: ItemRecord
@@ -5836,6 +6023,39 @@ function instantiateRuntimeTaskNode(input: {
 	}
 }
 
+function instantiateLegacyItemTriggerLeaf(input: {
+	chain: ChainRecord
+	item: ItemRecord
+	phase: string
+	definitionRef: ExecutionDefinitionRef
+	baseCommit: string
+	sourceParNodeId: string | null
+}): TaskLeafNodeSnapshot {
+	const runtimeNodeId = `task:${input.chain.id}:item:${input.item.id}:legacy-trigger:${input.phase}`
+	const closureId = `closure:${input.chain.id}:${input.item.id}:legacy-trigger:${input.phase}`
+	return {
+		kind: "leaf",
+		identity: {
+			runtimeNodeId,
+			definitionRef: input.definitionRef,
+			definitionNodeId: input.phase,
+		},
+		state: "pending",
+		closure: {
+			closureId,
+			itemRowId: input.item.id,
+			itemId: input.item.itemId,
+			phase: input.phase,
+			lifecycle: "active",
+			worktreePath: input.item.repoCwd,
+			branchName: closureBranchName(input.chain.name, closureId),
+			baseCommit: input.baseCommit,
+			sourceParNodeId: input.sourceParNodeId,
+			sessions: [],
+		},
+	}
+}
+
 function assertNeverCompiledRuntimeTask(node: never): never {
 	throw new DaemonError("internal_error", `unhandled runtime task declaration: ${JSON.stringify(node)}`)
 }
@@ -5862,6 +6082,20 @@ function findTaskLeafByRuntimeNodeId(node: TaskNodeSnapshot, runtimeNodeId: stri
 			return null
 		default: return assertNeverTaskNodeSnapshot(node)
 	}
+}
+
+function findTaskNodeByRuntimeNodeId(node: TaskNodeSnapshot, runtimeNodeId: string): TaskNodeSnapshot | null {
+	if (node.identity.runtimeNodeId === runtimeNodeId) return node
+	if (node.kind === "leaf") return null
+	for (const child of node.children) {
+		const found = findTaskNodeByRuntimeNodeId(child, runtimeNodeId)
+		if (found !== null) return found
+	}
+	return null
+}
+
+function taskNodeContainsRuntimeNode(node: TaskNodeSnapshot, runtimeNodeId: string): boolean {
+	return findTaskNodeByRuntimeNodeId(node, runtimeNodeId) !== null
 }
 
 function findTaskNodeByDefinitionNodeId(node: TaskNodeSnapshot, definitionNodeId: string): TaskNodeSnapshot | null {

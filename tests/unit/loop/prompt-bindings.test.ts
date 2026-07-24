@@ -220,6 +220,18 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 		expect(out).toBe("before literal {{NOT_A_KEY}} content after")
 	})
 
+	test("renderPrompt treats committed transition bindings as one-pass values", () => {
+		const phase = makePhase([])
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
+		const out = renderPrompt(
+			"result={{RESULT}} json={{DETAILS}}",
+			phase,
+			ctx,
+			{ RESULT: "literal {{NOT_A_KEY}} content", DETAILS: { ok: true } },
+		)
+		expect(out).toBe('result=literal {{NOT_A_KEY}} content json={"ok":true}')
+	})
+
 	test("renderPrompt renders escape `\\{{KEY}}` as literal `{{KEY}}`", () => {
 		const phase = makePhase([
 			["KEY", { kind: "item", field: "issue" }],
