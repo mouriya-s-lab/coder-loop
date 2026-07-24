@@ -30,7 +30,6 @@ import {
 	maxConcurrentRunnerEvents,
 	queryObservabilityEvents,
 	readRunnerEvents,
-	resolveChainRuntimePaths,
 	resolveLoopDataPaths,
 	runtimeStatus,
 	schedulerTick,
@@ -279,20 +278,6 @@ exhausted = "exhausted"
 ${declarations}
 `)
 	return await loadedPresetFromDir(presetDir)
-}
-
-async function expectRunSucceeded(
-	fixture: Fixture,
-	chain: ChainRecord,
-	run: { runId: string; closed: Promise<{ exitCode: number }> },
-): Promise<void> {
-	const completed = await run.closed
-	if (completed.exitCode === 0) return
-	const persisted = fixture.store.getRunByRunId(run.runId)
-	if (persisted === null) throw new Error(`failed run ${run.runId} was not persisted`)
-	const stderrPath = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-		.runPhaseStderrFile(run.runId, persisted.phase)
-	throw new Error(`run ${run.runId} exited ${completed.exitCode}: ${await Bun.file(stderrPath).text()}`)
 }
 
 describe("issue #698 recursive task-tree scheduler integration", () => {
