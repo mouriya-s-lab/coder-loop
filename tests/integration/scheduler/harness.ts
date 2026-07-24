@@ -158,6 +158,58 @@ export function fixtureTransitionRunId(
 	return runId
 }
 
+export function commitFixtureLegacyItemTrigger(
+	store: ReturnType<typeof openSqliteStateStore>,
+	chainId: number,
+	itemRowId: number,
+	sourcePhase: string,
+	triggerPhase: string,
+	status: string,
+	createdAt: number,
+): void {
+	const chain = store.getChain(chainId)
+	const item = store.getItem(itemRowId)
+	const tree = store.getTaskTree(chainId)
+	const source = fixtureTaskLeaf(store, chainId, itemRowId, sourcePhase)
+	if (chain === null || item === null || tree === null || source === null) {
+		throw new Error(`fixture item ${itemRowId} cannot materialize ${triggerPhase} from ${sourcePhase}`)
+	}
+	if (tree.root.kind !== "par") throw new Error(`fixture chain ${chainId} task root is not a par`)
+	const runtimeNodeId = `task:${chainId}:item:${itemRowId}:legacy-trigger:${triggerPhase}`
+	const closureId = `closure:${chainId}:${itemRowId}:legacy-trigger:${triggerPhase}`
+	store.commitLegacyItemTrigger({
+		sourceRunId: fixtureTransitionRunId(store, chainId, itemRowId, sourcePhase),
+		sourceClosureId: source.closure.closureId,
+		pathId: `legacy-status:${sourcePhase}:${status}`,
+		exitPayload: { status },
+		resolvedBindings: {},
+		createdAt,
+		itemId: itemRowId,
+		triggerLeaf: {
+			kind: "leaf",
+			identity: {
+				runtimeNodeId,
+				definitionRef: source.identity.definitionRef,
+				definitionNodeId: triggerPhase,
+			},
+			state: "pending",
+			closure: {
+				closureId,
+				itemRowId,
+				itemId: item.itemId,
+				phase: triggerPhase,
+				lifecycle: "active",
+				worktreePath: item.repoCwd,
+				branchName: closureBranchName(chain.name, closureId),
+				baseCommit: source.closure.baseCommit,
+				sourceParNodeId: tree.root.identity.runtimeNodeId,
+				sessions: [],
+			},
+		},
+		itemUpdate: {},
+	})
+}
+
 export function seedSessionClosure(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, item: ItemRecord, phase: string): void {
 	if (fixtureTaskLeaf(store, chain.id, item.id, phase) !== null) return
 	throw new Error(`fixture item ${item.id} has no persisted ${phase} task leaf`)

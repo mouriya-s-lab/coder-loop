@@ -30,6 +30,7 @@ import {
 	maxConcurrentRunnerEvents,
 	queryObservabilityEvents,
 	readRunnerEvents,
+	resolveChainRuntimePaths,
 	resolveLoopDataPaths,
 	runtimeStatus,
 	schedulerTick,
@@ -278,6 +279,20 @@ exhausted = "exhausted"
 ${declarations}
 `)
 	return await loadedPresetFromDir(presetDir)
+}
+
+async function expectRunSucceeded(
+	fixture: Fixture,
+	chain: ChainRecord,
+	run: { runId: string; closed: Promise<{ exitCode: number }> },
+): Promise<void> {
+	const completed = await run.closed
+	if (completed.exitCode === 0) return
+	const persisted = fixture.store.getRunByRunId(run.runId)
+	if (persisted === null) throw new Error(`failed run ${run.runId} was not persisted`)
+	const stderrPath = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+		.runPhaseStderrFile(run.runId, persisted.phase)
+	throw new Error(`run ${run.runId} exited ${completed.exitCode}: ${await Bun.file(stderrPath).text()}`)
 }
 
 describe("issue #698 recursive task-tree scheduler integration", () => {
@@ -1146,4 +1161,108 @@ when = "the fixture releases the held runner"
 		}
 	})
 
+	test("public item creation normalizes a legacy two-phase declaration into the one tree scheduler", async () => {
+		const fixture = await createFixture("issue-698-legacy-degenerate-seq")
+		const presetDir = resolve(fixture.loopDataRoot, "..", "legacy-degenerate-preset")
+		try {
+			await mkdir(presetDir, { recursive: true })
+			await writeFile(resolve(presetDir, "iteration.md"), "legacy iteration\n")
+			await writeFile(resolve(presetDir, "review.md"), "legacy review\n")
+			await writeFile(resolve(presetDir, "preset.toml"), `name = "issue-698-legacy-degenerate"
+[item]
+idField = "issue"
+[item.fields]
+issue = "string"
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "queued"
+exhausted = "exhausted"
+[[phases]]
+name = "iteration"
+prompt = "iteration.md"
+runner = "claude"
+[phases.variables]
+LOG_DIR = "runtime.logDir"
+[[phases]]
+name = "review"
+prompt = "review.md"
+runner = "claude"
+[[phases.exits]]
+status = "done"
+when = "complete the declared legacy phase"
+[phases.variables]
+LOG_DIR = "runtime.logDir"
+`)
+			const chain = createChain(fixture.store, "issue-698-legacy-degenerate-chain")
+			const added = await daemonRequest(fixture, "item.add", {
+				chainId: chain.id,
+				itemId: "698013",
+				repoCwd: REPO_ROOT,
+				presetPath: presetDir,
+				extra: { sleepMs: 5 },
+			})
+			const itemId = daemonItemRowId(added)
+			const item = fixture.store.getItem(itemId)
+			if (item === null) throw new Error("publicly created legacy item disappeared")
+			const loadedPreset = await loadedPresetFromDir(presetDir)
+			const options = fixture.options({
+				loadedPreset,
+				prompt: ({ chain: currentChain, item: currentItem, runId, worktreePath, phase }) =>
+					JSON.stringify({
+						itemId: currentItem.id,
+						issueNumber: Number(currentItem.itemId),
+						chainName: currentChain.name,
+						runId,
+						worktreePath,
+						eventLog: fixture.eventLogForChain(currentChain.name),
+						sleepMs: 5,
+						exitCode: 0,
+						writeStatus: phase === "iteration" ? null : "done",
+					}),
+			})
+
+			const itemRootId = `task:${chain.id}:item:${item.id}:root`
+			const iterationId = `task:${chain.id}:item:${item.id}:iteration`
+			const reviewId = `task:${chain.id}:item:${item.id}:review`
+			expect(requireSeq(fixture.store, chain.id, itemRootId).cursor).toEqual({
+				kind: "next",
+				nodeId: iterationId,
+			})
+
+			const iterationTick = await schedulerTick(options)
+			expect(spawnedRunPhases(fixture.store, iterationTick.spawnedRuns)).toEqual(["iteration"])
+			await expectRunSucceeded(fixture, chain, iterationTick.spawnedRuns[0]!)
+			expect(requireSeq(fixture.store, chain.id, itemRootId).cursor).toEqual({
+				kind: "next",
+				nodeId: reviewId,
+			})
+			expect(fixture.store.getItem(item.id)).toMatchObject({
+				status: runtimeStatus("queued"),
+				phase: "iteration",
+				attempts: 1,
+			})
+			expect(fixture.store.listTaskTransitions(chain.id).map((transition) => transition.pathId)).toEqual([
+				"legacy-run-success:iteration",
+			])
+			expect(fixture.store.listTaskTransitions(chain.id)[0]?.sourceRunId).toBe(iterationTick.spawnedRuns[0]?.runId)
+
+			const reviewTick = await schedulerTick(options)
+			expect(spawnedRunPhases(fixture.store, reviewTick.spawnedRuns)).toEqual(["review"])
+			await expectRunSucceeded(fixture, chain, reviewTick.spawnedRuns[0]!)
+			expect(requireSeq(fixture.store, chain.id, itemRootId).cursor).toEqual({ kind: "complete" })
+			expect(fixture.store.getItem(item.id)).toMatchObject({
+				status: runtimeStatus("done"),
+				phase: "review",
+				attempts: 1,
+			})
+			expect(fixture.store.listTaskTransitions(chain.id).map((transition) => transition.pathId)).toEqual([
+				"legacy-run-success:iteration",
+				"legacy-status:review:done",
+			])
+		} finally {
+			await stopFixture(fixture)
+		}
+	})
 })
