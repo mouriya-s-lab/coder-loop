@@ -15,6 +15,7 @@ import { loadPreset, type JsonObject } from "../../../src/loop"
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "../../../src/daemon"
 import { type ChainRecord, openSqliteStateStore } from "../../../src/sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
+import { appendFixtureItemTaskTree } from "./harness"
 
 const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -60,7 +61,6 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 		expect(iterClosed.status).toBe("queued")
 		expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
 		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
-
 		const reviewTick = await schedulerTick(options)
 		expect(reviewTick.spawnedRuns).toHaveLength(1)
 		const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
@@ -132,7 +132,6 @@ test("review writing changes_requested returns to iteration before review runs a
 		expect(retryIterationClosed.status).toBe("changes_requested")
 		expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
 		expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
-
 		const acceptedReviewTick = await schedulerTick(options)
 		expect(acceptedReviewTick.spawnedRuns).toHaveLength(1)
 		const acceptedReviewClosed = await acceptedReviewTick.spawnedRuns[0]!.closed
@@ -351,7 +350,7 @@ test("exhausts on the declared attempt budget", async () => {
 		const chain = createChain(fixture.store, "cross-runner-max-attempts-chain", {
 			metadata: { maxItemAttempts: 2 },
 		})
-		const item = createItem(fixture.store, chain, 316_004)
+		const item = createItem(fixture.store, chain, 316_004, ["iteration"])
 		const options = fixture.options({
 			now: () => now,
 			spawnFailureBackoff: { initialSeconds: 1, maxSeconds: 2 },
@@ -431,6 +430,7 @@ type CrossRunnerFixture = {
 }
 
 const crossRunnerCaptureRoots = new WeakMap<ReturnType<typeof openSqliteStateStore>, string>()
+const crossRunnerDefinitionIdentities = new WeakMap<ReturnType<typeof openSqliteStateStore>, string>()
 
 async function stopCrossRunnerFixture(fixture: CrossRunnerFixture): Promise<void> {
 	await fixture.daemon.stop()
@@ -453,7 +453,9 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	await writeRunnerWrapper(opencodeWrapper, planPath, eventLog, "opencode", loopDataRoot)
 
 	const store = openSqliteStateStore({ loopDataRoot })
+	const loadedPreset = await LOADED_PRESET
 	crossRunnerCaptureRoots.set(store, evidenceDir)
+	crossRunnerDefinitionIdentities.set(store, `sha256:${loadedPreset.preset.sourceHash}`)
 	const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
 	const state = daemon.schedulerExecutionState()
 	const schedulerEvents: SchedulerEvent[] = []
@@ -471,7 +473,7 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	const options = (overrides: Partial<SchedulerOptions> = {}): SchedulerOptions => ({
 		store,
 		state,
-		presetForChain: () => LOADED_PRESET,
+		presetForChain: () => loadedPreset,
 		phaseRunner,
 		worktreeManager,
 		loopDataRootOptions: { loopDataRoot },
@@ -537,8 +539,13 @@ function createChain(
 	})
 }
 
-function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, issueNumber: number) {
-	return store.createItem({
+function createItem(
+	store: ReturnType<typeof openSqliteStateStore>,
+	chain: ChainRecord,
+	issueNumber: number,
+	taskPhases: readonly string[] = ["iteration", "review"],
+) {
+	const item = store.createItem({
 		chainId: chain.id,
 		itemId: String(issueNumber),
 		repoCwd: REPO_ROOT,
@@ -550,6 +557,10 @@ function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: Chain
 		createdAt: 1_800_316_001 + issueNumber,
 		updatedAt: 1_800_316_001 + issueNumber,
 	})
+	const definitionContentIdentity = crossRunnerDefinitionIdentities.get(store)
+	if (definitionContentIdentity === undefined) throw new Error("cross-runner fixture lost its loaded preset identity")
+	appendFixtureItemTaskTree(store, chain, item, taskPhases, undefined, definitionContentIdentity)
+	return item
 }
 
 // #456: the legacy chain-drain auto-fire suppressor helper retired with the path itself; the

@@ -410,8 +410,8 @@ test("startup reconciliation audits persisted worktree registration pairs withou
 				identity: { runtimeNodeId: "registration-mismatch-seq", definitionRef, definitionNodeId: "seq" },
 				cursor: { kind: "next", nodeId: "wrong-branch-leaf" },
 				children: [
-					{ kind: "leaf", identity: { runtimeNodeId: "wrong-branch-leaf", definitionRef, definitionNodeId: "wrong" }, closure: { closureId: "closure:wrong-branch:iteration", itemRowId: wrongBranchItem.id, itemId: wrongBranchItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: wrongBranch.worktreePath, branchName: wrongBranch.branchName, baseCommit: wrongBranch.baseCommit, sourceParNodeId: null, sessions: [] } },
-					{ kind: "leaf", identity: { runtimeNodeId: "unregistered-leaf", definitionRef, definitionNodeId: "unregistered" }, closure: { closureId: "closure:unregistered:iteration", itemRowId: unregisteredItem.id, itemId: unregisteredItem.itemId, phase: "iteration", lifecycle: "suspended", worktreePath: unregistered.worktreePath, branchName: unregistered.branchName, baseCommit: unregistered.baseCommit, sourceParNodeId: null, sessions: [] } },
+					{ kind: "leaf", identity: { runtimeNodeId: "wrong-branch-leaf", definitionRef, definitionNodeId: "wrong" }, state: "pending", closure: { closureId: "closure:wrong-branch:iteration", itemRowId: wrongBranchItem.id, itemId: wrongBranchItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: wrongBranch.worktreePath, branchName: wrongBranch.branchName, baseCommit: wrongBranch.baseCommit, sourceParNodeId: null, sessions: [] } },
+					{ kind: "leaf", identity: { runtimeNodeId: "unregistered-leaf", definitionRef, definitionNodeId: "unregistered" }, state: "pending", closure: { closureId: "closure:unregistered:iteration", itemRowId: unregisteredItem.id, itemId: unregisteredItem.itemId, phase: "iteration", lifecycle: "suspended", worktreePath: unregistered.worktreePath, branchName: unregistered.branchName, baseCommit: unregistered.baseCommit, sourceParNodeId: null, sessions: [] } },
 				],
 			},
 			activeRuns: [],
@@ -440,7 +440,7 @@ test("startup reconciliation audits missing resources and repairs only orphaned 
 		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const definitionRef = { kind: "chain", contentIdentity: "sha256:reconcile" } as const
-		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile", definitionRef, definitionNodeId: "iteration" }, closure: { closureId: "closure:reconcile:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile", definitionRef, definitionNodeId: "iteration" }, state: "pending", closure: { closureId: "closure:reconcile:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
 		expect(git(repoCwd, ["worktree", "remove", "--force", resources.worktreePath]).exitCode).toBe(0)
 		expect(git(repoCwd, ["update-ref", "-d", resources.branchName]).exitCode).toBe(0)
 		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "orphan")
@@ -471,7 +471,7 @@ test("startup reconciliation removes consumed worktree registrations and branche
 		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile-consumed:iteration", repoCwd, slotKey: "slot", resourceState: "first-open", existing: null })
 		if (typeof resources === "string") throw new Error("expected closure resources")
 		const definitionRef = { kind: "chain", contentIdentity: "sha256:reconcile-consumed" } as const
-		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-consumed", definitionRef, definitionNodeId: "iteration" }, closure: { closureId: "closure:reconcile-consumed:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile-consumed", definitionRef, definitionNodeId: "iteration" }, state: "pending", closure: { closureId: "closure:reconcile-consumed:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
 		store.setClosureLifecycle("closure:reconcile-consumed:iteration", { kind: "consume", updatedAt: 1_900_000_200 })
 
 		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
@@ -680,8 +680,8 @@ test("consumption preserves a shared migrated slot path then removes only the pa
 		const first = { closureId: `legacy-v13:closure:${firstItem.id}:iteration`, itemRowId: firstItem.id, itemId: firstItem.itemId, phase: "iteration", lifecycle: "active", worktreePath: retired.worktreePath, branchName: firstBranch, baseCommit, sourceParNodeId: null, sessions: [] } as const
 		const second = { closureId: `legacy-v13:closure:${secondItem.id}:review`, itemRowId: secondItem.id, itemId: secondItem.itemId, phase: "review", lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: secondBranch, baseCommit, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(chain.id, { root: { kind: "seq", identity: { runtimeNodeId: "legacy-v13:chain:consume-slot:root", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: `legacy-v13:item:${firstItem.id}:phase:iteration` }, children: [
-			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${firstItem.id}:phase:iteration`, definitionRef, definitionNodeId: "iteration" }, closure: first },
-			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${secondItem.id}:phase:review`, definitionRef, definitionNodeId: "review" }, closure: second },
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${firstItem.id}:phase:iteration`, definitionRef, definitionNodeId: "iteration" }, state: "pending", closure: first },
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${secondItem.id}:phase:review`, definitionRef, definitionNodeId: "review" }, state: "pending", closure: second },
 		] }, activeRuns: [] })
 
 		const firstResult = await consumeSchedulerClosure({ chainId: chain.id, chainName: chain.name, baseBranch: chain.baseBranch, repoCwd, closure: first, authority: { kind: "chain-deletion", chainId: chain.id }, updatedAt: 1_900_000_301, loopDataRootOptions: { loopDataRoot }, store, emit: () => {} })
@@ -725,8 +725,8 @@ test("startup reconciliation retires migrated tuples while preserving historical
 		const slotClosure = { closureId: `legacy-v13:closure:${slotItem.id}:iteration`, itemRowId: slotItem.id, itemId: slotItem.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: retired.worktreePath, branchName: historicalBranch, baseCommit, sourceParNodeId: null, sessions: [] } as const
 		const repoClosure = { closureId: `legacy-v13:closure:${repoItem.id}:iteration`, itemRowId: repoItem.id, itemId: repoItem.itemId, phase: "iteration", lifecycle: "consumed", worktreePath: repoCwd, branchName: "main", baseCommit, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(chain.id, { root: { kind: "seq", identity: { runtimeNodeId: "legacy-v13:chain:reconcile:root", definitionRef, definitionNodeId: "root" }, cursor: { kind: "complete" }, children: [
-			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${slotItem.id}:phase:iteration`, definitionRef, definitionNodeId: "slot" }, closure: slotClosure },
-			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${repoItem.id}:phase:iteration`, definitionRef, definitionNodeId: "repo" }, closure: repoClosure },
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${slotItem.id}:phase:iteration`, definitionRef, definitionNodeId: "slot" }, state: "pending", closure: slotClosure },
+			{ kind: "leaf", identity: { runtimeNodeId: `legacy-v13:item:${repoItem.id}:phase:iteration`, definitionRef, definitionNodeId: "repo" }, state: "pending", closure: repoClosure },
 		] }, activeRuns: [] })
 
 		const findings = await reconcileClosureResources({ chain, items: [slotItem, repoItem], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot }, store })
@@ -763,8 +763,8 @@ test("consumption retires shared base-era tuples without deleting a live sibling
 		const second = { closureId: "closure:retired:second", itemRowId: secondItem.id, itemId: secondItem.itemId, phase: "review", lifecycle: "suspended", worktreePath: retired.worktreePath, branchName: retired.branchName, baseCommit, sourceParNodeId: null, sessions: [] } as const
 		store.createTaskTree(chain.id, {
 			root: { kind: "seq", identity: { runtimeNodeId: "seq-consume-retired", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: "leaf-retired-first" }, children: [
-				{ kind: "leaf", identity: { runtimeNodeId: "leaf-retired-first", definitionRef, definitionNodeId: "iteration" }, closure: first },
-				{ kind: "leaf", identity: { runtimeNodeId: "leaf-retired-second", definitionRef, definitionNodeId: "review" }, closure: second },
+				{ kind: "leaf", identity: { runtimeNodeId: "leaf-retired-first", definitionRef, definitionNodeId: "iteration" }, state: "pending", closure: first },
+				{ kind: "leaf", identity: { runtimeNodeId: "leaf-retired-second", definitionRef, definitionNodeId: "review" }, state: "pending", closure: second },
 			] },
 			activeRuns: [],
 		})
@@ -941,6 +941,41 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 			status: runtimeStatus("queued"),
 			attempts: 0,
 			extra: storedItemExtra({}),
+		})
+		const loadedPreset = await LOADED_PRESET
+		const definitionRef = { kind: "preset", contentIdentity: `sha256:${loadedPreset.preset.sourceHash}` } as const
+		const sourceParNodeId = `chain:${chain.id}:tasks`
+		const baseCommit = git(REPO_ROOT, ["rev-parse", "HEAD"]).stdout.trim()
+		const taskLeaf = (phase: string) => {
+			const runtimeNodeId = `task:${chain.id}:item:${item.id}:${phase}`
+			const closureId = `closure:${chain.id}:${item.id}:${phase}`
+			return {
+				kind: "leaf",
+				identity: { runtimeNodeId, definitionRef, definitionNodeId: phase },
+				state: "pending",
+				closure: {
+					closureId,
+					itemRowId: item.id,
+					itemId: item.itemId,
+					phase,
+					lifecycle: "active",
+					worktreePath: item.repoCwd,
+					branchName: closureBranchName(chain.name, closureId),
+					baseCommit,
+					sourceParNodeId,
+					sessions: [],
+				},
+			} as const
+		}
+		store.appendItemTaskTree(chain.id, {
+			kind: "seq",
+			identity: {
+				runtimeNodeId: `task:${chain.id}:item:${item.id}:root`,
+				definitionRef,
+				definitionNodeId: "root",
+			},
+			cursor: { kind: "next", nodeId: `task:${chain.id}:item:${item.id}:iteration` },
+			children: [taskLeaf("iteration"), taskLeaf("review")],
 		})
 		const state = createSchedulerState()
 		const events: SchedulerEvent[] = []

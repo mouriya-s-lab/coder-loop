@@ -140,6 +140,7 @@ describe("sqlite state store", () => {
 			expect(store.updateItem(otherRepo.id, { status: runtimeStatus("blocked"), updatedAt: 1_800_000_103 }).status).toBe("blocked")
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")] })).toBe(true)
 
+			store.createTaskTree(chain.id, singleLeafTree(first))
 			const run = store.recordRun({
 				runId: "run-data-access",
 				chainId: chain.id,
@@ -501,4 +502,3 @@ describe("sqlite state store", () => {
 	})
 
 })
-

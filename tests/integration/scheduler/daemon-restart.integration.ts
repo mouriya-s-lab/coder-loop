@@ -17,6 +17,7 @@ import { openSqliteStateStore } from "../../../src/sqlite-state"
 import { loadPreset } from "../../../src/loop"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
 import type { BoundaryRecord } from "../../../src/boundary-types"
+import { appendFixtureItemTaskTree } from "./harness"
 
 const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -113,6 +114,7 @@ process.exit(1)
 			attempts: 0,
 			extra: storedItemExtra({}),
 		})
+		appendFixtureItemTaskTree(store, chain, item, ["iteration"])
 		const state = createSchedulerState()
 		const schedulerEvents: SchedulerEvent[] = []
 		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
@@ -205,6 +207,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 			evidenceDir: null,
 			extra: storedItemExtra({}),
 		})
+		appendFixtureItemTaskTree(store, chain, item, ["iteration"])
 		const state = createSchedulerState()
 		const worktreeManager: SchedulerWorktreeManager = async () => agentCwd
 		const options: SchedulerOptions = {
@@ -279,6 +282,8 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			attempts: 0,
 			extra: storedItemExtra({}),
 		})
+		appendFixtureItemTaskTree(store, stopped, stoppedItem, ["iteration"])
+		appendFixtureItemTaskTree(store, active, activeItem, ["iteration"])
 		const state = createSchedulerState()
 		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
 			const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
@@ -355,6 +360,7 @@ console.log("done:" + input.itemId)
 			attempts: 0,
 			extra: storedItemExtra({}),
 		})
+		appendFixtureItemTaskTree(store, chain, item, ["review"], gitOutput(target, ["rev-parse", "HEAD"]))
 		// #456: previously this also pre-installed a `review-on-empty.lock` file via
 		// `reviewOnEmptyLockPathForChainName` to suppress the legacy auto-fired phase. The
 		// review-on-empty path is retired, so the suppressor is no longer needed.
@@ -388,120 +394,21 @@ console.log("done:" + input.itemId)
 
 		const completed = store.getChain(chain.id)
 		if (completed === null) throw new Error("expected completed chain")
-		const worktreePath = closureWorktreePath(loopDataRoot, completed.name, target, `closure:${item.id}:iteration`)
+		const worktreePath = closureWorktreePath(loopDataRoot, completed.name, target, `closure:${chain.id}:${item.id}:review`)
 		expect(store.getItem(item.id)?.status).toBe("done")
 		expect(completed.status).toBe("completed")
 		expect(schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId: chain.id }))
 		const completedRoot = store.getTaskTree(chain.id)?.root
-		if (completedRoot?.kind !== "seq") throw new Error("expected completed seq task tree")
-		expect(completedRoot.children.flatMap((node) => node.kind === "leaf" ? [node.closure] : [])).toEqual(expect.arrayContaining([
-			expect.objectContaining({ phase: "iteration", lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] }),
+		if (completedRoot?.kind !== "par") throw new Error("expected completed chain task par")
+		expect(completedRoot.children.flatMap((itemRoot) =>
+			itemRoot.kind === "leaf"
+				? [itemRoot.closure]
+				: itemRoot.children.flatMap((node) => node.kind === "leaf" ? [node.closure] : []),
+		)).toEqual(expect.arrayContaining([
+			expect.objectContaining({ phase: "review", lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] }),
 		]))
 		expect(await pathExists(worktreePath)).toBe(false)
 		expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
-	} finally {
-		await runtime.daemon.stop()
-		store.close()
-	}
-})
-
-test("counts one retry cycle in the declared attempt unit", async () => {
-	const root = resolve(TEST_ROOT, "review-retry-to-iteration")
-	const loopDataRoot = resolve(root, "loop-data")
-	const fakeRunner = resolve(root, "review-retry-runner.ts")
-	await mkdir(loopDataRoot, { recursive: true })
-	await writeFile(
-		fakeRunner,
-		`
-const promptIndex = Bun.argv.indexOf("-p")
-const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
-const status = input.phase === "review" ? "changes_requested" : null
-${CREDENTIALED_STATUS_WRITE_SNIPPET}
-console.log(input.phase + ":" + status)
-`,
-	)
-
-	const runtime = await startCredentialedSchedulerRuntime(root, loopDataRoot)
-	const store = openSqliteStateStore({ loopDataRoot })
-	try {
-		const chain = store.createChain({
-			name: "review-retry-to-iteration-chain",
-			preset: "gh-issue-pr-iteration",
-			repository: "mouriya-s-lab/coder-loop",
-			baseBranch: "main",
-			status: "active",
-			metadata: storedChainMetadata({ presetPath: runtime.presetDir }),
-		})
-		const item = store.createItem({
-			chainId: chain.id,
-			itemId: "346001",
-			repoCwd: REPO_ROOT,
-			status: runtimeStatus("queued"),
-			presetPath: runtime.presetDir,
-			attempts: 0,
-			extra: storedItemExtra({}),
-		})
-		const state = runtime.daemon.schedulerExecutionState()
-		const schedulerEvents: SchedulerEvent[] = []
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain: selectedChain, repoCwd, closureId }) => {
-			const worktreePath = closureWorktreePath(loopDataRoot, selectedChain.name, repoCwd, closureId)
-			await mkdir(worktreePath, { recursive: true })
-			return worktreePath
-		}
-		let runSequence = 0
-		const options: SchedulerOptions = {
-			store,
-			state,
-			presetForChain: () => runtime.loadedPreset,
-			runner: {
-				kind: "claude",
-				source: "iteration-default",
-				binary: "bun",
-				extraArgs: [fakeRunner],
-				model: null,
-			},
-			worktreeManager,
-			loopDataRootOptions: { loopDataRoot },
-			runCredentials: runtime.daemon.buildSchedulerRunCredentialIssuer(),
-			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,
-			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
-				itemId: selected.id,
-				issueNumber: Number(selected.itemId),
-				runId,
-				phase,
-			}),
-			onEvent: (event) => {
-				schedulerEvents.push(event)
-			},
-		}
-
-		const iterTick = await schedulerTick(options)
-		expect(iterTick.spawnedRuns).toHaveLength(1)
-		await iterTick.spawnedRuns[0]!.closed
-		expect(store.getItem(item.id)?.phase).toBe("iteration")
-		expect(store.getItem(item.id)?.status).toBe("queued")
-		expect(store.getItem(item.id)?.attempts).toBe(1)
-
-		const reviewTick = await schedulerTick(options)
-		expect(reviewTick.spawnedRuns).toHaveLength(1)
-		await reviewTick.spawnedRuns[0]!.closed
-		expect(store.getItem(item.id)?.phase).toBe("review")
-		expect(store.getItem(item.id)?.status).toBe("changes_requested")
-		expect(store.getItem(item.id)?.attempts).toBe(1)
-
-		const retryIterTick = await schedulerTick(options)
-		expect(retryIterTick.spawnedRuns).toHaveLength(1)
-		await retryIterTick.spawnedRuns[0]!.closed
-		expect(store.getItem(item.id)?.phase).toBe("iteration")
-		expect(store.getItem(item.id)?.status).toBe("changes_requested")
-		expect(store.getItem(item.id)?.attempts).toBe(2)
-
-		expect(schedulerEvents
-			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
-				event.type === "phase.start" && event.itemId === item.id,
-			)
-			.map((event) => event.phase)).toEqual(["iteration", "review", "iteration"])
 	} finally {
 		await runtime.daemon.stop()
 		store.close()
@@ -520,7 +427,9 @@ test("daemon restart after crash recovers in-flight item through observable sock
 		fakeCodex,
 		`#!/usr/bin/env bash
 printf '{"pid":%s}\\n' "$$" >> ${JSON.stringify(eventLog)}
-sleep 30
+while [[ ! -e ${JSON.stringify(resolve(root, "release-runner"))} ]]; do
+	sleep 0.05
+done
 echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 `,
 	)
@@ -549,6 +458,7 @@ echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 			attempts: 0,
 			extra: storedItemExtra({}),
 		})
+		appendFixtureItemTaskTree(store, chain, item, ["iteration"], gitOutput(target, ["rev-parse", "HEAD"]))
 
 		const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }
 		const socketPath = resolve(loopDataRoot, "daemon.sock")

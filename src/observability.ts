@@ -32,6 +32,7 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("item.dependency_unblocked"),
 	arkType.unit("closure.resource_prepared"),
 	arkType.unit("closure.lifecycle_changed"),
+	arkType.unit("closure.dispatch_denied"),
 	arkType.unit("closure.consumed"),
 	arkType.unit("closure.git_failed"),
 	arkType.unit("closure.reconciled"),
@@ -363,6 +364,12 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 		kind: arkType.unit("audit"),
 		type: arkType.unit("closure.lifecycle_changed"),
 		payload: { closureId: "string>0", from: arkType("'active'|'suspended'"), to: arkType("'active'|'suspended'"), reason: arkType("'phase-left'|'phase-entered'") },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("closure.dispatch_denied"),
+		payload: { closureId: "string>0", runtimeNodeId: "string>0", activeRunId: "string>0", reason: arkType.unit("active-live-run") },
 	},
 	{
 		...EventBaseBoundary,
@@ -702,6 +709,7 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 			reason: arkType.or(
 				arkType.unit("vocabulary"),
 				arkType.unit("phase-exits"),
+				arkType.unit("task-transition-required"),
 				arkType.unit("no-phase-active"),
 				arkType.unit("admitted"),
 			),
@@ -843,8 +851,8 @@ export type ItemUpdateFieldWriteReason = typeof ItemUpdateFieldWriteReasonBounda
 //
 // Discriminated on `outcome`: every `outcome=allow` carries `reason` from the admit-side vocabulary
 // (`"admitted" | "no-phase-active"`) and every `outcome=deny` carries `reason` from the reject-side
-// vocabulary (`"vocabulary" | "phase-exits"`). The four logically-impossible cross-product entries
-// (`allow×vocabulary`, `allow×phase-exits`, `deny×admitted`, `deny×no-phase-active`) are
+// vocabulary (`"vocabulary" | "phase-exits" | "task-transition-required"`). The logically-impossible
+// cross-product entries (`allow` with a deny reason, or `deny` with an allow reason) are
 // unrepresentable at the type level — the typechecker rejects any caller trying to construct them.
 export type ItemStatusAdmissionRecord =
 	| {
@@ -863,7 +871,7 @@ export type ItemStatusAdmissionRecord =
 		declaredExits: readonly string[]
 		subject: ObservabilitySubject
 		outcome: "deny"
-		reason: "vocabulary" | "phase-exits"
+		reason: "vocabulary" | "phase-exits" | "task-transition-required"
 	}
 
 export const OBSERVABILITY_EXCERPT_RECORD_LIMIT = 5
@@ -1058,6 +1066,8 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			return `${event.ts} audit closure.resource_prepared chain=${event.chain ?? "-"} closure=${event.payload.closureId} branch=${event.payload.branchName} freshness=${event.payload.freshness.kind}`
 		case "closure.lifecycle_changed":
 			return `${event.ts} audit closure.lifecycle_changed chain=${event.chain ?? "-"} closure=${event.payload.closureId} ${event.payload.from}->${event.payload.to} reason=${event.payload.reason}`
+		case "closure.dispatch_denied":
+			return `${event.ts} audit closure.dispatch_denied chain=${event.chain ?? "-"} closure=${event.payload.closureId} run=${event.payload.activeRunId} reason=${event.payload.reason}`
 		case "closure.consumed":
 			return `${event.ts} audit closure.consumed chain=${event.chain ?? "-"} closure=${event.payload.closureId} evidence=${event.payload.evidence} freshness=${event.payload.freshness.kind}`
 		case "closure.git_failed":

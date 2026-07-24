@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
 	chmod, createChain, createFixture, createItem, createSchedulerState, DEFAULT_MAX_ITEM_ATTEMPTS,
-	itemExtraToJsonObject, loadPreset, loadedPresetFromDir, resolve, runtimeStatus, schedulerTick, stopFixture,
+	initializeFixtureGitWorktree, itemExtraToJsonObject, loadPreset, loadedPresetFromDir, mkdir, resolve, runtimeStatus, schedulerTick, stopFixture,
 	schedulerEventToObservabilityEvent, storedItemExtra, writeCustomExhaustedPreset, writeFile,
 	writeMissingExhaustedDeclarationPreset,
 } from "./harness"
@@ -10,9 +10,26 @@ describe("scheduler", () => {
 	test("same-chain same-repo SIGTERM retry cycle does not starve untouched sibling item", async () => {
 		const fixture = await createFixture("retry-fairness")
 		try {
-			const chain = createChain(fixture.store, "retry-fairness-chain")
-			const first = createItem(fixture.store, chain, { issueNumber: 7001, repoCwd: "/repo/a", sleepMs: 5_000 })
-			const second = createItem(fixture.store, chain, { issueNumber: 7002, repoCwd: "/repo/a" })
+			const chain = createChain(fixture.store, "retry-fairness-chain", {
+				metadata: {
+					bindings: {
+						umbrellaIssue: 176,
+						umbrellaRepo: "mouriya-s-lab/coder-loop",
+						maxConcurrency: 1,
+					},
+				},
+			})
+			const first = createItem(fixture.store, chain, {
+				issueNumber: 7001,
+				repoCwd: "/repo/a",
+				sleepMs: 5_000,
+				taskPhases: ["iteration"],
+			})
+			const second = createItem(fixture.store, chain, {
+				issueNumber: 7002,
+				repoCwd: "/repo/a",
+				taskPhases: ["iteration"],
+			})
 
 			const firstTick = await schedulerTick(fixture.options())
 			expect(firstTick.spawnedRuns).toHaveLength(1)
@@ -46,16 +63,31 @@ describe("scheduler", () => {
 		try {
 			expect(DEFAULT_MAX_ITEM_ATTEMPTS).toBe(20)
 			const chain = createChain(fixture.store, "default-max-item-attempts-exhaust-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 7008, repoCwd: "/repo/a" })
+			const repoCwd = resolve(fixture.loopDataRoot, "default-max-item-attempts-exhaust-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 7008,
+				repoCwd,
+				exitCode: 1,
+				summary: null,
+				taskPhases: ["review"],
+			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
-				attempts: DEFAULT_MAX_ITEM_ATTEMPTS,
-				lastRunId: "run-prior-default-failure",
-				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: DEFAULT_MAX_ITEM_ATTEMPTS, nextRunAt: 1_800_000_000 } }),
+				attempts: DEFAULT_MAX_ITEM_ATTEMPTS - 1,
 				updatedAt: 1_800_000_500,
 			})
+			const options = fixture.options({
+				now: () => 1_800_000_501,
+				runIdFactory: () => "run-prior-default-failure",
+			})
+			const failedAttempt = await schedulerTick(options)
+			expect(failedAttempt.spawnedRuns).toHaveLength(1)
+			await failedAttempt.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(DEFAULT_MAX_ITEM_ATTEMPTS)
 
-			const tick = await schedulerTick(fixture.options())
+			const tick = await schedulerTick(options)
 
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(tick.completedChainIds).toEqual([chain.id])
@@ -80,16 +112,31 @@ describe("scheduler", () => {
 				const chain = createChain(fixture.store, "max-item-attempts-exhaust-chain", {
 					metadata: { maxItemAttempts: 2 },
 				})
-			const item = createItem(fixture.store, chain, { issueNumber: 7003, repoCwd: "/repo/a" })
+			const repoCwd = resolve(fixture.loopDataRoot, "max-item-attempts-exhaust-repo")
+			await mkdir(repoCwd, { recursive: true })
+			initializeFixtureGitWorktree(repoCwd)
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 7003,
+				repoCwd,
+				exitCode: 1,
+				summary: null,
+				taskPhases: ["review"],
+			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
-				attempts: 2,
-				lastRunId: "run-prior-failure",
-				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 2, nextRunAt: 1_800_000_000 } }),
+				attempts: 1,
 				updatedAt: 1_800_000_500,
 			})
+			const options = fixture.options({
+				now: () => 1_800_000_501,
+				runIdFactory: () => "run-prior-failure",
+			})
+			const failedAttempt = await schedulerTick(options)
+			expect(failedAttempt.spawnedRuns).toHaveLength(1)
+			await failedAttempt.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
 
-			const tick = await schedulerTick(fixture.options())
+			const tick = await schedulerTick(options)
 
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(tick.completedChainIds).toEqual([chain.id])
@@ -123,7 +170,20 @@ describe("scheduler", () => {
 				preset: "custom-exhausted",
 				metadata: { maxItemAttempts: 1 },
 			})
-			const item = createItem(fixture.store, chain, { issueNumber: 710_004, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 710_004,
+				repoCwd: "/repo/a",
+				taskPhases: ["run"],
+			})
+			fixture.store.recordRun({
+				runId: "run-prior-custom-failure",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "run",
+				startedAt: 1_800_900_498,
+				endedAt: 1_800_900_499,
+				exitCode: 1,
+			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
 				attempts: 1,
@@ -177,15 +237,28 @@ describe("scheduler", () => {
 			try {
 				let now = 1_800_010_000
 				const chain = createChain(fixture.store, "failure-backoff-sibling-chain", {
-					metadata: { maxItemAttempts: 10 },
+					metadata: {
+						maxItemAttempts: 10,
+						bindings: {
+							umbrellaIssue: 176,
+							umbrellaRepo: "mouriya-s-lab/coder-loop",
+							maxConcurrency: 1,
+						},
+					},
 				})
 			const failing = createItem(fixture.store, chain, {
 				issueNumber: 7004,
 				repoCwd: "/repo/a",
 				exitCode: 1,
 				summary: null,
+				taskPhases: ["iteration"],
 			})
-			const sibling = createItem(fixture.store, chain, { issueNumber: 7005, repoCwd: "/repo/a", writeStatus: "done" })
+			const sibling = createItem(fixture.store, chain, {
+				issueNumber: 7005,
+				repoCwd: "/repo/a",
+				writeStatus: "done",
+				taskPhases: ["review"],
+			})
 			const options = fixture.options({
 				now: () => now,
 				runIdFactory: ({ item }) => `run-backoff-${item.id}-${now}`,

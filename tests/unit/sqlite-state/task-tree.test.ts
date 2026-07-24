@@ -142,7 +142,7 @@ describe("sqlite state store", () => {
 		openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }).close()
 		const migrated = new Database(fixture.dbFile)
 		try {
-			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16)
+			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(17)
 			expect(migrated.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name='closure_consumption_intents'").get()?.name).toBe("closure_consumption_intents")
 			migrated.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,'decided-reopen'),($chain,$closure,'next-epoch-candidate')").run({ $chain: chain.id, $closure: closureId })
 			expect(migrated.query<{ kind: string }, []>("SELECT kind FROM closure_reachability_seeds ORDER BY kind").all().map((row) => row.kind)).toEqual([
@@ -153,53 +153,66 @@ describe("sqlite state store", () => {
 		} finally { migrated.close() }
 	})
 
-	test("existing task root materializes every phase for a newly encountered item with stable identities", async () => {
-		const { store, dbFile } = await openTestStore("existing-root-full-item-definition")
-		const chain = createFullChain(store)
-		const first = createFullItem(store, chain, { itemId: "first", issueNumber: 177, phase: "iteration" })
-		const second = createFullItem(store, chain, { itemId: "second", issueNumber: 178, phase: "review" })
-		const firstRun = store.recordRun({ runId: "first-definition-run", chainId: chain.id, itemId: first.id, phase: "iteration", startedAt: 1_800_000_205, extra: definitionRunExtra({ worktreePath: "/worktrees/first", branchName: "issue-first" }) })
-		store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: firstRun.runId, startedAt: firstRun.startedAt, extra: storedItemExtra({}) })
-		const secondDefinition = {
-			definitionContentIdentity: "sha256:second-definition",
-			definitionPhases: [
-				{ phase: "review", definitionNodeId: "task:review" },
-				{ phase: "finalize", definitionNodeId: "task:finalize" },
-			],
-		}
-		const secondRun = store.recordRun({ runId: "second-definition-run", chainId: chain.id, itemId: second.id, phase: "review", startedAt: 1_800_000_206, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/second", branchName: "issue-second" }) })
-		store.setCurrentRun({ chainId: chain.id, phase: "review", runId: secondRun.runId, startedAt: secondRun.startedAt, extra: storedItemExtra({}) })
-		const definitionRef = { kind: "preset", contentIdentity: "sha256:second-definition" } as const
-		const reviewIdentity = {
-			runtimeNodeId: `closure-node:${second.id}:review`,
-			definitionRef,
-			definitionNodeId: "task:review",
-		}
-		const expectedSecondIdentities = ["review", "finalize"].map((phase) => ({
-			runtimeNodeId: `closure-node:${second.id}:${phase}`,
-			definitionRef,
-			definitionNodeId: `task:${phase}`,
-		}))
+	test("run recording rejects lazy task-tree materialization", async () => {
+		const { store } = await openTestStore("run-requires-precreated-closure")
 		try {
-			const tree = store.getTaskTree(chain.id)
-			if (tree?.root.kind !== "seq") throw new Error("expected seq root")
-			const firstOpenLeaves = tree.root.children.flatMap((node) => node.kind === "leaf" && node.closure.itemRowId === second.id ? [node] : [])
-			expect(firstOpenLeaves.map((node) => node.identity)).toEqual([reviewIdentity])
-			const finalizeRun = store.recordRun({ runId: "second-finalize-run", chainId: chain.id, itemId: second.id, phase: "finalize", startedAt: 1_800_000_207, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/finalize", branchName: "issue-finalize" }) })
-			store.setCurrentRun({ chainId: chain.id, phase: "finalize", runId: finalizeRun.runId, startedAt: finalizeRun.startedAt, extra: storedItemExtra({}) })
-			const openedTree = store.getTaskTree(chain.id)
-			if (openedTree?.root.kind !== "seq") throw new Error("expected opened seq root")
-			const secondLeaves = openedTree.root.children.flatMap((node) => node.kind === "leaf" && node.closure.itemRowId === second.id ? [node] : [])
-			expect(secondLeaves.map((node) => node.identity)).toEqual(expectedSecondIdentities)
-			expect(new Set(secondLeaves.map((node) => node.closure.worktreePath)).size).toBe(secondLeaves.length)
-			expect(new Set(secondLeaves.map((node) => node.closure.branchName)).size).toBe(secondLeaves.length)
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			expectSqliteCode(() => store.recordRun({
+				runId: "missing-runtime-identity",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_205,
+				extra: definitionRunExtra(),
+			}), "run_closure_mismatch")
+			expect(store.getTaskTree(chain.id)).toBeNull()
 		} finally { store.close() }
-		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
+	})
+
+	test("exact task-transition replay returns the committed record while conflicting replay is rejected", async () => {
+		const { store } = await openTestStore("transition-idempotency")
 		try {
-			const tree = reopened.getTaskTree(chain.id)
-			if (tree?.root.kind !== "seq") throw new Error("expected reopened seq root")
-			expect(tree.root.children.filter((node) => node.kind === "leaf" && node.closure.itemRowId === second.id).map((node) => node.identity)).toEqual(expectedSecondIdentities)
-		} finally { reopened.close() }
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			store.createTaskTree(chain.id, twoPhaseLeafTree(item))
+			store.recordRun({
+				runId: "transition-idempotency-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_205,
+			})
+			const input = {
+				sourceRunId: "transition-idempotency-run",
+				sourceClosureId: `closure-${item.id}-iteration`,
+				targetRuntimeNodeId: `leaf-${item.id}-review`,
+				pathId: "advance",
+				exitPayload: { result: "ok" },
+				resolvedBindings: { RESULT: "ok" },
+				createdAt: 1_800_000_206,
+				itemUpdate: { kind: "none" } as const,
+			}
+			const committed = store.commitTaskTransition(input)
+			expect(store.commitTaskTransition({ ...input, createdAt: 1_800_000_207 })).toEqual(committed)
+			expect(store.listTaskTransitions(chain.id)).toEqual([committed])
+			expectSqliteCode(() => store.commitTaskTransition({
+				...input,
+				exitPayload: { result: "different" },
+				resolvedBindings: { RESULT: "different" },
+				createdAt: 1_800_000_208,
+			}), "invalid_input")
+			expect(store.getTaskTree(chain.id)?.root).toMatchObject({
+				kind: "seq",
+				cursor: { kind: "next", nodeId: `leaf-${item.id}-review` },
+				children: [
+					{ state: "completed" },
+					{ state: "pending" },
+				],
+			})
+		} finally {
+			store.close()
+		}
 	})
 
 	test("nested task tree round-trip", async () => {
@@ -210,8 +223,8 @@ describe("sqlite state store", () => {
 			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
 			const third = createFullItem(store, chain, { issueNumber: 179, itemId: "179" })
 			const definitionRef = { kind: "chain", contentIdentity: "sha256:definition" } as const
-			const leaf = (item: ItemRecord, id: string) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: `definition-${id}` }, closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId: id === "leaf-one" ? null : "par-one", sessions: [] } } as const)
-			const tree: TaskTreeSnapshot = { root: { kind: "seq", identity: { runtimeNodeId: "root", definitionRef, definitionNodeId: "definition-root" }, cursor: { kind: "next", nodeId: "leaf-one" }, children: [leaf(first, "leaf-one"), { kind: "par", identity: { runtimeNodeId: "par-one", definitionRef, definitionNodeId: "definition-par" }, groupId: "par-one", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf(second, "leaf-two"), leaf(third, "leaf-three")] }] }, activeRuns: [] }
+			const leaf = (item: ItemRecord, id: string) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: `definition-${id}` }, state: "pending", closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId: id === "leaf-one" ? null : "par-one", sessions: [] } } as const)
+			const tree: TaskTreeSnapshot = { root: { kind: "seq", identity: { runtimeNodeId: "root", definitionRef, definitionNodeId: "definition-root" }, cursor: { kind: "next", nodeId: "leaf-one" }, children: [leaf(first, "leaf-one"), { kind: "par", identity: { runtimeNodeId: "par-one", definitionRef, definitionNodeId: "definition-par" }, groupId: "par-one", pinCommit: "0123456789abcdef", maxConcurrency: null, state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf(second, "leaf-two"), leaf(third, "leaf-three")] }] }, activeRuns: [] }
 			expect(store.createTaskTree(chain.id, tree)).toEqual(tree)
 			expect(store.getTaskTree(chain.id)).toEqual(tree)
 		} finally { store.close() }
@@ -223,8 +236,8 @@ describe("sqlite state store", () => {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
 			const definitionRef = { kind: "chain", contentIdentity: "sha256:par-parent" } as const
-			const leaf = { kind: "leaf", identity: { runtimeNodeId: "par-child", definitionRef, definitionNodeId: "leaf" }, closure: { closureId: "closure-par-child", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: "/worktrees/par-child", branchName: "issue-par-child", baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } } as const
-			const tree: TaskTreeSnapshot = { root: { kind: "par", identity: { runtimeNodeId: "actual-par", definitionRef, definitionNodeId: "par" }, groupId: "actual-par", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf] }, activeRuns: [] }
+			const leaf = { kind: "leaf", identity: { runtimeNodeId: "par-child", definitionRef, definitionNodeId: "leaf" }, state: "pending", closure: { closureId: "closure-par-child", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: "/worktrees/par-child", branchName: "issue-par-child", baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } } as const
+			const tree: TaskTreeSnapshot = { root: { kind: "par", identity: { runtimeNodeId: "actual-par", definitionRef, definitionNodeId: "par" }, groupId: "actual-par", pinCommit: "0123456789abcdef", maxConcurrency: null, state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf] }, activeRuns: [] }
 			expectSqliteCode(() => store.createTaskTree(chain.id, tree), "run_closure_mismatch")
 		} finally { store.close() }
 	})
@@ -236,8 +249,8 @@ describe("sqlite state store", () => {
 			const first = createFullItem(store, chain)
 			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
 			const definitionRef = { kind: "chain", contentIdentity: "sha256:seq-cursor" } as const
-			const leaf = (item: ItemRecord, id: string, sourceParNodeId: string | null) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: id }, closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `branch-${id}`, baseCommit: "0123456789abcdef", sourceParNodeId, sessions: [] } } as const)
-			const tree: TaskTreeSnapshot = { root: { kind: "seq", identity: { runtimeNodeId: "seq-root", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: "nested-leaf" }, children: [leaf(first, "direct-leaf", null), { kind: "par", identity: { runtimeNodeId: "nested-par", definitionRef, definitionNodeId: "par" }, groupId: "nested-par", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf(second, "nested-leaf", "nested-par")] }] }, activeRuns: [] }
+			const leaf = (item: ItemRecord, id: string, sourceParNodeId: string | null) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: id }, state: "pending", closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `branch-${id}`, baseCommit: "0123456789abcdef", sourceParNodeId, sessions: [] } } as const)
+			const tree: TaskTreeSnapshot = { root: { kind: "seq", identity: { runtimeNodeId: "seq-root", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: "nested-leaf" }, children: [leaf(first, "direct-leaf", null), { kind: "par", identity: { runtimeNodeId: "nested-par", definitionRef, definitionNodeId: "par" }, groupId: "nested-par", pinCommit: "0123456789abcdef", maxConcurrency: null, state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf(second, "nested-leaf", "nested-par")] }] }, activeRuns: [] }
 			expectSqliteCode(() => store.createTaskTree(chain.id, tree), "run_closure_mismatch")
 			const sourceChain = store.createChain({ name: "cursor-source", repository: "mouriya-s-lab/coder-loop", baseBranch: "main", status: "active" })
 			const sourceItem = createFullItem(store, sourceChain, { issueNumber: 179, itemId: "179" })
@@ -332,6 +345,7 @@ describe("sqlite state store", () => {
 		try {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
+			store.createTaskTree(chain.id, singleLeafTree(item))
 			const run = store.recordRun({
 				runId: "durable-run",
 				chainId: chain.id,
@@ -342,8 +356,8 @@ describe("sqlite state store", () => {
 			})
 			store.setCurrentRun({ chainId: chain.id, phase: run.phase, runId: run.runId, startedAt: run.startedAt, extra: storedItemExtra({}) })
 			const active = store.getRunByRunId(run.runId)
-			expect(active?.closureId).toBe(`closure:${item.id}:${run.phase}`)
-			expect(active?.runtimeNodeId).toBe(`closure-node:${item.id}:${run.phase}`)
+			expect(active?.closureId).toBe(`closure-${item.id}`)
+			expect(active?.runtimeNodeId).toBe(`leaf-${item.id}`)
 			expect(store.clearCurrentRun(run.runId)).toBe(true)
 			const completed = store.getRunByRunId(run.runId)
 			expect(completed?.closureId).toBe(active?.closureId)
@@ -381,7 +395,7 @@ describe("sqlite state store", () => {
 			const first = createFullItem(store, chain)
 			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
 			const definitionRef = { kind: "chain", contentIdentity: "sha256:active-siblings" } as const
-			const leaf = (item: ItemRecord) => ({ kind: "leaf", identity: { runtimeNodeId: `leaf-${item.id}`, definitionRef, definitionNodeId: `item-${item.id}` }, closure: { closureId: `closure-${item.id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${item.id}`, branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } } as const)
+			const leaf = (item: ItemRecord) => ({ kind: "leaf", identity: { runtimeNodeId: `leaf-${item.id}`, definitionRef, definitionNodeId: `item-${item.id}` }, state: "pending", closure: { closureId: `closure-${item.id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${item.id}`, branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } } as const)
 			store.createTaskTree(chain.id, { root: { kind: "seq", identity: { runtimeNodeId: "root-active-siblings", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: `leaf-${first.id}` }, children: [leaf(first), leaf(second)] }, activeRuns: [] })
 			store.recordRun({ runId: "active-first", chainId: chain.id, itemId: first.id, phase: "iteration", startedAt: 1_800_000_210 })
 			store.recordRun({ runId: "active-second", chainId: chain.id, itemId: second.id, phase: "iteration", startedAt: 1_800_000_211 })
@@ -401,8 +415,8 @@ describe("sqlite state store", () => {
 			const first = createFullItem(store, chain)
 			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
 			const definitionRef = { kind: "chain", contentIdentity: "sha256:join-history" } as const
-			const leaf = (item: ItemRecord, id: string) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: id }, closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `branch-${id}`, baseCommit: "0123456789abcdef", sourceParNodeId: "par-history", sessions: [] } } as const)
-			const tree: TaskTreeSnapshot = { root: { kind: "par", identity: { runtimeNodeId: "par-history", definitionRef, definitionNodeId: "par" }, groupId: "par-history", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 2, value: { kind: "validator", candidate: { definitionRef, candidateId: "validator" } }, evaluation: { kind: "evaluating", epoch: 2, bindingVersion: 2 } }, children: [leaf(first, "join-leaf-one"), leaf(second, "join-leaf-two")] }, activeRuns: [] }
+			const leaf = (item: ItemRecord, id: string) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: id }, state: "pending", closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `branch-${id}`, baseCommit: "0123456789abcdef", sourceParNodeId: "par-history", sessions: [] } } as const)
+			const tree: TaskTreeSnapshot = { root: { kind: "par", identity: { runtimeNodeId: "par-history", definitionRef, definitionNodeId: "par" }, groupId: "par-history", pinCommit: "0123456789abcdef", maxConcurrency: null, state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 2, value: { kind: "validator", candidate: { definitionRef, candidateId: "validator" } }, evaluation: { kind: "evaluating", epoch: 2, bindingVersion: 2 } }, children: [leaf(first, "join-leaf-one"), leaf(second, "join-leaf-two")] }, activeRuns: [] }
 			expect(store.createTaskTree(chain.id, tree)).toEqual(tree)
 			expect(store.getTaskTree(chain.id)).toEqual(tree)
 		} finally { store.close() }
@@ -413,6 +427,7 @@ describe("sqlite state store", () => {
 		try {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
+			store.createTaskTree(chain.id, singleLeafTree(item))
 			store.recordRun({ runId: "exact-run", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_400, extra: definitionRunExtra() })
 			const db = new Database(dbFile)
 			try { db.exec("ALTER TABLE runs ADD COLUMN unexpected TEXT") } finally { db.close() }
@@ -493,6 +508,218 @@ describe("sqlite state store", () => {
 				contextEntries: [],
 			})
 			expectSqliteCode(() => openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }), "invalid_json")
+		}
+	})
+
+	test("item creation rolls back its row when task-tree instantiation fails", async () => {
+		const { store } = await openTestStore("atomic-item-tree-factory-failure")
+		try {
+			const chain = createFullChain(store)
+			expectSqliteCode(() => store.createItemsWithTaskTrees([{
+				chainId: chain.id,
+				itemId: "atomic-single",
+				repoCwd: "/repo/coder-loop",
+				status: runtimeStatus("queued"),
+				preset: "single-phase-example",
+				extra: storedItemExtra({ issue: "atomic-single" }),
+			}], () => {
+				throw new Error("synthetic task-tree factory failure")
+			}), "sqlite_error")
+
+			expect(store.listItems(chain.id)).toEqual([])
+			expect(store.getTaskTree(chain.id)).toBeNull()
+		} finally {
+			store.close()
+		}
+	})
+
+	test("batch item creation rolls back every row and prior tree write when a later root is invalid", async () => {
+		const { store, dbFile } = await openTestStore("atomic-item-tree-batch-failure")
+		try {
+			const chain = createFullChain(store)
+			const inputs = ["atomic-first", "atomic-invalid", "atomic-unvisited"].map((itemId) => ({
+				chainId: chain.id,
+				itemId,
+				repoCwd: "/repo/coder-loop",
+				status: runtimeStatus("queued"),
+				preset: "single-phase-example",
+				extra: storedItemExtra({ issue: itemId }),
+			}))
+			const visited: number[] = []
+
+			expectSqliteCode(() => store.createItemsWithTaskTrees(inputs, (item, index) => {
+				visited.push(index)
+				if (index === 1) return singleLeafTree(item).root
+				return twoPhaseLeafTree(item).root
+			}), "invalid_input")
+
+			expect(visited).toEqual([0, 1])
+			expect(store.listItems(chain.id)).toEqual([])
+			expect(store.getTaskTree(chain.id)).toBeNull()
+
+			const db = new Database(dbFile)
+			try {
+				for (const table of ["items", "task_trees", "task_nodes", "task_closures", "execution_definitions"] as const) {
+					const count = db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count
+					expect(count).toBe(0)
+				}
+			} finally {
+				db.close()
+			}
+		} finally {
+			store.close()
+		}
+	})
+
+	test("appending multiple item roots preserves an inert chain storage envelope", async () => {
+		const { store } = await openTestStore("append-multiple-item-roots")
+		try {
+			const chain = createFullChain(store)
+			const first = createFullItem(store, chain)
+			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
+			const definitionRef = { kind: "preset", contentIdentity: "sha256:append-items" } as const
+			const itemRoot = (item: ItemRecord) => ({
+				kind: "seq",
+				identity: { runtimeNodeId: `item-${item.id}-root`, definitionRef, definitionNodeId: "root" },
+				cursor: { kind: "next", nodeId: `item-${item.id}-leaf` },
+				children: [{
+					kind: "leaf",
+					identity: { runtimeNodeId: `item-${item.id}-leaf`, definitionRef, definitionNodeId: "phase" },
+					state: "pending",
+					closure: {
+						closureId: `item-${item.id}-closure`,
+						itemRowId: item.id,
+						itemId: item.itemId,
+						phase: "phase",
+						lifecycle: "active",
+						worktreePath: `/worktrees/${item.id}`,
+						branchName: `branch-${item.id}`,
+						baseCommit: "0123456789abcdef",
+						sourceParNodeId: null,
+						sessions: [],
+					},
+				}],
+			} as const)
+
+				store.appendItemTaskTree(chain.id, itemRoot(first))
+				store.recordRun({
+					runId: "append-first-transition-run",
+					chainId: chain.id,
+					itemId: first.id,
+					phase: "phase",
+					startedAt: 1_800_000_089,
+				})
+				store.commitTaskTransition({
+					sourceRunId: "append-first-transition-run",
+					sourceClosureId: `item-${first.id}-closure`,
+					targetRuntimeNodeId: null,
+					pathId: "finish-first",
+					exitPayload: {},
+					resolvedBindings: {},
+					createdAt: 1_800_000_090,
+					itemUpdate: { kind: "none" },
+				})
+				expect(store.getTaskTree(chain.id)?.root).toMatchObject({
+					kind: "seq",
+					cursor: { kind: "complete" },
+					identity: { runtimeNodeId: `chain:${chain.id}:tasks` },
+					children: [{ cursor: { kind: "complete" } }],
+				})
+				const appended = store.appendItemTaskTree(chain.id, itemRoot(second))
+
+				expect(appended.root).toMatchObject({
+					kind: "seq",
+					cursor: { kind: "complete" },
+					identity: { runtimeNodeId: `chain:${chain.id}:tasks` },
+					children: [
+						{ identity: { runtimeNodeId: `item-${first.id}-root` }, cursor: { kind: "complete" } },
+						{ identity: { runtimeNodeId: `item-${second.id}-root` }, cursor: { kind: "next", nodeId: `item-${second.id}-leaf` } },
+					],
+				})
+		} finally {
+			store.close()
+		}
+	})
+
+	test("leaf exhaustion is contained to one par member and drains only after successful siblings finish", async () => {
+		const { store } = await openTestStore("leaf-exhaustion-containment")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			const definitionRef = { kind: "preset", contentIdentity: "sha256:leaf-exhaustion" } as const
+			const leaf = (id: string) => ({
+				kind: "leaf",
+				identity: { runtimeNodeId: id, definitionRef, definitionNodeId: id },
+				state: "pending",
+				closure: {
+					closureId: `closure-${id}`,
+					itemRowId: item.id,
+					itemId: item.itemId,
+					phase: id,
+					lifecycle: "active",
+					worktreePath: `/worktrees/${id}`,
+					branchName: `branch-${id}`,
+					baseCommit: "0123456789abcdef",
+					sourceParNodeId: "failure-par",
+					sessions: [],
+				},
+			} as const)
+			store.createTaskTree(chain.id, {
+				root: {
+					kind: "par",
+					identity: { runtimeNodeId: "failure-par", definitionRef, definitionNodeId: "failure-par" },
+					groupId: "failure-par",
+					pinCommit: "0123456789abcdef",
+					maxConcurrency: null,
+					state: "open",
+					reopen: { count: 0, budgetRef: "task.failure-par.reopenBudget:0" },
+					join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } },
+					children: [leaf("failed"), leaf("successful-one"), leaf("successful-two")],
+				},
+				activeRuns: [],
+			})
+			for (const id of ["successful-one", "successful-two"]) {
+				const sourceRunId = `leaf-exhaustion-${id}-run`
+				store.recordRun({
+					runId: sourceRunId,
+					chainId: chain.id,
+					itemId: item.id,
+					phase: id,
+					startedAt: 1_800_000_099,
+				})
+				store.commitTaskTransition({
+					sourceRunId,
+					sourceClosureId: `closure-${id}`,
+					targetRuntimeNodeId: null,
+					pathId: `finish-${id}`,
+					exitPayload: {},
+					resolvedBindings: {},
+					createdAt: 1_800_000_100,
+					itemUpdate: { kind: "none" },
+				})
+			}
+
+			const exhausted = store.exhaustTaskLeaf({
+				itemId: item.id,
+				runtimeNodeId: "failed",
+				status: runtimeStatus("exhausted"),
+				extra: storedItemExtra({ fixtureId: item.itemId }),
+				updatedAt: 1_800_000_101,
+			})
+
+			expect(exhausted).toMatchObject({ runtimeNodeId: "failed", itemTerminal: true, item: { status: "exhausted" } })
+			const tree = store.getTaskTree(chain.id)
+			expect(tree?.root).toMatchObject({
+				kind: "par",
+				state: "completed",
+				children: [
+					{ identity: { runtimeNodeId: "failed" }, state: "exhausted" },
+					{ identity: { runtimeNodeId: "successful-one" }, state: "completed" },
+					{ identity: { runtimeNodeId: "successful-two" }, state: "completed" },
+				],
+			})
+		} finally {
+			store.close()
 		}
 	})
 
