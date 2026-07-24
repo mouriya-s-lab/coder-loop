@@ -280,24 +280,6 @@ export function taskNodeTerminal(node: TaskNodeSnapshot): boolean {
 	}
 }
 
-/**
- * #698 persists independently declared item trees beneath one stable chain row
- * because task_trees has one root per chain. This synthetic node is a storage
- * envelope only: #705 owns chain-level tree and join semantics.
- */
-export function isSyntheticChainTaskEnvelope(node: TaskNodeSnapshot): boolean {
-	return node.kind !== "leaf"
-		&& node.identity.definitionRef.kind === "chain"
-		&& node.identity.definitionRef.contentIdentity.startsWith("runtime:")
-		&& node.identity.definitionNodeId === "root"
-		&& node.identity.runtimeNodeId.startsWith("chain:")
-		&& node.identity.runtimeNodeId.endsWith(":tasks")
-}
-
-export function taskExecutionRoots(root: TaskNodeSnapshot): readonly TaskNodeSnapshot[] {
-	return root.kind !== "leaf" && isSyntheticChainTaskEnvelope(root) ? root.children : [root]
-}
-
 function countActiveTaskClosures(node: TaskNodeSnapshot, activeClosureIds: ReadonlySet<string>): number {
 	switch (node.kind) {
 		case "leaf": return activeClosureIds.has(node.closure.closureId) ? 1 : 0

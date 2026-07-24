@@ -29,7 +29,6 @@ import {
 	type TaskLeafNodeSnapshot,
 	type TaskNodeSnapshot,
 	type TaskTreeSnapshot,
-	isSyntheticChainTaskEnvelope,
 	taskNodeTerminal,
 } from "./task-runtime"
 import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
@@ -1919,31 +1918,41 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		if (itemRoot.kind === "leaf") throw new SqliteStateError("invalid_input", "item task root must be seq or par", { chainId })
 		const existing = queryPersistedOne(db, "SELECT root_node_id FROM task_trees WHERE chain_id = $chainId", { chainId }, TaskTreeRootRowBoundary, `task tree root for chain ${chainId}`)
 		if (existing === null) {
+			const firstClosure = firstTaskClosure(itemRoot)
 			const chainRoot: TaskNodeSnapshot = {
-				kind: "seq",
+				kind: "par",
 				identity: {
 					runtimeNodeId: `chain:${chainId}:tasks`,
 					definitionRef: { kind: "chain", contentIdentity: `runtime:${chainId}` },
 					definitionNodeId: "root",
 				},
-				cursor: { kind: "complete" },
-				children: [],
+				groupId: `chain:${chainId}:tasks`,
+				pinCommit: firstClosure.baseCommit,
+				maxConcurrency: null,
+				state: "open",
+				reopen: { count: 0, budgetRef: "chain.maxReopens" },
+				join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } },
+				children: [itemRoot],
 			}
-			// task_trees stores one root per chain. Keep this stable synthetic row
-			// only as the parent of item declaration roots; it is not a semantic par
-			// and therefore must not become their nearest par or evaluate its join.
 			insertTaskNode(db, chainId, null, 0, chainRoot)
-			insertTaskNode(db, chainId, chainRoot.identity.runtimeNodeId, 0, itemRoot)
 			db.query<never, SqlParams>("INSERT INTO task_trees (chain_id, root_node_id) VALUES ($chainId, $root)").run({ chainId, root: chainRoot.identity.runtimeNodeId })
 			return requireTaskTree(db, chainId)
 		}
 		const root = readTaskNode(db, existing.root_node_id)
-		if (root.kind === "leaf" || !isSyntheticChainTaskEnvelope(root)) throw new SqliteStateError("invalid_input", `chain ${chainId} task root is not an appendable storage envelope`, { chainId, rootNodeId: existing.root_node_id })
+		if (root.kind !== "par") throw new SqliteStateError("invalid_input", `chain ${chainId} task root is not appendable`, { chainId, rootNodeId: existing.root_node_id })
 		const index = queryPersistedOne(db, "SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root", { root: existing.root_node_id }, NextChildIndexRowBoundary, `next child index for ${existing.root_node_id}`)
 		if (index === null) throw new SqliteStateError("invalid_json", `task root ${existing.root_node_id} has no child index`, { chainId })
-			insertTaskNode(db, chainId, existing.root_node_id, index.next_index, itemRoot)
-			return requireTaskTree(db, chainId)
+		insertTaskNode(db, chainId, existing.root_node_id, index.next_index, itemRoot, root.identity.runtimeNodeId)
+		// A completed chain-root drain describes only the members that existed at
+		// that instant. Appending a fresh pending item is a new direct member, not
+		// post-terminal reactivation of an old leaf. Reopen only this container so
+		// recursive readiness can see the new child; every prior terminal child
+		// keeps its state and transition history unchanged.
+		if (root.state === "completed" && !taskNodeTerminal(itemRoot)) {
+			db.query<never, SqlParams>("UPDATE task_par_nodes SET container_state = 'open' WHERE runtime_node_id = $root").run({ root: existing.root_node_id })
 		}
+		return requireTaskTree(db, chainId)
+	}
 
 		const ensureLegacyRuntimeClosureRow = (
 			input: RecordRunInput,
@@ -2019,7 +2028,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			const itemRootRuntimeNodeId = `legacy-flat:chain:${input.chainId}:item:${item.id}:phases`
 
 			if (treeRow === null) {
-				const leaf = makeLeaf(null)
+				const leaf = makeLeaf(`chain:${input.chainId}:tasks`)
 				appendItemTaskTreeRow(input.chainId, {
 					kind: "seq",
 					identity: {
@@ -2047,8 +2056,8 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					TaskNodeRowBoundary,
 					`legacy item task root ${itemRootRuntimeNodeId}`,
 				)
-				if (itemRootRow === null && isSyntheticChainTaskEnvelope(root)) {
-					const leaf = makeLeaf(null)
+				if (itemRootRow === null && root.kind === "par") {
+					const leaf = makeLeaf(root.identity.runtimeNodeId)
 					appendItemTaskTreeRow(input.chainId, {
 						kind: "seq",
 						identity: {
@@ -2076,9 +2085,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 						`next legacy phase child for ${parent.identity.runtimeNodeId}`,
 					)
 					if (index === null) throw new SqliteStateError("invalid_json", `legacy seq ${parent.identity.runtimeNodeId} has no child index`)
-					const sourceParNodeId = root.kind === "par" && !isSyntheticChainTaskEnvelope(root)
-						? root.identity.runtimeNodeId
-						: null
+					const sourceParNodeId = root.kind === "par" ? root.identity.runtimeNodeId : null
 					const leaf = makeLeaf(sourceParNodeId)
 					insertTaskNode(db, input.chainId, parent.identity.runtimeNodeId, index.next_index, leaf, sourceParNodeId)
 					if (parent.cursor.kind === "complete") {
@@ -2087,7 +2094,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 							parent: parent.identity.runtimeNodeId,
 						})
 					}
-					if (root.kind === "par" && !isSyntheticChainTaskEnvelope(root) && root.state === "completed") {
+					if (root.kind === "par" && root.state === "completed") {
 						db.query<never, SqlParams>("UPDATE task_par_nodes SET container_state = 'open' WHERE runtime_node_id = $root").run({
 							root: root.identity.runtimeNodeId,
 						})
@@ -2431,12 +2438,11 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			const replay = existingTaskTransitionForRun(input)
 			if (replay !== null) return replay
 			const { source, tree } = requireTaskTransitionSource(input)
-			const itemRoot = itemTaskRoot(tree.root, source.item_row_id)
 			if (source.state !== "pending") throw new SqliteStateError("invalid_input", `task leaf ${source.runtime_node_id} already transitioned`, { closureId: input.sourceClosureId, state: source.state })
-			if (!taskLeafStructurallyReady(itemRoot, source.runtime_node_id)) {
+			if (!taskLeafStructurallyReady(tree.root, source.runtime_node_id)) {
 				throw new SqliteStateError("invalid_input", `task leaf ${source.runtime_node_id} is not structurally ready`, { closureId: input.sourceClosureId, runtimeNodeId: source.runtime_node_id })
 			}
-			const expectedTarget = taskTransitionStructuralSuccessor(itemRoot, source.runtime_node_id)
+			const expectedTarget = taskTransitionStructuralSuccessor(tree.root, source.runtime_node_id)
 			if (expectedTarget !== input.targetRuntimeNodeId) {
 				throw new SqliteStateError("invalid_input", `task transition target ${input.targetRuntimeNodeId ?? "<terminal>"} is not the structural successor ${expectedTarget ?? "<terminal>"}`, {
 					closureId: input.sourceClosureId,
@@ -2483,8 +2489,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				})
 			}
 			const tree = requireTaskTree(db, source.chain_id)
-			const itemRoot = itemTaskRoot(tree.root, input.itemId)
-			if (!taskLeafStructurallyReady(itemRoot, input.runtimeNodeId)) {
+			if (!taskLeafStructurallyReady(tree.root, input.runtimeNodeId)) {
 				throw new SqliteStateError("invalid_input", `task leaf ${input.runtimeNodeId} is not structurally ready`, {
 					itemId: input.itemId,
 					runtimeNodeId: input.runtimeNodeId,
@@ -2828,12 +2833,24 @@ function insertDefinition(db: Database, definition: ExecutionDefinitionRef): voi
 	db.query<never, SqlParams>("INSERT OR IGNORE INTO execution_definitions (kind, content_identity, semantic_hash, schema_version) VALUES ($kind, $identity, $identity, 1)").run({ kind: definition.kind, identity: definition.contentIdentity })
 }
 
+function firstTaskClosure(node: TaskNodeSnapshot): ClosureSnapshot {
+	switch (node.kind) {
+		case "leaf": return node.closure
+		case "seq":
+		case "par": {
+			const first = node.children[0]
+			if (first === undefined) throw new SqliteStateError("invalid_input", `task container ${node.identity.runtimeNodeId} has no children`)
+			return firstTaskClosure(first)
+		}
+		default: return assertNever(node)
+	}
+}
+
 function advanceCompletedTaskAncestors(db: Database, nodeId: string): void {
 	const relation = queryPersistedOne(db, "SELECT parent_node_id FROM task_nodes WHERE runtime_node_id = $nodeId", { nodeId }, TaskParentRowBoundary, `task parent ${nodeId}`)
 	const parentId = relation?.parent_node_id ?? null
 	if (parentId === null) return
 	const parent = readTaskNode(db, parentId)
-	if (isSyntheticChainTaskEnvelope(parent)) return
 	switch (parent.kind) {
 		case "leaf":
 			throw new SqliteStateError("invalid_json", `leaf ${parentId} cannot own task children`, { parentId })
@@ -2910,12 +2927,12 @@ function taskNodeRoute(node: TaskNodeSnapshot, runtimeNodeId: string): TaskNodeS
 }
 
 function itemTaskRoot(root: TaskNodeSnapshot, itemRowId: number): TaskNodeSnapshot {
-	if (root.kind !== "leaf" && isSyntheticChainTaskEnvelope(root)) {
-		for (const child of root.children) {
-			if (taskNodeContainsItemRow(child, itemRowId)) return child
-		}
-	} else if (taskNodeContainsItemRow(root, itemRowId)) {
-		return root
+	if (root.kind === "leaf") {
+		if (root.closure.itemRowId === itemRowId) return root
+		throw new SqliteStateError("run_closure_mismatch", `item ${itemRowId} is absent from its task tree`, { itemRowId })
+	}
+	for (const child of root.children) {
+		if (taskNodeContainsItemRow(child, itemRowId)) return child
 	}
 	throw new SqliteStateError("run_closure_mismatch", `item ${itemRowId} is absent from its task tree`, { itemRowId })
 }
