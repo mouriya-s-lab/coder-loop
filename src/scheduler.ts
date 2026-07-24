@@ -77,7 +77,7 @@ import {
 	type RepositoryGitCoordinator,
 	type RepositoryGitSingleflightResult,
 } from "./closure-lifecycle"
-import { collectTaskDispatchDecisions, taskNodeTerminal, type ClosureSnapshot, type TaskLeafNodeSnapshot, type TaskNodeSnapshot } from "./task-runtime"
+import { collectTaskDispatchDecisions, taskExecutionRoots, type ClosureSnapshot, type TaskLeafNodeSnapshot, type TaskNodeSnapshot } from "./task-runtime"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // Under the unified completion protocol (#451) the agent
@@ -563,7 +563,8 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		}
 		const activeRunByClosure = new Map(tree.activeRuns.map((run) => [run.closureId, run]))
 		const activeClosureIds = new Set(activeRunByClosure.keys())
-		const decisions = collectTaskDispatchDecisions(tree.root, activeClosureIds)
+		const decisions = taskExecutionRoots(tree.root)
+			.flatMap((root) => collectTaskDispatchDecisions(root, activeClosureIds))
 		const itemByRowId = new Map(items.map((item) => [item.id, item]))
 		const pendingStatuses = new Set(chainStatuses.pending)
 		const terminalStatuses = new Set(chainStatuses.terminal)
@@ -807,9 +808,11 @@ async function exhaustItemsOverAttemptLimitForRepo(
 		if (item.attempts < maxItemAttempts) continue
 		if (activeItemIds.has(item.id)) continue
 
-		const exhaustedAt = nowSeconds(options)
-		if (tree === null) continue
-		const selected = selectAttemptExhaustionLeaf(tree.root, item, options.store.listRuns(chain.id))
+			const exhaustedAt = nowSeconds(options)
+			if (tree === null) continue
+			const itemRoot = findItemTaskRootForDependency(tree.root, item.id)
+			if (itemRoot === null) continue
+			const selected = selectAttemptExhaustionLeaf(itemRoot, item, options.store.listRuns(chain.id))
 		if (selected === null) continue
 		const extra = clearItemSchedulerBackoff(item.extra)
 		const exhausted = options.store.exhaustTaskLeaf({
@@ -2858,8 +2861,6 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	if (runId === undefined && hasFinalizingItemForChain(options.state, items)) return false
 	if (hasInflightDependency(options, items, effectiveTerminalStatuses)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
-	const taskTree = options.store.getTaskTree(chain.id)
-	if (taskTree === null || !taskNodeTerminal(taskTree.root)) return false
 	if (options.state.finalizingChainIds.has(chain.id)) return false
 	// #456: the legacy `reviewOnEmptyLockExistsForChain` gate is retired with the review-on-empty
 	// path. Chain-drain side effects (the bundled gh-issue-pr-iteration umbrella finalizer, for
@@ -2874,8 +2875,6 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 		const completionItems = options.store.listItems(chain.id)
 		if (completionItems.length === 0) return false
 		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
-		const completionTree = options.store.getTaskTree(chain.id)
-		if (completionTree === null || !taskNodeTerminal(completionTree.root)) return false
 		if (!await consumeCompletedChainClosures(options, current, completionItems, effectiveTerminalStatuses)) return false
 		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 		await emit(options, { type: "chain.completed", chainId: current.id, chainName: current.name, ...(runId === undefined ? {} : { runId }) })

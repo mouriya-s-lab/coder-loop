@@ -3090,9 +3090,9 @@ export class CoderLoopDaemon {
 			node: prepared.declaration,
 			definitionRef: prepared.definitionRef,
 			baseCommit: prepared.baseCommit,
-			// appendItemTaskTree owns a stable chain-level par root. Until a nested
-			// declaration par overrides it, that root is every item leaf's nearest par.
-			sourceParNodeId: `chain:${chain.id}:tasks`,
+			// The stable chain task root is only a persistence envelope. Only a par
+			// authored inside this item declaration may supply a closure pin.
+			sourceParNodeId: null,
 		})
 	}
 
@@ -3425,10 +3425,10 @@ export class CoderLoopDaemon {
 			const triggerLeaf = instantiateLegacyItemTriggerLeaf({
 				chain,
 				item,
-				phase: itemTriggerPhase.name,
-				definitionRef: sourceLeaf.identity.definitionRef,
-				baseCommit: sourceLeaf.closure.baseCommit,
-				sourceParNodeId: tree.root.identity.runtimeNodeId,
+					phase: itemTriggerPhase.name,
+					definitionRef: sourceLeaf.identity.definitionRef,
+					baseCommit: sourceLeaf.closure.baseCommit,
+					sourceParNodeId: null,
 			})
 			store.commitLegacyItemTrigger({
 				sourceRunId: caller.runId,
@@ -6029,7 +6029,7 @@ function instantiateLegacyItemTriggerLeaf(input: {
 	phase: string
 	definitionRef: ExecutionDefinitionRef
 	baseCommit: string
-	sourceParNodeId: string
+	sourceParNodeId: string | null
 }): TaskLeafNodeSnapshot {
 	const runtimeNodeId = `task:${input.chain.id}:item:${input.item.id}:legacy-trigger:${input.phase}`
 	const closureId = `closure:${input.chain.id}:${input.item.id}:legacy-trigger:${input.phase}`

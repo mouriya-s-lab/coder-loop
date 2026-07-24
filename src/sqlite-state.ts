@@ -29,6 +29,7 @@ import {
 	type TaskLeafNodeSnapshot,
 	type TaskNodeSnapshot,
 	type TaskTreeSnapshot,
+	isSyntheticChainTaskEnvelope,
 	taskNodeTerminal,
 } from "./task-runtime"
 import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
@@ -1925,39 +1926,29 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		if (itemRoot.kind === "leaf") throw new SqliteStateError("invalid_input", "item task root must be seq or par", { chainId })
 		const existing = queryPersistedOne(db, "SELECT root_node_id FROM task_trees WHERE chain_id = $chainId", { chainId }, TaskTreeRootRowBoundary, `task tree root for chain ${chainId}`)
 		if (existing === null) {
-			const firstClosure = firstTaskClosure(itemRoot)
 			const chainRoot: TaskNodeSnapshot = {
-				kind: "par",
+				kind: "seq",
 				identity: {
 					runtimeNodeId: `chain:${chainId}:tasks`,
 					definitionRef: { kind: "chain", contentIdentity: `runtime:${chainId}` },
 					definitionNodeId: "root",
 				},
-				groupId: `chain:${chainId}:tasks`,
-				pinCommit: firstClosure.baseCommit,
-				maxConcurrency: null,
-				state: "open",
-				reopen: { count: 0, budgetRef: "chain.maxReopens" },
-				join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } },
-				children: [itemRoot],
+				cursor: { kind: "complete" },
+				children: [],
 			}
+			// task_trees stores one root per chain. Keep this stable synthetic row
+			// only as the parent of item declaration roots; it is not a semantic par
+			// and therefore must not become their nearest par or evaluate its join.
 			insertTaskNode(db, chainId, null, 0, chainRoot)
+			insertTaskNode(db, chainId, chainRoot.identity.runtimeNodeId, 0, itemRoot)
 			db.query<never, SqlParams>("INSERT INTO task_trees (chain_id, root_node_id) VALUES ($chainId, $root)").run({ chainId, root: chainRoot.identity.runtimeNodeId })
 			return requireTaskTree(db, chainId)
 		}
 		const root = readTaskNode(db, existing.root_node_id)
-		if (root.kind !== "par") throw new SqliteStateError("invalid_input", `chain ${chainId} task root is not appendable`, { chainId, rootNodeId: existing.root_node_id })
+		if (root.kind === "leaf" || !isSyntheticChainTaskEnvelope(root)) throw new SqliteStateError("invalid_input", `chain ${chainId} task root is not an appendable storage envelope`, { chainId, rootNodeId: existing.root_node_id })
 		const index = queryPersistedOne(db, "SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root", { root: existing.root_node_id }, NextChildIndexRowBoundary, `next child index for ${existing.root_node_id}`)
 		if (index === null) throw new SqliteStateError("invalid_json", `task root ${existing.root_node_id} has no child index`, { chainId })
-		insertTaskNode(db, chainId, existing.root_node_id, index.next_index, itemRoot, root.identity.runtimeNodeId)
-		// A completed chain-root drain describes only the members that existed at
-		// that instant. Appending a fresh pending item is a new direct member, not
-		// post-terminal reactivation of an old leaf. Reopen only this container so
-		// recursive readiness can see the new child; every prior terminal child
-		// keeps its state and transition history unchanged.
-		if (root.state === "completed" && !taskNodeTerminal(itemRoot)) {
-			db.query<never, SqlParams>("UPDATE task_par_nodes SET container_state = 'open' WHERE runtime_node_id = $root").run({ root: existing.root_node_id })
-		}
+		insertTaskNode(db, chainId, existing.root_node_id, index.next_index, itemRoot)
 		return requireTaskTree(db, chainId)
 	}
 
@@ -2274,11 +2265,12 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			const replay = existingTaskTransitionForRun(input)
 			if (replay !== null) return replay
 			const { source, tree } = requireTaskTransitionSource(input)
+			const itemRoot = itemTaskRoot(tree.root, source.item_row_id)
 			if (source.state !== "pending") throw new SqliteStateError("invalid_input", `task leaf ${source.runtime_node_id} already transitioned`, { closureId: input.sourceClosureId, state: source.state })
-			if (!taskLeafStructurallyReady(tree.root, source.runtime_node_id)) {
+			if (!taskLeafStructurallyReady(itemRoot, source.runtime_node_id)) {
 				throw new SqliteStateError("invalid_input", `task leaf ${source.runtime_node_id} is not structurally ready`, { closureId: input.sourceClosureId, runtimeNodeId: source.runtime_node_id })
 			}
-			const expectedTarget = taskTransitionStructuralSuccessor(tree.root, source.runtime_node_id)
+			const expectedTarget = taskTransitionStructuralSuccessor(itemRoot, source.runtime_node_id)
 			if (expectedTarget !== input.targetRuntimeNodeId) {
 				throw new SqliteStateError("invalid_input", `task transition target ${input.targetRuntimeNodeId ?? "<terminal>"} is not the structural successor ${expectedTarget ?? "<terminal>"}`, {
 					closureId: input.sourceClosureId,
@@ -2319,13 +2311,13 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					state: source.state,
 				})
 			}
-			if (!taskLeafStructurallyReady(tree.root, source.runtime_node_id)) {
+			const root = itemTaskRoot(tree.root, input.itemId)
+			if (!taskLeafStructurallyReady(root, source.runtime_node_id)) {
 				throw new SqliteStateError("invalid_input", `legacy retry source ${source.runtime_node_id} is not structurally ready`, {
 					runId: input.sourceRunId,
 					runtimeNodeId: source.runtime_node_id,
 				})
 			}
-			const root = itemTaskRoot(tree.root, input.itemId)
 			if (root.kind !== "seq" || root.children.length === 0) {
 				throw new SqliteStateError("invalid_input", `legacy retry item ${input.itemId} must own a direct-leaf seq`, {
 					itemId: input.itemId,
@@ -2434,27 +2426,27 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 						runId: rawInput.sourceRunId,
 					})
 				}
-				if (source.state !== "pending") {
-					throw new SqliteStateError("invalid_input", `legacy trigger source ${source.runtime_node_id} is already ${source.state}`, {
+					if (source.state !== "pending") {
+						throw new SqliteStateError("invalid_input", `legacy trigger source ${source.runtime_node_id} is already ${source.state}`, {
 						runId: rawInput.sourceRunId,
 						runtimeNodeId: source.runtime_node_id,
-						state: source.state,
-					})
-				}
-				if (!taskLeafStructurallyReady(tree.root, source.runtime_node_id)) {
-					throw new SqliteStateError("invalid_input", `legacy trigger source ${source.runtime_node_id} is not structurally ready`, {
+							state: source.state,
+						})
+					}
+					const itemRoot = itemTaskRoot(tree.root, rawInput.itemId)
+					if (!taskLeafStructurallyReady(itemRoot, source.runtime_node_id)) {
+						throw new SqliteStateError("invalid_input", `legacy trigger source ${source.runtime_node_id} is not structurally ready`, {
 						runId: rawInput.sourceRunId,
-						runtimeNodeId: source.runtime_node_id,
-					})
-				}
-				if (taskTransitionStructuralSuccessor(tree.root, source.runtime_node_id) !== null) {
-					throw new SqliteStateError("invalid_input", `legacy trigger source ${source.runtime_node_id} is not structurally terminal`, {
+							runtimeNodeId: source.runtime_node_id,
+						})
+					}
+					if (taskTransitionStructuralSuccessor(itemRoot, source.runtime_node_id) !== null) {
+						throw new SqliteStateError("invalid_input", `legacy trigger source ${source.runtime_node_id} is not structurally terminal`, {
 						runId: rawInput.sourceRunId,
-						runtimeNodeId: source.runtime_node_id,
-					})
-				}
-				const itemRoot = itemTaskRoot(tree.root, rawInput.itemId)
-				if (itemRoot.kind !== "seq" || itemRoot.children.length === 0) {
+							runtimeNodeId: source.runtime_node_id,
+						})
+					}
+					if (itemRoot.kind !== "seq" || itemRoot.children.length === 0) {
 					throw new SqliteStateError("invalid_input", `legacy trigger item ${rawInput.itemId} must own a direct-leaf seq`, {
 						itemId: rawInput.itemId,
 						rootNodeId: itemRoot.identity.runtimeNodeId,
@@ -2490,54 +2482,45 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					throw new SqliteStateError("run_closure_mismatch", `legacy trigger seq contains a leaf owned by item ${foreignLeaf.closure.itemRowId}`, {
 						itemId: rawInput.itemId,
 						foreignItemId: foreignLeaf.closure.itemRowId,
-						runtimeNodeId: foreignLeaf.identity.runtimeNodeId,
-					})
-				}
-				if (tree.root.kind !== "par" || tree.root.state !== "open") {
-					throw new SqliteStateError("invalid_input", `legacy trigger source ${source.runtime_node_id} requires an open chain par root`, {
-						itemId: rawInput.itemId,
-						rootNodeId: tree.root.identity.runtimeNodeId,
-						rootKind: tree.root.kind,
-						rootState: tree.root.kind === "par" ? tree.root.state : null,
-					})
-				}
-				const currentItem = requireItem(getItemRow(rawInput.itemId), rawInput.itemId)
-				if (
-					(assertedTrigger.state ?? "pending") !== "pending"
-					|| assertedTrigger.closure.itemRowId !== rawInput.itemId
-					|| assertedTrigger.closure.itemId !== currentItem.itemId
-					|| assertedTrigger.closure.sourceParNodeId !== tree.root.identity.runtimeNodeId
-					|| assertedTrigger.identity.definitionRef.kind !== finalChild.identity.definitionRef.kind
-					|| assertedTrigger.identity.definitionRef.contentIdentity !== finalChild.identity.definitionRef.contentIdentity
-				) {
+							runtimeNodeId: foreignLeaf.identity.runtimeNodeId,
+						})
+					}
+					const currentItem = requireItem(getItemRow(rawInput.itemId), rawInput.itemId)
+					if (
+						(assertedTrigger.state ?? "pending") !== "pending"
+						|| assertedTrigger.closure.itemRowId !== rawInput.itemId
+						|| assertedTrigger.closure.itemId !== currentItem.itemId
+						|| assertedTrigger.closure.sourceParNodeId !== null
+						|| assertedTrigger.identity.definitionRef.kind !== finalChild.identity.definitionRef.kind
+						|| assertedTrigger.identity.definitionRef.contentIdentity !== finalChild.identity.definitionRef.contentIdentity
+					) {
 					throw new SqliteStateError("run_closure_mismatch", `legacy trigger leaf ${assertedTrigger.identity.runtimeNodeId} does not match its source item and definition`, {
 						itemId: rawInput.itemId,
-						triggerItemId: assertedTrigger.closure.itemRowId,
-						triggerOpaqueItemId: assertedTrigger.closure.itemId,
-						sourceParNodeId: assertedTrigger.closure.sourceParNodeId,
-						expectedSourceParNodeId: tree.root.identity.runtimeNodeId,
-					})
-				}
-				const index = queryPersistedOne(
-					db,
-					"SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root",
-					{ root: tree.root.identity.runtimeNodeId },
-					NextChildIndexRowBoundary,
-					`next child index for ${tree.root.identity.runtimeNodeId}`,
-				)
-				if (index === null) {
-					throw new SqliteStateError("invalid_json", `task root ${tree.root.identity.runtimeNodeId} has no child index`, {
-						chainId: source.chain_id,
-					})
-				}
-				insertTaskNode(
-					db,
-					source.chain_id,
-					tree.root.identity.runtimeNodeId,
-					index.next_index,
-					assertedTrigger,
-					tree.root.identity.runtimeNodeId,
-				)
+							triggerItemId: assertedTrigger.closure.itemRowId,
+							triggerOpaqueItemId: assertedTrigger.closure.itemId,
+							sourceParNodeId: assertedTrigger.closure.sourceParNodeId,
+							expectedSourceParNodeId: null,
+						})
+					}
+					const index = queryPersistedOne(
+						db,
+						"SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root",
+						{ root: itemRoot.identity.runtimeNodeId },
+						NextChildIndexRowBoundary,
+						`next child index for ${itemRoot.identity.runtimeNodeId}`,
+					)
+					if (index === null) {
+						throw new SqliteStateError("invalid_json", `item task root ${itemRoot.identity.runtimeNodeId} has no child index`, {
+							chainId: source.chain_id,
+						})
+					}
+					insertTaskNode(
+						db,
+						source.chain_id,
+						itemRoot.identity.runtimeNodeId,
+						index.next_index,
+						assertedTrigger,
+					)
 				const transition = insertTaskTransition(input, source.runtime_node_id)
 				db.query<never, SqlParams>("UPDATE task_leaf_nodes SET state = 'completed' WHERE runtime_node_id = $nodeId").run({
 					nodeId: source.runtime_node_id,
@@ -2571,7 +2554,8 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				})
 			}
 			const tree = requireTaskTree(db, source.chain_id)
-			if (!taskLeafStructurallyReady(tree.root, input.runtimeNodeId)) {
+			const itemRoot = itemTaskRoot(tree.root, input.itemId)
+			if (!taskLeafStructurallyReady(itemRoot, input.runtimeNodeId)) {
 				throw new SqliteStateError("invalid_input", `task leaf ${input.runtimeNodeId} is not structurally ready`, {
 					itemId: input.itemId,
 					runtimeNodeId: input.runtimeNodeId,
@@ -2915,24 +2899,12 @@ function insertDefinition(db: Database, definition: ExecutionDefinitionRef): voi
 	db.query<never, SqlParams>("INSERT OR IGNORE INTO execution_definitions (kind, content_identity, semantic_hash, schema_version) VALUES ($kind, $identity, $identity, 1)").run({ kind: definition.kind, identity: definition.contentIdentity })
 }
 
-function firstTaskClosure(node: TaskNodeSnapshot): ClosureSnapshot {
-	switch (node.kind) {
-		case "leaf": return node.closure
-		case "seq":
-		case "par": {
-			const first = node.children[0]
-			if (first === undefined) throw new SqliteStateError("invalid_input", `task container ${node.identity.runtimeNodeId} has no children`)
-			return firstTaskClosure(first)
-		}
-		default: return assertNever(node)
-	}
-}
-
 function advanceCompletedTaskAncestors(db: Database, nodeId: string): void {
 	const relation = queryPersistedOne(db, "SELECT parent_node_id FROM task_nodes WHERE runtime_node_id = $nodeId", { nodeId }, TaskParentRowBoundary, `task parent ${nodeId}`)
 	const parentId = relation?.parent_node_id ?? null
 	if (parentId === null) return
 	const parent = readTaskNode(db, parentId)
+	if (isSyntheticChainTaskEnvelope(parent)) return
 	switch (parent.kind) {
 		case "leaf":
 			throw new SqliteStateError("invalid_json", `leaf ${parentId} cannot own task children`, { parentId })
@@ -3009,12 +2981,12 @@ function taskNodeRoute(node: TaskNodeSnapshot, runtimeNodeId: string): TaskNodeS
 }
 
 function itemTaskRoot(root: TaskNodeSnapshot, itemRowId: number): TaskNodeSnapshot {
-	if (root.kind === "leaf") {
-		if (root.closure.itemRowId === itemRowId) return root
-		throw new SqliteStateError("run_closure_mismatch", `item ${itemRowId} is absent from its task tree`, { itemRowId })
-	}
-	for (const child of root.children) {
-		if (taskNodeContainsItemRow(child, itemRowId)) return child
+	if (root.kind !== "leaf" && isSyntheticChainTaskEnvelope(root)) {
+		for (const child of root.children) {
+			if (taskNodeContainsItemRow(child, itemRowId)) return child
+		}
+	} else if (taskNodeContainsItemRow(root, itemRowId)) {
+		return root
 	}
 	throw new SqliteStateError("run_closure_mismatch", `item ${itemRowId} is absent from its task tree`, { itemRowId })
 }

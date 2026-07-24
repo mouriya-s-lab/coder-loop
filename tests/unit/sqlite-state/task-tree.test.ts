@@ -220,7 +220,7 @@ describe("sqlite state store", () => {
 		try {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
-			store.appendItemTaskTree(chain.id, twoPhaseLeafTree(item, `chain:${chain.id}:tasks`).root)
+			store.appendItemTaskTree(chain.id, twoPhaseLeafTree(item).root)
 			store.setItemSessionId(item.id, { phase: "iteration", runner: "codex", sessionId: "iteration-session", updatedAt: 1_800_000_210 })
 			store.setItemSessionId(item.id, { phase: "review", runner: "claude", sessionId: "review-session", updatedAt: 1_800_000_211 })
 
@@ -269,7 +269,8 @@ describe("sqlite state store", () => {
 			const retry = store.commitLegacyTaskRetry(retryInput)
 			expect(store.commitLegacyTaskRetry({ ...retryInput, createdAt: 1_800_000_217 })).toEqual(retry)
 			expect(store.getTaskTree(chain.id)?.root).toMatchObject({
-				kind: "par",
+				kind: "seq",
+				cursor: { kind: "complete" },
 				children: [{
 					kind: "seq",
 					cursor: { kind: "next", nodeId: `leaf-${item.id}-iteration` },
@@ -279,7 +280,8 @@ describe("sqlite state store", () => {
 
 			expect(store.commitTaskTransition({ ...iterationInput, createdAt: 1_800_000_218 })).toEqual(iterationOne)
 			expect(store.getTaskTree(chain.id)?.root).toMatchObject({
-				kind: "par",
+				kind: "seq",
+				cursor: { kind: "complete" },
 				children: [{
 					kind: "seq",
 					cursor: { kind: "next", nodeId: `leaf-${item.id}-iteration` },
@@ -302,7 +304,8 @@ describe("sqlite state store", () => {
 			})
 			expect(store.commitLegacyTaskRetry({ ...retryInput, createdAt: 1_800_000_222 })).toEqual(retry)
 			expect(store.getTaskTree(chain.id)?.root).toMatchObject({
-				kind: "par",
+				kind: "seq",
+				cursor: { kind: "complete" },
 				children: [{
 					kind: "seq",
 					cursor: { kind: "next", nodeId: `leaf-${item.id}-review` },
@@ -349,7 +352,8 @@ describe("sqlite state store", () => {
 				{ runId: "legacy-review-2", path: "legacy-status:review:done" },
 			])
 			expect(store.getTaskTree(chain.id)?.root).toMatchObject({
-				kind: "par",
+				kind: "seq",
+				cursor: { kind: "complete" },
 				children: [{
 					kind: "seq",
 					cursor: { kind: "complete" },
@@ -372,13 +376,12 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("legacy item trigger atomically completes its source, appends its exact durable target, replays once, and drains after trigger success", async () => {
+	test("legacy item trigger atomically completes its source, appends its exact durable item successor, and replays once", async () => {
 		const { store } = await openTestStore("legacy-item-trigger-commit")
 		try {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
-			const chainRootNodeId = `chain:${chain.id}:tasks`
-			store.appendItemTaskTree(chain.id, twoPhaseLeafTree(item, chainRootNodeId).root)
+			store.appendItemTaskTree(chain.id, twoPhaseLeafTree(item).root)
 			store.recordRun({
 				runId: "legacy-trigger-iteration",
 				chainId: chain.id,
@@ -423,7 +426,7 @@ describe("sqlite state store", () => {
 					worktreePath: "/repo/coder-loop",
 					branchName: `issue-${item.itemId}`,
 					baseCommit: "0123456789abcdef",
-					sourceParNodeId: chainRootNodeId,
+					sourceParNodeId: null,
 					sessions: [],
 				},
 			} as const
@@ -460,33 +463,33 @@ describe("sqlite state store", () => {
 				updatedAt: input.itemUpdate.updatedAt,
 			})
 			const committedTree = store.getTaskTree(chain.id)
-			if (committedTree?.root.kind !== "par") throw new Error("expected chain par after legacy trigger commit")
-			expect(committedTree.root.state).toBe("open")
+			if (committedTree?.root.kind !== "seq") throw new Error("expected chain storage envelope after legacy trigger commit")
 			expect(committedTree.root.children.map((node) => node.identity.runtimeNodeId)).toEqual([
 				`root-${item.id}`,
-				triggerRuntimeNodeId,
 			])
 			expect(committedTree.root.children).toMatchObject([
 				{
 					kind: "seq",
-					cursor: { kind: "complete" },
-					children: [{ state: "completed" }, { state: "completed" }],
-				},
-				{
-					kind: "leaf",
-					identity: triggerLeaf.identity,
-					state: "pending",
-					closure: triggerLeaf.closure,
+					cursor: { kind: "next", nodeId: triggerRuntimeNodeId },
+					children: [
+						{ state: "completed" },
+						{ state: "completed" },
+						{
+							kind: "leaf",
+							identity: triggerLeaf.identity,
+							state: "pending",
+							closure: triggerLeaf.closure,
+						},
+					],
 				},
 			])
 
 			expect(store.commitLegacyItemTrigger({ ...input, createdAt: 1_800_000_234 })).toEqual(committed)
 			expect(store.listTaskTransitions(chain.id).filter((transition) => transition.sourceRunId === input.sourceRunId)).toEqual([committed])
 			const replayedTree = store.getTaskTree(chain.id)
-			if (replayedTree?.root.kind !== "par") throw new Error("expected chain par after legacy trigger replay")
+			if (replayedTree?.root.kind !== "seq") throw new Error("expected chain storage envelope after legacy trigger replay")
 			expect(replayedTree.root.children.map((node) => node.identity.runtimeNodeId)).toEqual([
 				`root-${item.id}`,
-				triggerRuntimeNodeId,
 			])
 
 			store.recordRun({
@@ -515,11 +518,18 @@ describe("sqlite state store", () => {
 				},
 			})
 			expect(store.getTaskTree(chain.id)?.root).toMatchObject({
-				kind: "par",
-				state: "completed",
+				kind: "seq",
+				cursor: { kind: "complete" },
 				children: [
-					{ kind: "seq", cursor: { kind: "complete" } },
-					{ kind: "leaf", identity: { runtimeNodeId: triggerRuntimeNodeId }, state: "completed" },
+					{
+						kind: "seq",
+						cursor: { kind: "complete" },
+						children: [
+							{ state: "completed" },
+							{ state: "completed" },
+							{ kind: "leaf", identity: { runtimeNodeId: triggerRuntimeNodeId }, state: "completed" },
+						],
+					},
 				],
 			})
 		} finally {
@@ -533,8 +543,7 @@ describe("sqlite state store", () => {
 			const chain = createFullChain(store)
 			const sourceItem = createFullItem(store, chain)
 			const foreignItem = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
-			const chainRootNodeId = `chain:${chain.id}:tasks`
-			store.appendItemTaskTree(chain.id, twoPhaseLeafTree(sourceItem, chainRootNodeId).root)
+			store.appendItemTaskTree(chain.id, twoPhaseLeafTree(sourceItem).root)
 			store.recordRun({
 				runId: "legacy-trigger-owner-iteration",
 				chainId: chain.id,
@@ -589,7 +598,7 @@ describe("sqlite state store", () => {
 						worktreePath: "/repo/coder-loop",
 						branchName: `issue-${sourceItem.itemId}`,
 						baseCommit: "0123456789abcdef",
-						sourceParNodeId: chainRootNodeId,
+						sourceParNodeId: null,
 						sessions: [],
 					},
 				},
@@ -944,7 +953,7 @@ describe("sqlite state store", () => {
 			expectSqliteCode(() => store.createItemsWithTaskTrees(inputs, (item, index) => {
 				visited.push(index)
 				if (index === 1) return singleLeafTree(item).root
-				return twoPhaseLeafTree(item, `chain:${chain.id}:tasks`).root
+				return twoPhaseLeafTree(item).root
 			}), "invalid_input")
 
 			expect(visited).toEqual([0, 1])
@@ -965,7 +974,7 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("appending multiple item roots preserves the actual chain-root par identity", async () => {
+	test("appending multiple item roots preserves an inert chain storage envelope", async () => {
 		const { store } = await openTestStore("append-multiple-item-roots")
 		try {
 			const chain = createFullChain(store)
@@ -989,7 +998,7 @@ describe("sqlite state store", () => {
 						worktreePath: `/worktrees/${item.id}`,
 						branchName: `branch-${item.id}`,
 						baseCommit: "0123456789abcdef",
-						sourceParNodeId: `chain:${chain.id}:tasks`,
+						sourceParNodeId: null,
 						sessions: [],
 					},
 				}],
@@ -1013,12 +1022,17 @@ describe("sqlite state store", () => {
 					createdAt: 1_800_000_090,
 					itemUpdate: { kind: "none" },
 				})
-				expect(store.getTaskTree(chain.id)?.root).toMatchObject({ kind: "par", state: "completed" })
+				expect(store.getTaskTree(chain.id)?.root).toMatchObject({
+					kind: "seq",
+					cursor: { kind: "complete" },
+					identity: { runtimeNodeId: `chain:${chain.id}:tasks` },
+					children: [{ cursor: { kind: "complete" } }],
+				})
 				const appended = store.appendItemTaskTree(chain.id, itemRoot(second))
 
 				expect(appended.root).toMatchObject({
-					kind: "par",
-					state: "open",
+					kind: "seq",
+					cursor: { kind: "complete" },
 					identity: { runtimeNodeId: `chain:${chain.id}:tasks` },
 					children: [
 						{ identity: { runtimeNodeId: `item-${first.id}-root` }, cursor: { kind: "complete" } },

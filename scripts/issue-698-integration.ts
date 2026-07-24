@@ -23,6 +23,8 @@ import {
 	assertTaskTreeSnapshot,
 	collectReadyTaskLeaves,
 	decideClosureDispatch,
+	taskExecutionRoots,
+	taskNodeTerminal,
 	type ClosureSnapshot,
 	type TaskLeafNodeSnapshot,
 	type TaskNodeSnapshot,
@@ -844,6 +846,19 @@ function findTaskNode(node: TaskNodeSnapshot, definitionNodeId: string): TaskNod
 	return null
 }
 
+function taskNodeContainsItem(node: TaskNodeSnapshot, itemRowId: number): boolean {
+	if (node.kind === "leaf") return node.closure.itemRowId === itemRowId
+	return node.children.some((child) => taskNodeContainsItem(child, itemRowId))
+}
+
+function itemTaskRoot(tree: TaskTreeSnapshot, itemRowId: number): TaskNodeSnapshot | null {
+	return taskExecutionRoots(tree.root).find((root) => taskNodeContainsItem(root, itemRowId)) ?? null
+}
+
+function readyTaskLeaves(tree: TaskTreeSnapshot, activeClosureIds: ReadonlySet<string>): string[] {
+	return taskExecutionRoots(tree.root).flatMap((root) => collectReadyTaskLeaves(root, activeClosureIds))
+}
+
 function gitEventOperation(event: JsonObject): string | null {
 	const argv = event.argv
 	if (!Array.isArray(argv) || !argv.every((entry) => typeof entry === "string")) return null
@@ -865,8 +880,16 @@ async function waitForRunnerEvent(
 	return events.at(-1)!
 }
 
-async function waitForChainCompletion(ctx: RuntimeContext, chain: string, timeoutMs = 30_000): Promise<void> {
-	await until(() => chainStatus(ctx, chain), (status) => status === "completed", `${chain} completion`, timeoutMs)
+async function waitForItemTaskCompletion(ctx: RuntimeContext, chain: string, itemRowId: number, timeoutMs = 30_000): Promise<void> {
+	await until(
+		() => taskTree(ctx, chain),
+		(tree) => {
+			const root = itemTaskRoot(tree, itemRowId)
+			return root !== null && taskNodeTerminal(root)
+		},
+		`${chain} item ${itemRowId} task completion`,
+		timeoutMs,
+	)
 }
 
 function eventResult(event: RunnerEvent, key = "result"): CommandResult {
@@ -890,7 +913,7 @@ async function runC01(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	chains.push(chain)
 	const item = addItem(ctx, presets, chain, "c01-item", "c01", { stage: true })
 	const tree = taskTree(ctx, chain)
-	const ready = collectReadyTaskLeaves(tree.root, activeClosureIds(tree))
+	const ready = readyTaskLeaves(tree, activeClosureIds(tree))
 	const c01Preset = presets.c01
 	assert(c01Preset !== undefined, "C01 preset path is missing")
 	const compiled = await loadPreset(c01Preset)
@@ -908,7 +931,7 @@ async function runC01(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	writeEvidence(ctx, "C01-public-instantiation.json", { chain, item, tree, ready, runs: [] })
 	log("C01", `public add persisted tree=${tree.root.identity.runtimeNodeId} ready=${ready[0]} runs=0`)
 	await resumeChain(ctx, chain)
-	await waitForChainCompletion(ctx, chain)
+	await waitForItemTaskCompletion(ctx, chain, item.id)
 	assert(itemRow(ctx, chain, item.item_id).status === "done", "C01 item did not complete through its typed path")
 }
 
@@ -1058,7 +1081,7 @@ async function runC02C03(ctx: RuntimeContext, presets: Readonly<Record<string, s
 		"C03 successor prompt did not consume authoritative resolved bindings as one-pass values",
 	)
 	const cStart = await waitForRunnerEvent(ctx, { type: "start", scenario: "c03", item: item.item_id, phase: "c" })
-	await waitForChainCompletion(ctx, chain)
+	await waitForItemTaskCompletion(ctx, chain, item.id)
 	const finalTransitions = transitionRows(ctx, chain)
 	assert(finalTransitions.length === 3, `C03 expected one transition per leaf, got ${finalTransitions.length}`)
 	assert(finalTransitions.map((transition) => transition.path_id).join(",") === "advance,advance-b,finish-c", "C03 durable exit discovery did not follow the declared source nodes")
@@ -1086,7 +1109,7 @@ async function runC04C05C06C07(ctx: RuntimeContext, presets: Readonly<Record<str
 	const item = addItem(ctx, presets, chain, "c04-item", "c04")
 	const pinnedTree = taskTree(ctx, chain)
 	const pins = parRows(ctx, chain)
-	assert(pins.length === 3, `C07 expected chain, outer, inner par pins; got ${pins.length}`)
+	assert(pins.length === 2, `C07 expected authored outer and inner par pins; got ${pins.length}`)
 	assert(pins.every((row) => row.pin_commit === ctx.repository.commit), "C07 par pin differs from the exact local base commit")
 	const pinLeaves = leaves(pinnedTree.root).filter((leaf) => leaf.closure.itemRowId === item.id)
 	assert(pinLeaves.every((leaf) => leaf.closure.baseCommit === ctx.repository.commit), "C07 entry closure did not inherit its par pin")
@@ -1117,7 +1140,7 @@ async function runC04C05C06C07(ctx: RuntimeContext, presets: Readonly<Record<str
 		assert(String(started.prompt).includes("OUTER token=ok"), `C03/C05 container edge prompt did not reach recursively ready ${phase}`)
 	}
 	const overlapTree = taskTree(ctx, chain)
-	const structuralReady = collectReadyTaskLeaves(overlapTree.root, new Set())
+	const structuralReady = readyTaskLeaves(overlapTree, new Set())
 	const liveIds = new Set(overlapTree.activeRuns.map((run) => {
 		const leaf = leaves(overlapTree.root).find((candidate) => candidate.closure.closureId === run.closureId)
 		assert(leaf !== undefined, `C04 active closure ${run.closureId} has no leaf`)
@@ -1186,8 +1209,8 @@ async function runC04C05C06C07(ctx: RuntimeContext, presets: Readonly<Record<str
 	assert(drainedInner?.kind === "par" && drainedInner.state === "completed", "C05 inner par did not drain")
 	assert(drainedOuter?.kind === "par" && drainedOuter.state === "completed", "C05 outer par did not drain")
 	release(ctx, "c04", item.item_id, "e")
-	await waitForChainCompletion(ctx, chain)
-	assert(collectReadyTaskLeaves(taskTree(ctx, chain).root, new Set()).length === 0, "C05 complete tree still has a ready leaf")
+	await waitForItemTaskCompletion(ctx, chain, item.id)
+	assert(readyTaskLeaves(taskTree(ctx, chain), new Set()).length === 0, "C05 complete item tree still has a ready leaf")
 	writeEvidence(ctx, "C04-C07-overlap-drain.json", { chain, runs: runRows(ctx, chain), finalTree: taskTree(ctx, chain), deniedEvents, gitThroughDispatch })
 	log("C04", "same-repository b/c/d intervals overlapped")
 	log("C05", "nested inner/outer drain completed before seq successor e")
@@ -1205,7 +1228,7 @@ async function runC08(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	release(ctx, "c08per", perItem.item_id, "p2")
 	await waitForRunnerEvent(ctx, { type: "start", scenario: "c08per", item: perItem.item_id, phase: "p3" })
 	release(ctx, "c08per", perItem.item_id, "p3")
-	await waitForChainCompletion(ctx, perChain)
+	await waitForItemTaskCompletion(ctx, perChain, perItem.id)
 
 	const globalOne = createStagedChain(ctx, "c08-global-one", { maxConcurrency: 1 })
 	const globalTwo = createStagedChain(ctx, "c08-global-two", { maxConcurrency: 1 })
@@ -1231,8 +1254,8 @@ async function runC08(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	const secondItem = globalStarts.find((event) => event.item !== firstItem)?.item
 	assert(secondItem !== undefined, "C08 global limit never released the second chain")
 	release(ctx, "c08global", secondItem, "only")
-	await waitForChainCompletion(ctx, globalOne)
-	await waitForChainCompletion(ctx, globalTwo)
+	await waitForItemTaskCompletion(ctx, globalOne, globalOneItem.id)
+	await waitForItemTaskCompletion(ctx, globalTwo, globalTwoItem.id)
 
 	const unlimitedChain = createStagedChain(ctx, "c08-unlimited")
 	chains.push(unlimitedChain)
@@ -1241,7 +1264,7 @@ async function runC08(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	for (const phase of ["u1", "u2", "u3"]) await waitForRunnerEvent(ctx, { type: "start", scenario: "c08unlimited", item: unlimitedItem.item_id, phase })
 	assert(taskTree(ctx, unlimitedChain).activeRuns.length === 3, "C08 absence of global limit imposed an engine cap")
 	for (const phase of ["u1", "u2", "u3"]) release(ctx, "c08unlimited", unlimitedItem.item_id, phase)
-	await waitForChainCompletion(ctx, unlimitedChain)
+	await waitForItemTaskCompletion(ctx, unlimitedChain, unlimitedItem.id)
 	writeEvidence(ctx, "C08-limits.json", {
 		perPar: runRows(ctx, perChain),
 		global: [runRows(ctx, globalOne), runRows(ctx, globalTwo)],
@@ -1297,7 +1320,8 @@ async function runC09(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 		.filter((event) => asObject(event.payload, "C09 dependency-unblocked payload").rowId === terminalProbe.id)
 	assert(terminalProbeUnblocks.length === 0, "C09 already-terminal item emitted a reactivation event")
 	release(ctx, "c09", dependent.item_id, "only")
-	await waitForChainCompletion(ctx, chain)
+	await waitForItemTaskCompletion(ctx, chain, anchor.id)
+	await waitForItemTaskCompletion(ctx, chain, dependent.id)
 
 	const cycleChain = createUngatedChain(ctx, "c09-cycle")
 	chains.push(cycleChain)
@@ -1365,9 +1389,9 @@ async function runC10(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	const finalTree = taskTree(ctx, chain)
 	assert(leafByPhase(finalTree, item.id, "ok1").state === "completed", "C10 ok1 did not complete")
 	assert(leafByPhase(finalTree, item.id, "ok2").state === "completed", "C10 ok2 did not complete")
-	const itemRoot = findTaskNode(finalTree.root, "root")
-	assert(itemRoot?.kind === "par" && itemRoot.state === "completed", "C10 drain did not complete after terminal siblings")
-	await waitForChainCompletion(ctx, chain)
+	const completedItemRoot = itemTaskRoot(finalTree, item.id)
+	assert(completedItemRoot?.kind === "par" && completedItemRoot.state === "completed", "C10 drain did not complete after terminal siblings")
+	await waitForItemTaskCompletion(ctx, chain, item.id)
 	const persistedLeaves = leafRows(ctx, chain)
 	const finalRuns = runRows(ctx, chain)
 	assert(finalRuns.length === 3, `C10 expected exactly three member runs, got ${finalRuns.length}`)
@@ -1421,13 +1445,14 @@ async function runC11(ctx: RuntimeContext, presets: Readonly<Record<string, stri
 	const terminal = await waitForRunnerEvent(ctx, { type: "legacy-terminal", scenario: "c11", item: item.item_id, phase: "review", attempt: 2 })
 	assert(terminal.resumed === true, "C11 final review did not resume the retry review session")
 	assert(eventResult(terminal).exitCode === 0, `C11 final legacy status failed: ${eventResult(terminal).stderr}`)
-	await waitForChainCompletion(ctx, chain, 30_000)
+	await waitForItemTaskCompletion(ctx, chain, item.id, 30_000)
 	const runs = runRows(ctx, chain)
 	assert(runs.map((run) => run.phase).join(",") === "iteration,iteration,review,iteration,review", `C11 phase order changed: ${runs.map((run) => run.phase).join(",")}`)
 	assert(itemRow(ctx, chain, item.item_id).attempts === 1, "C11 session retry or successor incorrectly consumed another attempt")
 	assert(itemRow(ctx, chain, item.item_id).status === "done", "C11 final legacy status did not complete the item")
 	const finalTree = taskTree(ctx, chain)
-	assert(finalTree.root.kind === "par" && finalTree.root.state === "completed", "C11 chain drain did not reach completed")
+	const finalItemRoot = itemTaskRoot(finalTree, item.id)
+	assert(finalItemRoot !== null && taskNodeTerminal(finalItemRoot), "C11 item declaration tree did not reach terminal")
 	assert(leafByPhase(finalTree, item.id, "iteration").state === "completed", "C11 final iteration leaf is not completed")
 	assert(leafByPhase(finalTree, item.id, "review").state === "completed", "C11 final review leaf is not completed")
 	const transitions = transitionRows(ctx, chain)
