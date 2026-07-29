@@ -6,7 +6,10 @@
 		"coder-loop": "src/loop.ts"
 	},
 	"scripts": {
-		"typecheck": "bun x tsc --noEmit"
+		"typecheck": "bun x tsc --noEmit",
+		"test:unit": "bun test",
+		"test:integration": "bun scripts/run-tests.ts --integration",
+		"test:all": "bun scripts/run-tests.ts"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",

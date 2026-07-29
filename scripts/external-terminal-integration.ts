@@ -2,14 +2,13 @@
 
 import { randomUUID } from "node:crypto"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import { closeSync, existsSync, openSync } from "node:fs"
 import { resolve } from "node:path"
 
 import { type as arkType } from "arktype"
 
 import { parseObservabilityEvent, type ObservabilityEvent } from "../src/observability"
-import { externalTerminalHold, externalTerminalLoss } from "../src/runtime-data"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "../src/runtime-paths"
 import { openSqliteStateStore, type CurrentRunRecord, type ItemRecord, type RunRecord } from "../src/sqlite-state"
 
@@ -78,10 +77,6 @@ type RunnerScenario = {
 	itemId: string
 }
 
-type RunnerObservationPaths = {
-	invocationLogPath: string
-	postRevokePath: string
-}
 
 type TransitionSqliteEvidence = {
 	item: ItemRecord | null
@@ -248,14 +243,6 @@ while :; do sleep 1 || true; done
 	await chmod(harness.binaryPath, 0o755)
 }
 
-function runnerObservationPaths(harness: Harness, chainId: number, itemId: string): RunnerObservationPaths {
-	const item = storeRead(harness, (store) => store.getItemById(chainId, itemId))
-	invariant(item?.agentCwd !== null && item?.agentCwd !== undefined, `runner task cwd missing for item ${itemId}`)
-	return {
-		invocationLogPath: resolve(item.agentCwd, "runner-invocations.log"),
-		postRevokePath: resolve(item.agentCwd, "post-revoke.json"),
-	}
-}
 
 async function startDaemon(workDir: string, shimDir: string): Promise<DaemonHandle> {
 	const loopDataRoot = resolve(workDir, "loop-data")
@@ -387,92 +374,6 @@ function retainTransitionEvidence(harness: Harness, transition: string, chainNam
 	log(`evidence ${JSON.stringify(evidence)}`)
 }
 
-async function scenarioMissingRestorationLoss(harness: Harness): Promise<number> {
-	const chainName = `external-loss-${randomUUID()}`
-	const stoppedSiblingChainName = `external-loss-stopped-sibling-${randomUUID()}`
-	const itemId = "loss-first"
-	const stoppedSiblingItemId = "stopped-sibling"
-	await rm(harness.binaryPath, { force: true })
-	await writeFile(harness.probeStatePath, "69")
-	createChain(harness, chainName)
-	addItem(harness, chainName, itemId)
-
-	const missing = await waitFor("missing-binary hold", () => readStatus(harness, chainName), (status) => status.queue.holds.length === 1)
-	const missingHold = missing.queue.holds[0]
-	invariant(missingHold?.availability.kind === "unavailable" && missingHold.availability.reason === "binary-missing", `unexpected missing hold: ${JSON.stringify(missingHold)}`)
-	invariant(missing.runs.total === 0 && missing.current.run === null, "missing-binary created run/current-run")
-	const id = chainId(harness, chainName)
-	const missingItem = storeRead(harness, (store) => store.getItemById(id, itemId))
-	invariant(missingItem !== null && missingItem.attempts === 0 && missingItem.lastRunId === null, "missing-binary changed attempts or lastRunId")
-	invariant(storeRead(harness, (store) => store.listRuns(id).length) === 0, "missing-binary persisted a run")
-	invariant(storeRead(harness, (store) => store.getCurrentRun(id)) === null, "missing-binary persisted current-run")
-	await assertNoSpawnArtifacts(harness, chainName)
-	const missingEvents = readEvents(harness, chainName)
-	const warnings = externalWarnings(missingEvents)
-	invariant(warnings.length === 1, `missing-binary warning count was ${warnings.length}, expected 1`)
-	const warning = warnings[0]
-	invariant(warning !== undefined && "code" in warning.payload && warning.payload.affected.length === 1 && warning.payload.affected[0]?.itemId === itemId, "missing-binary warning payload did not identify the affected item")
-	invariant(!hasBackoff(missingEvents), "missing-binary emitted spawn-failure backoff")
-
-	createChain(harness, stoppedSiblingChainName)
-	addItem(harness, stoppedSiblingChainName, stoppedSiblingItemId)
-	const stoppedSiblingProjected = await waitFor("stopped sibling missing-binary hold", () => readStatus(harness, stoppedSiblingChainName), (status) => status.queue.holds.length === 1)
-	invariant(stoppedSiblingProjected.queue.holds[0]?.itemId === stoppedSiblingItemId, `stopped sibling status projected the wrong hold: ${JSON.stringify(stoppedSiblingProjected.queue.holds)}`)
-	const stoppedSiblingId = chainId(harness, stoppedSiblingChainName)
-	const stoppedSiblingHeld = storeRead(harness, (store) => store.getItemById(stoppedSiblingId, stoppedSiblingItemId))
-	invariant(stoppedSiblingHeld !== null && externalTerminalHold(stoppedSiblingHeld.extra) !== null, "stopped sibling hold was not durable before stop")
-	const initialWarnings = externalWarnings([...missingEvents, ...readEvents(harness, stoppedSiblingChainName)])
-	invariant(initialWarnings.length === 1, `shared endpoint emitted ${initialWarnings.length} initial warnings, expected 1`)
-	stopChain(harness, stoppedSiblingChainName)
-	log("scenario missing-binary: active and future-stopped sibling projected durable holds; shared endpoint emitted one warning")
-
-	await writeRunner(harness, { mode: "loss", chainName, itemId })
-	await writeFile(harness.probeStatePath, "0")
-	const current = await waitFor("automatic restoration spawn", () => storeRead(harness, (store) => store.getCurrentRun(id)), (value) => value !== null, 15_000)
-	invariant(current !== null, "restoration did not create a current run")
-	const observations = runnerObservationPaths(harness, id, itemId)
-	const restoredStatus = readStatus(harness, chainName)
-	invariant(restoredStatus.queue.holds.length === 0, "restoration left a durable hold")
-	const restoredMainItem = storeRead(harness, (store) => store.getItemById(id, itemId))
-	const restoredSiblingItem = storeRead(harness, (store) => store.getItemById(stoppedSiblingId, stoppedSiblingItemId))
-	invariant(restoredMainItem !== null && externalTerminalHold(restoredMainItem.extra) === null, "restoration retained the active chain hold")
-	invariant(restoredSiblingItem !== null && externalTerminalHold(restoredSiblingItem.extra) === null, "restoration retained the stopped sibling hold")
-	const restoredEvents = [...readEvents(harness, chainName), ...readEvents(harness, stoppedSiblingChainName)]
-	invariant(restorationEvents(restoredEvents).length === 1, "shared endpoint restoration transition was not emitted exactly once")
-	invariant(storeRead(harness, (store) => store.getItemById(id, itemId)?.attempts ?? -1) === 1, "automatic spawn did not increment the fresh attempt exactly once")
-	log(`scenario restoration: active status projection and both durable holds cleared with one transition; run ${current.runId} spawned`)
-
-	const invocation = await waitFor("fake runner invocation", async () => existsSync(observations.invocationLogPath) ? await readFile(observations.invocationLogPath, "utf-8") : "", (value) => value.includes("spawn pid="))
-	const pidMatch = invocation.match(/spawn pid=(\d+)/)
-	invariant(pidMatch?.[1] !== undefined, `runner PID missing from invocation log: ${invocation}`)
-	const runnerPid = Number.parseInt(pidMatch[1], 10)
-	harness.runnerPids.add(runnerPid)
-	const lossStartedAt = Date.now()
-	await writeFile(harness.probeStatePath, "69")
-	await waitFor("loss latch and close", () => storeRead(harness, (store) => store.getRunByRunId(current.runId)), (run) => run?.endedAt !== null, 20_000)
-	const lostRun = storeRead(harness, (store) => store.getRunByRunId(current.runId))
-	const loss = lostRun === null ? null : externalTerminalLoss(lostRun.extra)
-	invariant(loss?.kind === "lost" && loss.reason === "endpoint-unavailable" && loss.terminationPhase === "closed", `loss attribution mismatch: ${JSON.stringify(loss)}`)
-	const restoredItem = storeRead(harness, (store) => store.getItemById(id, itemId))
-	invariant(restoredItem !== null && restoredItem.status === "pending" && restoredItem.phase === null && restoredItem.attempts === 0, `loss did not restore pre-run tuple: ${JSON.stringify(restoredItem)}`)
-	invariant(restoredItem.sessionIds.iteration?.hapi === undefined, "loss retained the external session id")
-	invariant(storeRead(harness, (store) => store.getCurrentRun(id)) === null, "loss retained current-run")
-	const lossEvents = readEvents(harness, chainName)
-	const warningsAfterReloss = externalWarnings([...lossEvents, ...readEvents(harness, stoppedSiblingChainName)])
-	invariant(warningsAfterReloss.length === initialWarnings.length + 1, `endpoint re-loss emitted ${warningsAfterReloss.length - initialWarnings.length} new warnings, expected 1`)
-	const relossWarning = warningsAfterReloss.at(-1)
-	invariant(relossWarning !== undefined && "code" in relossWarning.payload && relossWarning.payload.availability.reason === "endpoint-unavailable", `endpoint re-loss warning was not typed endpoint-unavailable: ${JSON.stringify(relossWarning)}`)
-	invariant(!hasBackoff(lossEvents), "loss entered spawn-failure backoff")
-	const termLog = await readFile(observations.invocationLogPath, "utf-8")
-	invariant(termLog.includes(`term pid=${runnerPid}`), "loss did not deliver TERM to the fake runner")
-	const revoked = await readFile(observations.postRevokePath, "utf-8")
-	invariant(/invalid_caller|unknown credential|did not match any active run/.test(revoked), `runner credential remained admitted after loss: ${revoked}`)
-	invariant(!processExists(runnerPid), `runner ${runnerPid} survived TERM/grace/KILL`)
-	invariant(Date.now() - lossStartedAt >= 4_000, "loss runner closed before the configured grace could exercise SIGKILL")
-	log(`scenario loss-first: run=${current.runId} pid=${runnerPid}; one new typed warning, credential revoked, TERM/grace/KILL closed process, tuple/session/current restored`)
-	stopChain(harness, chainName)
-	return runnerPid
-}
 
 async function scenarioProbeFailure(harness: Harness, scenario: "unexpected-exit" | "signal" | "deadline-exceeded"): Promise<void> {
 	const state = scenario === "unexpected-exit" ? "2" : scenario === "signal" ? "signal" : "deadline"
@@ -535,7 +436,7 @@ async function scenarioAvailabilityPending(harness: Harness): Promise<void> {
 
 	await writeRunner(harness, { mode: "loss", chainName, itemId })
 	await writeFile(harness.probeStatePath, "0")
-	const pendingEvent = await waitFor("invocation-pending diagnostic", () => readEvents(harness, chainName), (events) => events.find((event) => event.type === "runner.invocation_pending") ?? null)
+	const pendingEvent = await waitFor("invocation-pending diagnostic", () => readEvents(harness, chainName), (events) => events.some((event) => event.type === "runner.invocation_pending"))
 	invariant(pendingEvent !== null, "available endpoint did not reach invocation-pending gate")
 	const restored = readStatus(harness, chainName)
 	invariant(restored.queue.holds.length === 0, "restoration retained endpoint-absence hold")
@@ -549,58 +450,6 @@ async function scenarioAvailabilityPending(harness: Harness): Promise<void> {
 	stopChain(harness, chainName)
 }
 
-async function scenarioTerminalFirst(harness: Harness): Promise<void> {
-	const chainName = `external-terminal-first-${randomUUID()}`
-	const itemId = "terminal-first"
-	const witnessItemId = "terminal-first-loss-witness"
-	await rm(harness.probeLogPath, { force: true })
-	await rm(harness.terminalCommitPath, { force: true })
-	await rm(harness.terminalReleasePath, { force: true })
-	await writeFile(harness.probeStatePath, "0")
-	await writeRunner(harness, { mode: "terminal", chainName, itemId })
-	createChain(harness, chainName)
-	addItem(harness, chainName, itemId)
-	const id = chainId(harness, chainName)
-	await waitFor("terminal-first current run", () => storeRead(harness, (store) => store.getCurrentRun(id)), (current) => current !== null)
-	const observations = runnerObservationPaths(harness, id, itemId)
-	const invocation = await waitFor("terminal-first runner observation", async () => existsSync(observations.invocationLogPath) ? await readFile(observations.invocationLogPath, "utf-8") : "", (value) => value.includes("spawn pid="))
-	const pidMatch = invocation.match(/spawn pid=(\d+)/)
-	invariant(pidMatch?.[1] !== undefined, `terminal-first runner PID missing from invocation log: ${invocation}`)
-	const runnerPid = Number.parseInt(pidMatch[1], 10)
-	harness.runnerPids.add(runnerPid)
-	invariant(processExists(runnerPid), `terminal-first runner ${runnerPid} exited before the terminal race`)
-	await writeFile(harness.terminalCommitPath, "commit\n")
-	await waitFor("terminal-first runner update acknowledgement", async () => await readFile(observations.invocationLogPath, "utf-8"), (value) => /"status"\s*:\s*"done"/.test(value))
-	const statusEvent = await waitFor("terminal-first daemon item.status acknowledgement", () => readEvents(harness, chainName), (events) => events.some((event) => event.kind === "audit" && event.type === "item.status" && event.runId !== undefined && event.payload.itemId === itemId && event.payload.fromStatus === "pending" && event.payload.toStatus === "done"))
-	const terminal = await waitFor("terminal-first status commit", () => storeRead(harness, (store) => store.getItemById(id, itemId)), (item) => item?.status === "done", 15_000)
-	invariant(terminal !== null, "terminal-first item disappeared")
-	const acknowledgedStatus = statusEvent.find((event) => event.kind === "audit" && event.type === "item.status" && event.payload.itemId === itemId && event.payload.toStatus === "done")
-	invariant(acknowledgedStatus?.runId === storeRead(harness, (store) => store.getCurrentRun(id))?.runId, "terminal-first status acknowledgement did not belong to the active run")
-	invariant(processExists(runnerPid), `terminal-first runner ${runnerPid} exited after the acknowledged terminal commit`)
-	const warningsBeforeWitness = externalWarnings(readEvents(harness, chainName)).length
-	const probeLogBeforeWitness = await readFile(harness.probeLogPath, "utf-8")
-	const exit69ProbesBeforeWitness = probeLogBeforeWitness.split("\n").filter((line) => line.startsWith("probe state=69 ")).length
-	await writeFile(harness.probeStatePath, "69")
-	addItem(harness, chainName, witnessItemId)
-	await waitFor("terminal-first witness endpoint-unavailable probe", async () => await readFile(harness.probeLogPath, "utf-8"), (value) => value.split("\n").filter((line) => line.startsWith("probe state=69 ")).length > exit69ProbesBeforeWitness)
-	const witness = await waitFor("terminal-first witness durable hold", () => storeRead(harness, (store) => store.getItemById(id, witnessItemId)), (item) => externalTerminalHold(item?.extra ?? {})?.availability.reason === "endpoint-unavailable")
-	invariant(witness !== null, "terminal-first witness disappeared")
-	await waitFor("terminal-first witness typed warning", () => readEvents(harness, chainName), (events) => externalWarnings(events).length === warningsBeforeWitness + 1 && externalWarnings(events).some((event) => event.payload.affected.some((affected) => affected.itemId === witnessItemId)))
-	const racedItem = storeRead(harness, (store) => store.getItemById(id, itemId))
-	const racedRuns = storeRead(harness, (store) => store.listRuns(id))
-	invariant(racedItem?.status === "done" && externalTerminalHold(racedItem.extra) === null, `terminal-first item changed after witness loss: ${JSON.stringify(racedItem)}`)
-	invariant(racedRuns.length === 1 && externalTerminalLoss(racedRuns[0]!.extra) === null, "terminal-first run acquired a loss attribution after witness loss")
-	invariant(storeRead(harness, (store) => store.getCurrentRun(id))?.runId === racedRuns[0]?.runId, "terminal-first current run disappeared before explicit release")
-	invariant(processExists(runnerPid), `terminal-first runner ${runnerPid} exited before explicit release`)
-	await writeFile(harness.terminalReleasePath, "release\n")
-	await waitFor("terminal-first run close", () => storeRead(harness, (store) => store.listRuns(id)), (value) => value.length === 1 && value[0]?.endedAt !== null)
-	const finalItem = storeRead(harness, (store) => store.getItemById(id, itemId))
-	const runs = storeRead(harness, (store) => store.listRuns(id))
-	invariant(finalItem?.status === "done" && externalTerminalHold(finalItem.extra) === null, `terminal-first item changed after close: ${JSON.stringify(finalItem)}`)
-	invariant(runs.length === 1 && externalTerminalLoss(runs[0]!.extra) === null, "terminal-first run acquired a loss attribution after terminal commit")
-	invariant(externalTerminalHold(storeRead(harness, (store) => store.getItemById(id, witnessItemId))?.extra ?? {})?.availability.reason === "endpoint-unavailable", "terminal-first witness lost its durable hold")
-	log(`scenario terminal-first: run=${runs[0]?.runId ?? "missing"} pid=${runnerPid}; daemon acknowledged done, witness recorded endpoint loss, original retained terminal status with no loss/hold`)
-}
 
 function processExists(pid: number): boolean {
 	try {

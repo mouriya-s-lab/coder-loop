@@ -56,7 +56,6 @@ import {
 	withSchedulerSpawnError as withItemSchedulerSpawnError,
 	withExternalTerminalHold,
 	withExternalTerminalLoss,
-	type AdmittedItemStatus,
 	type InternalStatus,
 	type ExternalTerminalLossFact,
 	type SchedulerBackoffState,
@@ -79,11 +78,7 @@ import { createStreamTextState } from "./runner-output"
 import { gateResolvedRunnerAvailability, probeResolvedExternalTerminal, runnerExecutionDomain, runnerInvocationCapability, type ExternalTerminalAvailability, type RunnerInvocationCapability } from "./runner-execution"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
-// The previous "per-run nonce summary tag" prompt injection + stdout watchdog
-// (retired here together with `summaryInstructionFor`, `makeRunSummaryTag`,
-// `extractSummaryValue`, the close-marker observe-stdout state machine, and the
-// `watchdogGraceMs`/`watchdogKillMs` knobs) gated completion on the agent emitting
-// a particular string. Under the unified completion protocol (#451) the agent
+// Under the unified completion protocol (#451) the agent
 // writes status through the daemon-serialised `coder-loop item update` path, and
 // the daemon hands the scheduler a `markRunPendingRecycle(runId)` signal at that
 // moment — that is the only thing the engine treats as "this run is done"; stdout
@@ -1947,8 +1942,8 @@ type SchedulerRunLifecycleGc = {
 	terminatorCleanup: (() => void) | null
 }
 
-// #452 lifecycle GC. The retired stdout-driven summary watchdog used to live here; the
-// replacement is a recycle zone armed by the daemon via `markRunPendingRecycle(runId)`.
+// #452 lifecycle GC. The recycle zone is armed by the daemon via
+// `markRunPendingRecycle(runId)`.
 //
 // Two parallel timers:
 //   1. Attempt timeout (`attemptTimeoutMs`) — unchanged baseline floor. Catches runs that
@@ -2619,11 +2614,6 @@ function stableJsonStringify(value: JsonValue): string {
 	return JSON.stringify(value)
 }
 
-function jsonObject(value: JsonValue | undefined): JsonObject | null {
-	if (value === undefined || value === null || Array.isArray(value) || typeof value !== "object") return null
-	return value
-}
-
 async function schedulerStatusesForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerChainStatuses> {
 	const { preset } = await schedulerLoadedPreset(options, chain)
 	return statusesFromPreset(preset)
@@ -2974,10 +2964,6 @@ function buildSchedulerChainBindings(chain: ChainRecord): JsonObject {
 		baseBranch: chain.baseBranch,
 		...metadataBindings(chain.metadata),
 	}
-}
-
-function resolveFrom(base: string, path: string): string {
-	return isAbsolute(path) ? path : resolve(base, path)
 }
 
 function resolveItemEvidenceDir(item: ItemRecord, chainRoot: string, fallback: string): string {

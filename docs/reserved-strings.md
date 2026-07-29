@@ -23,10 +23,8 @@ Review's terminal action flows through the typed phase-exits selection face (`co
 ## Preset-Declared Strings
 
 Presets currently declare no stdout control strings. The engine does not
-read any per-phase stdout marker: post-summary watchdog was replaced by the
-recycle zone in #452 (armed by the daemon on admissible-status write, not
-by stdout content), and the `PresetPhase.summaryMarker` field was retired
-in #456. Any informational summary line an author writes into an entry
+read any per-phase stdout marker. Process recycling is armed by the daemon
+on admissible-status writes and never by stdout content. Any informational summary line an author writes into an entry
 prompt is just prose for downstream readers — the engine does not parse
 it, and no such literal is a reserved string.
 
@@ -36,5 +34,5 @@ it, and no such literal is a reserved string.
   marker/sentinel or preset-declared marker that may appear in agent stdout.
 - Update `presets/gh-issue-pr-iteration/contract.md` when preset issue-writing
   rules change.
-- Run `bun test src/loop.test.ts` after changing this file or the marker
+- Run `bun test tests/unit/loop/runtime-bindings.test.ts` after changing this file or the marker
   declaration mechanism.

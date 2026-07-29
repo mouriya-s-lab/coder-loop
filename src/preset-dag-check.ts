@@ -36,7 +36,7 @@
 // observability callback per finding, and throws on error verdicts.
 
 import type { InternalStatus } from "./runtime-data"
-import type { Preset, PresetPhase, PresetPhaseExit, PresetPhaseTrigger } from "./loop"
+import type { Preset, PresetPhase, PresetPhaseTrigger } from "./loop"
 
 // #408 finding ADT. Two named variants, discriminated on `kind` + `verdict`.
 // Both surface the same `table` literal (`"statuses.continuable"`) because the

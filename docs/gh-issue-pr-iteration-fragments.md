@@ -100,7 +100,7 @@ trigger 角色（blocked-responder / umbrella-finalizer）任务简单，未调�
 - `review/actions/{accept-pr,accept-no-pr,retry,expand-parent,skip,blocked,stop}` — 终局动作（调度者按 verdict 只读其一并亲自执行副作用）
 - `review/actions/state-write` — `coder-loop item update` 状态写出与 expand 队列规则
 
-fragment 总数 = 5 + 3 + 8 + 13 = 29，与 `preset.toml` 的 `[[fragments]]` 块数和 `src/preset.test.ts` 的 `EXPECTED_FRAGMENTS` 一致。
+fragment 总数 = 5 + 3 + 8 + 13 = 29，与 `preset.toml` 的 `[[fragments]]` 块数和 `tests/unit/preset/helpers.ts` 的 `EXPECTED_FRAGMENTS` 一致。
 
 ---
 
@@ -152,7 +152,7 @@ phase 输出文件路径由 `coder-loop status <target> --json` 的 `current.pha
 1. 改源 markdown。步骤单文件保持 `Task` / `Report` / `Acceptance` 三段齐全；跨文件引用写 `{{PRESET_ROOT}}/<rel>` 形式（引擎物化时替换为绝对路径；语义见 `docs/reserved-strings.md`）。
 2. 改 `preset.toml` 的 `[[fragments]]` 块（增 / 减条目）。
 3. 改 `iter-entry.md` / `review-entry.md` 的步骤文件表或验收点顺序。
-4. 改 `src/preset.test.ts` 的 `EXPECTED_FRAGMENTS` 数组与 entry 断言。
+4. 改 `tests/unit/preset/helpers.ts` 的 `EXPECTED_FRAGMENTS` 数组与 `tests/unit/preset/load-bundled.test.ts` 的 entry 断言。
 5. 改 `presets/gh-issue-pr-iteration/contract.md`（§3 验收点总表 / §4 deliverable 路由）与本文档（§3 全集 / §4-5）。
 6. 跑 `bun test`（preset.test.ts 验证 fragment 集合一致性）+ `bun x tsc --noEmit`。
 

@@ -31,7 +31,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 | L2 preset (`presets/<name>/`) | phase 顺序、状态词表与转移、角色 prompt、chain-action exits、post-review trigger DAG | target 项目命令、CI 配置、PR 模板细节 |
 | target | 项目命令、CI-parity 规则、PR/evidence/review 具体形式 | 引擎调度、其他 preset |
 
-engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[[phases]]` / `[[fragments]]` / `[item.fields]` 全部字段语义见 `docs/preset-authoring.md`。Engine runtime fact key count: 26.（`src/loop.test.ts` 用此计数守护 CLAUDE.md / `docs/preset-authoring.md` 与 `ENGINE_RUNTIME_BINDING_KEYS` 三处对齐；新增 engine runtime fact 时同步改本计数与 `docs/preset-authoring.md` 内嵌列表。）
+engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[[phases]]` / `[[fragments]]` / `[item.fields]` 全部字段语义见 `docs/preset-authoring.md`。Engine runtime fact key count: 26.（`tests/unit/loop/runtime-bindings.test.ts` 用此计数守护 CLAUDE.md / `docs/preset-authoring.md` 与 `ENGINE_RUNTIME_BINDING_KEYS` 三处对齐；新增 engine runtime fact 时同步改本计数与 `docs/preset-authoring.md` 内嵌列表。）
 
 ## Commands
 
@@ -52,22 +52,28 @@ coder-loop doctor  <target>
 开发工作面：
 
 - **Type check**: `bun run typecheck`
-- **Unit + smoke tests**: `bun test`
-- **Engine integration（进程级引擎集成验收）**: `bun scripts/engine-integration.ts [flags]` — 本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-integration-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。**这不是 e2e**：runner 被确定性 stub 替换、业务负载是合成的，它只证明引擎的真实进程面（daemon/socket/spawn/准入/worktree/SQLite），不证明真实 agent 在真实 target 上的业务结果。runbook 见 `docs/engine-integration.md`。
-- **Real e2e（真实 runner + GitHub 终态）**: `bun scripts/real-e2e.ts [--preset <name>] [flags]` — 在私有 fixture repo seed 真实 issue，跑真实 runner 完成 branch / PR / review / merge / issue closure，再断言 GitHub 与 default branch 终态。默认 `real-e2e-minimal`；`--preset gh-issue-pr-iteration` 跑全保真。每轮以 UUID 隔离 fixture / checkout / chain / loop-data，不持有完整生命周期并发锁。runbook 见 `docs/real-e2e-fixture.md`。
+- **Unit / component tests**: `bun test` / `bun run test:unit`（统一位于 `tests/unit/**`；不得启动 coder-loop daemon、runner workflow 或 worktree 生命周期）
+- **Local integration suites**: `bun run test:integration -- --log-file <path>`（依次运行 `tests/integration/cli/`、`scheduler/`、`daemon/`，每个目录内的 `*.integration.ts` 逐文件串行；`--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行）
+- **All local test layers**: `bun run test:all -- --log-file <path>`（按 unit → integration-cli → integration-scheduler → integration-daemon fail-fast；`--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行）
+- **Single batch / status**: `bun scripts/run-tests.ts --batch <name> --log-file <path>` 默认后台运行；integration 批必须传日志路径，纯 `--batch unit` 可省略日志并保持前台透传。用 `bun scripts/run-tests.ts --status [runId]` 查看 `.test-runs/` 中的进度。目录准入规则见 `docs/test-boundaries.md`。
+- **Shared Bun test preload**: `tests/preload.ts`（由 `bunfig.toml` 加载）
+- **Engine integration（进程级引擎集成验收）**: `bun scripts/engine-integration.ts --log-file <path> [flags]` — `--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行。本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-integration-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。**这不是 e2e**：runner 被确定性 stub 替换、业务负载是合成的，它只证明引擎的真实进程面（daemon/socket/spawn/准入/worktree/SQLite），不证明真实 agent 在真实 target 上的业务结果。runbook 见 `docs/engine-integration.md`。
+- **Real e2e（真实 runner + GitHub 终态）**: `bun scripts/real-e2e.ts --log-file <path> [flags]` — `--log-file` 必填，默认 detached 后台运行，追加 `--foreground` 可阻塞前台运行。在私有 fixture repo seed 真实 issue，跑真实 runner 完成 branch / PR / review / merge / issue closure，再断言 GitHub 与 default branch 终态。默认 `real-e2e-minimal`；`--preset gh-issue-pr-iteration` 跑全保真。每轮以 UUID 隔离 fixture / checkout / chain / loop-data，不持有完整生命周期并发锁。runbook 见 `docs/real-e2e-fixture.md`。
 
-### 验证阶梯与 real E2E 运行时机
+### Issue 验证边界、整链路 integration 与 real E2E
 
-默认验证门是：`bun run typecheck` + `bun test` + `bun scripts/engine-integration.ts`。普通 bug 修复、迭代中途的 commit / retry、以及没有改变调度或 preset 语义的局部修改，走完这三项即可；不要求每次运行 real E2E。
+每个 implementation issue 必须在正文的“本 issue 的验证边界”中明确本 issue 负责证明到哪一层：静态/单元、进程级 integration、真实服务或浏览器、跨系统。实现与 review 只执行该边界内的验证；不得因为改动触及 scheduler、daemon、runner、worktree、preset 或 terminal semantics，就自行把单 issue 验收升级为整个 v3 的整链路 integration 或现有 GitHub preset 的 real E2E。
 
-`bun scripts/real-e2e.ts` 是阶段性收尾门，只在以下时机运行：
+每个 v3 issue 的该节还必须有一条命令级结论，禁止只写“由下游负责”或“不是 compatibility gate”等间接措辞：除专用 compatibility issue #685 外，逐字写明“本 issue 不运行 `bun scripts/real-e2e.ts`；该 compatibility 验证只由 #685 在冻结发布候选 SHA 上执行”；#685 则逐字写明“本 issue 必须运行 `bun scripts/real-e2e.ts --preset real-e2e-minimal` 与 `bun scripts/real-e2e.ts --preset gh-issue-pr-iteration`”。某 issue 即使需要 GUI、router 或 HAPI 的专用 E2E，也仍须先写清不运行 coder-loop 的这条 GitHub real E2E，再另列自己的专用路径。
 
-- 大型改动完成、准备收尾或合并时；
-- 修改 bundled preset 的 phase、prompt、status、transition、runner/model 或加载语义时；
-- 修改引擎机制时，包括 scheduler / daemon / runner spawn、worktree、status/phase 推进、终止、resume、admission 或 terminal semantics；
-- 发版或同步到 app 前。
+默认单 issue gate 是 `bun run typecheck` + `bun test`，再加 issue 正文点名的最小专用 runtime/integration 场景。`bun scripts/engine-integration.ts` 只在该 issue 的改动实际经过其两阶段 stub-runner 路径、且正文把它列为验证项时运行；它不能替代未被该 fixture 覆盖的 v3 专用场景。单 issue 的验证必须直接触发并观察该 issue 新增的行为，不能以旧线性 preset 未回归冒充新行为已成立。
 
-默认 real E2E 使用 `real-e2e-minimal`，验证真实 runner + GitHub PR / merge / issue closure；只有改动 `gh-issue-pr-iteration` 本身或大型编排行为时，才用 `--preset gh-issue-pr-iteration` 跑全保真。迭代过程中无需为了每个中间修正重复 real E2E；先用 integration gate 收敛，在满足上述收尾条件时跑一次。engine-integration 的绿不能表述为 real E2E 通过，但在非收尾、非 preset、非机制改动场景中就是充分的日常 gate。
+跨 issue 接缝、一个完整 v3 场景和现有 bundled preset 兼容性分别由专用验收 issue 承担：
+
+- **整链路 integration issue**：在冻结的合流 SHA 上运行 v3 专用 preset/fixture，连接 compile、task tree、scheduler、gate、context、ingress、status/events 与 GUI 等已经进入该 checkpoint 的生产者/消费者；失败回到具体 implementation issue 修复。
+- **Compatibility real E2E issue**：在发布候选 SHA 上运行 `bun scripts/real-e2e.ts`；默认 `real-e2e-minimal`，直接改动 `gh-issue-pr-iteration` 或进行 v3 最终收尾时再跑 `--preset gh-issue-pr-iteration`。它证明真实 runner + GitHub PR / merge / issue closure 这条现有生产 preset 路径仍成立，不证明 v3 新语义本身。
+
+只有 issue 正文明确把某条真实外部路径定义为本 issue 的交付物时，该 issue 才运行自己的专用 E2E，例如 GUI 浏览器路径、GitHub router→消费 daemon→coder-loop、HAPI remote session；这些专用 E2E 不得被 `scripts/real-e2e.ts` 代替。实现 issue 的中间 commit/retry 不重复跑整链路验收；专用验收 issue 在依赖的 implementation issues 合流后运行一次。
 
 ## Runner selection
 
@@ -186,24 +192,3 @@ pencil interactive --in gui-prototype.pen --out <scratch>.pen
 Why：原型图是 v3 设计的锚点，"MCP 打开"是术语错位——MCP 只能观察，没有 save，且它看到的可能是 desktop app 的 live 会话而非磁盘副本；真正把文件加载进可编辑/可 save 会话的只有 CLI headless。混淆两者会让 agent 以为 "MCP 里 batch_design 改了就生效"，或把 `--out` 指错覆盖设计事实源。
 
 <!-- END SOURCE: .claude/rules/prototype-design-file.rule.md -->
-<!-- BEGIN SOURCE: .claude/rules/v2-only-no-v3-divergence.rule.md -->
-
-# 当前仓库是可运行的 v2，禁止发散到 v3
-
-本仓库（`code/coder-loop`）是**可运行的 v2** — 中央 daemon 从此处 exec，`src/`、`presets/`、`docs/`、`scripts/` 都是 v2 的实现。`v3/` 目录仅存放 v3 的设计草稿（如 `execution-orchestration.md`），不是当前运行代码，也不承接维护改动。
-
-## 禁止
-
-- 在 `src/` / `presets/` / `docs/` / `scripts/` 里为 v3 铺路——引入 v3 概念的类型、字段、CLI、fragment、迁移 shim、feature flag、兼容层。
-- 在 `v3/` 目录里落实现代码或跑测试；`v3/` 只写 / 修 设计文档。
-- 把 v3 的名词、模型、术语渗透进 v2 的 CLAUDE.md、README、design doc 或 runtime error message。
-- 因看到 `v3/` 的方向就在 v2 里"顺手改造"——所有 v2 改动只用 v2 现有概念表达。
-
-## 允许
-
-- 读 `v3/` 里的设计草稿，用于对齐方向或回答问题。
-- 修 `v3/*.md` 的措辞、结构、示例——它们本来就是可迭代的设计稿。
-
-Why: v3 是尚未落地的方向草案，v2 是眼下唯一能跑的实现。以 v3 视角改 v2 会把设计草稿里的未决问题引入运行路径，制造 v2 层面看不出根因的 bug；也让 v2 的稳定性承担 v3 设计变动的成本。v3 的实现工作要另立仓库或分支，不在此处发生。
-
-<!-- END SOURCE: .claude/rules/v2-only-no-v3-divergence.rule.md -->

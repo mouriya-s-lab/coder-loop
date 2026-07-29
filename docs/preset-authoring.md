@@ -76,7 +76,7 @@ attemptTimeoutSeconds = 3600
 hello {{ITEM_ID}} run={{RUN_ID}} cwd={{TARGET_CWD}}
 ```
 
-跑通验证（参见 `src/smoke.test.ts`），用一个临时 target 和独立 loop-data root：
+跑通验证（参见 `tests/integration/cli/smoke.integration.ts`），用一个临时 target 和独立 loop-data root：
 
 ```bash
 TARGET=$(mktemp -d)
@@ -359,7 +359,7 @@ Queue item 可加 `"runner": "claude"|"codex"|"opencode"|"hapi"` 覆盖所有非
 
 ## 6. 最小 target / chain 文件
 
-跑一个新 preset 所需的最小 target（参见 `src/smoke.test.ts`）：
+跑一个新 preset 所需的最小 target（参见 `tests/integration/cli/smoke.integration.ts`）：
 
 ```
 <target>/CLAUDE.md 或 AGENTS.md      # 项目命令 / 约定 / PR 形态；iteration / review 调度者显式读取

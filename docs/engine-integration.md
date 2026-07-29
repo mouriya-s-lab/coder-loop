@@ -2,13 +2,29 @@
 
 进程级引擎集成验收 harness（issue #681）。单命令、完全本地、确定性、秒级完成、可并发。
 
-**这不是 e2e。** runner 被确定性 stub 替换（无真实 agent），业务负载是合成 marker 文件。它证明的是引擎的真实进程面——daemon / socket / spawn / 准入 / worktree / SQLite——不证明真实 agent 在真实 target 上的业务结果。它是普通 bug 修复与迭代中途的日常 gate；真实 E2E 由 `scripts/real-e2e.ts` 在大型改动收尾、preset 修正、引擎机制变动和发版前阶段性执行。与 `src/*.integration.test.ts`（进程内集成）的区别：这里每一环都是独立真实进程，经真实 CLI 与 daemon socket 通信。
+**这不是 e2e。** runner 被确定性 stub 替换（无真实 agent），业务负载是合成 marker 文件。它证明的是引擎的真实进程面——daemon / socket / spawn / 准入 / worktree / SQLite——不证明真实 agent 在真实 target 上的业务结果。它是普通 bug 修复与迭代中途的日常 gate；真实 E2E 由 `scripts/real-e2e.ts` 在大型改动收尾、preset 修正、引擎机制变动和发版前阶段性执行。与 `tests/integration/**`（进程内集成套件）的区别：这里每一环都是独立真实进程，经真实 CLI 与 daemon socket 通信。
 
 ```
-bun scripts/engine-integration.ts [--max-wall-seconds N] [--max-runs N] [--poll-seconds N] [--keep-work-dir]
+bun scripts/engine-integration.ts --log-file <path> [--foreground] [--max-wall-seconds N] [--max-runs N] [--poll-seconds N] [--keep-work-dir]
 ```
 
-退出码：0 = 全链路成功且断言通过；1 = 失败 / tripwire / 断言失败（诊断材料保留在 work dir）。
+`--log-file` 必填；相对路径按调用命令时的 cwd 解析。harness 会递归创建缺失的父目录，
+并在每次启动时 truncate 重写该文件。缺少 `--log-file` 时不会创建 fixture 或启动任何
+子进程，stderr 打印原因与用法，退出 2。
+
+默认模式会以相同参数追加 `--foreground` re-exec 自身，把子进程 stdout/stderr 全部重定向
+到日志文件，并以 detached + unref 方式让启动进程立即退出 0；启动进程 stdout 只打印后台
+pid 与绝对日志路径。阻塞运行使用：
+
+```
+bun scripts/engine-integration.ts --foreground --log-file /tmp/engine-integration.log
+```
+
+`--foreground` 会等待完整验收结束，过程输出只写日志，终端 stdout 只打印最终一行摘要，
+退出码反映真实结果。两种模式的日志都包含 harness、daemon 与 stub runner 输出，完成后末行
+固定为 `FINAL exit=<code>`。
+
+真实验收退出码：0 = 全链路成功且断言通过；1 = 失败 / tripwire / 断言失败（诊断材料保留在 work dir）。
 
 ## 它验证什么
 
@@ -47,6 +63,6 @@ fixture 是本地新建 git repo，loop-data / daemon socket / chain 名全部 r
 
 ## 失败诊断
 
-失败时 work dir 保留，evidence 区打印 loop-data root、daemon stdout/stderr 路径与
-`status --json` 快照。stub runner 的 per-phase stdout/stderr 在
-`<loopDataRoot>/chains/<chain>/runs/<runId>/<phase>/`。
+失败时 work dir 保留，运行日志记录 loop-data root、`status --json` 快照及已产生的 runner
+输出。stub runner 的原始 per-phase stdout/stderr 仍保留在
+`<loopDataRoot>/chains/<chain>/runs/<runId>/<phase>/`，并汇入 `--log-file` 指定的统一日志。

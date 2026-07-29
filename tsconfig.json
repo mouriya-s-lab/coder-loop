@@ -11,8 +11,18 @@
 		"allowImportingTsExtensions": true,
 		"noEmit": true,
 		"outDir": "dist",
-		"rootDir": "src",
-		"skipLibCheck": true
+		"rootDir": ".",
+		"skipLibCheck": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true
 	},
-	"include": ["src"]
+	"include": [
+		"src",
+		"tests",
+		"scripts"
+	],
+	"exclude": [
+		"scripts/issue-558-integration.ts",
+		"scripts/runner-filesystem-grants-integration.ts"
+	]
 }
