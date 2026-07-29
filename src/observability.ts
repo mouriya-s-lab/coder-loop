@@ -78,8 +78,6 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	// load-failure event.
 	arkType.unit("preset.dag_check"),
 	arkType.unit("daemon.warning"),
-	arkType.unit("runner.availability_restored"),
-	arkType.unit("runner.invocation_pending"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("scheduler.lifecycle_event_persistence_failed"),
 	arkType.unit("runner.status_persistence_failed"),
@@ -521,7 +519,7 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 		kind: arkType.unit("validation"),
 		type: arkType.unit("session_id.invalidated"),
 		payload: {
-			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
+			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode")),
 			"previousSessionId": arkType.or("string", "null"),
 			reason: arkType.unit("runner_session_id_invalid"),
 		},
@@ -567,44 +565,6 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 		kind: arkType.unit("diagnostic"),
 		type: arkType.unit("daemon.warning"),
 		payload: { message: "string" },
-	},
-	{
-		...EventBaseBoundary,
-		kind: arkType.unit("diagnostic"),
-		type: arkType.unit("daemon.warning"),
-		payload: {
-			code: arkType.unit("external_terminal_unavailable"),
-			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
-			binary: "string",
-			probeArgv: arkType.or([arkType.unit("probe")]),
-			availability: arkType.or(
-				{ kind: arkType.unit("unavailable"), reason: arkType.or(arkType.unit("binary-missing"), arkType.unit("endpoint-unavailable")), "exitCode": "number|null", "signal": "string|null", checkedAt: "string", since: "string" },
-				{ kind: arkType.unit("probe-failed"), reason: arkType.or(arkType.unit("unexpected-exit"), arkType.unit("signal"), arkType.unit("deadline-exceeded")), "exitCode": "number|null", "signal": "string|null", checkedAt: "string", since: "string" },
-			),
-			affected: arkType({ chainId: "number", rowId: "number", itemId: "string", phase: "string" }).array(),
-		},
-	},
-	{
-		...EventBaseBoundary,
-		kind: arkType.unit("diagnostic"),
-		type: arkType.unit("runner.availability_restored"),
-		payload: {
-			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
-			binary: "string",
-			probeArgv: arkType.or([arkType.unit("probe")]),
-			checkedAt: "string",
-			affected: arkType({ chainId: "number", rowId: "number", itemId: "string", phase: "string" }).array(),
-		},
-	},
-	{
-		...EventBaseBoundary,
-		kind: arkType.unit("diagnostic"),
-		type: arkType.unit("runner.invocation_pending"),
-		payload: {
-			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
-			binary: "string",
-			capability: { kind: arkType.unit("probe-only"), outcome: arkType.unit("invocation-pending") },
-		},
 	},
 	{
 		...EventBaseBoundary,
@@ -1159,14 +1119,8 @@ function renderValidationEvent(event: Extract<ObservabilityEvent, { kind: "valid
 
 function renderDiagnosticEvent(event: Extract<ObservabilityEvent, { kind: "diagnostic" }>): string {
 	switch (event.type) {
-	case "daemon.warning":
-			return "message" in event.payload
-				? `${event.ts} diagnostic daemon.warning ${event.payload.message}`
-				: `${event.ts} diagnostic daemon.warning code=${event.payload.code} runner=${event.payload.runner} reason=${event.payload.availability.reason}`
-		case "runner.availability_restored":
-			return `${event.ts} diagnostic runner.availability_restored runner=${event.payload.runner} checkedAt=${event.payload.checkedAt}`
-		case "runner.invocation_pending":
-			return `${event.ts} diagnostic runner.invocation_pending runner=${event.payload.runner} outcome=${event.payload.capability.outcome}`
+		case "daemon.warning":
+			return `${event.ts} diagnostic daemon.warning ${event.payload.message}`
 		case "scheduler.tick_failed":
 			return `${event.ts} diagnostic scheduler.tick_failed pid=${event.payload.pid} error=${event.payload.error}`
 		case "scheduler.lifecycle_event_persistence_failed":

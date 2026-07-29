@@ -8,10 +8,6 @@ import {
 	buildRenderBindings,
 	buildRunnerFilesystemAuthorization,
 	buildRunnerInvocation,
-	chainCompleteTriggerPhases,
-	createFinalizerSummaryDecisionState,
-	finalizerSummaryDecision,
-	observeFinalizerSummaryDecisionLine,
 	parseSessionIdFromRunnerStream,
 	phaseDeclaredRuntimeBindingPaths,
 	phaseExitsEpilogue,
@@ -41,11 +37,8 @@ import {
 	chainMetadataToJsonObject,
 	clearSchedulerBackoff as clearItemSchedulerBackoff,
 	clearSchedulerSpawnError as clearItemSchedulerSpawnError,
-	clearExternalTerminalHold,
 	engineLifecycleAdmittedItemStatus,
 	itemSchedulerBackoff,
-	externalTerminalHold,
-	externalTerminalLoss,
 	itemExtraToJsonObject,
 	itemExtraWithoutKeys,
 	parseInternalStatus,
@@ -54,10 +47,7 @@ import {
 	withoutChainCompleteTriggerState,
 	withSchedulerBackoff,
 	withSchedulerSpawnError as withItemSchedulerSpawnError,
-	withExternalTerminalHold,
-	withExternalTerminalLoss,
 	type InternalStatus,
-	type ExternalTerminalLossFact,
 	type SchedulerBackoffState,
 	type SchedulerSpawnError,
 	type SchedulerSpawnErrorAttribution,
@@ -75,7 +65,6 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 import { createStreamTextState } from "./runner-output"
-import { gateResolvedRunnerAvailability, probeResolvedExternalTerminal, runnerExecutionDomain, runnerInvocationCapability, type ExternalTerminalAvailability, type RunnerInvocationCapability } from "./runner-execution"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // Under the unified completion protocol (#451) the agent
@@ -121,23 +110,14 @@ export type SchedulerActiveRun = {
 	repoCwd: string
 	worktreePath: string
 	startedAt: number
-	phase: string
-	runner: AgentRunnerSelection
-	origin: { kind: "item" } | { kind: "chain-complete" }
 	closed: Promise<SchedulerCompletedRun>
 	terminate: (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun>
-	revokeCredential: () => void
-	finalizerDecision: () => ReturnType<typeof finalizerSummaryDecision>
 }
 
 type SchedulerPreparingRun = SchedulerActiveRun & {
 	markPrepared: () => void
 	abortPreparation: (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun>
 }
-
-type SchedulerRunOrigin =
-	| { kind: "item"; phasePlan: SchedulerPhasePlan }
-	| { kind: "chain-complete"; fingerprint: string }
 
 export type SchedulerRunTerminateOptions = {
 	forceAfterMs?: number
@@ -152,9 +132,6 @@ export type SchedulerCompletedRun = {
 	stdoutBytes: number
 	stderrBytes: number
 	status: InternalStatus
-	result:
-		| { kind: "status"; status: InternalStatus }
-		| { kind: "external-terminal-lost"; loss: ExternalTerminalLossFact }
 }
 
 export type SchedulerSlot = {
@@ -188,14 +165,7 @@ export type SchedulerState = {
 	// daemon's `applyRateLimitNotice` then persists the same value (UTC millis) into
 	// `DaemonRateLimitState`. Null when no cooldown is in effect.
 	rateLimitedUntilMs: number | null
-	externalTerminalLossRunIds: Set<string>
-	invocationPendingItemIds: Set<number>
-	chainCompleteExecutions: Map<number, SchedulerChainCompleteExecution>
 }
-
-type SchedulerChainCompleteExecution =
-	| { kind: "running"; fingerprint: string; phase: string; runId: string; completedPhases: readonly string[] }
-	| { kind: "progress"; fingerprint: string; completedPhases: readonly string[] }
 
 export type SchedulerStore = Pick<
 	SqliteStateStore,
@@ -210,11 +180,9 @@ export type SchedulerStore = Pick<
 	| "getItemSessionId"
 	| "recordRun"
 	| "getRunByRunId"
-	| "updateRunExtra"
 	| "completeRun"
 	| "setCurrentRun"
 	| "getCurrentRun"
-	| "listCurrentRuns"
 	| "clearCurrentRun"
 >
 
@@ -279,9 +247,6 @@ export type SchedulerEvent =
 	// trigger with the daemon-wide cooldown decision exposed via `daemon.status`. Distinct
 	// from `attempt.timeout` because rate-limit exits do not consume an attempt slot.
 	| { type: "scheduler.rate_limited"; ts: string; chainId: number; itemId: number; runId: string; resetsAt: number; resetAtIso: string; rateLimitType: string | null }
-	| { type: "runner.external_terminal_unavailable"; chainId: number; rowId: number; itemId: string; phase: string; runner: AgentRunnerKind; binary: string; probeArgv: readonly ["probe"]; availability: Exclude<ExternalTerminalAvailability, { kind: "available" }>; affected: readonly { chainId: number; rowId: number; itemId: string; phase: string }[] }
-	| { type: "runner.availability_restored"; chainId: number; rowId: number; itemId: string; phase: string; runner: AgentRunnerKind; binary: string; probeArgv: readonly ["probe"]; checkedAt: string }
-	| { type: "runner.invocation_pending"; chainId: number; rowId: number; itemId: string; phase: string; runner: AgentRunnerKind; binary: string; capability: Extract<RunnerInvocationCapability, { kind: "probe-only" }> }
 
 export type SchedulerTimerLifecycleEvent = Extract<SchedulerEvent, {
 	type:
@@ -375,7 +340,6 @@ export type SchedulerOptions = {
 	spawnFailureBackoffForChain?: (chain: ChainRecord) => SchedulerSpawnFailureBackoffConfig
 	chainCompleteTrigger?: SchedulerChainCompleteTrigger
 	chainCompleteTriggerForChain?: SchedulerChainCompleteTriggerForChain
-	chainCompleteExecution?: { kind: "scheduler-managed" }
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
 	// Timer callbacks cannot await the observability sink without delaying process lifecycle.
 	// This synchronous failure channel records the rejected event separately while termination,
@@ -467,9 +431,6 @@ export function createSchedulerState(): SchedulerState {
 		recycleTriggers: new Map(),
 		lifecycleEventPersistenceFailures: [],
 		rateLimitedUntilMs: null,
-		externalTerminalLossRunIds: new Set(),
-		invocationPendingItemIds: new Set(),
-		chainCompleteExecutions: new Map(),
 	}
 }
 
@@ -530,7 +491,7 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		} catch (error) {
 			if (chainPreparationItem === undefined) throw error
 			const slot = getOrCreateSlot(options.state, chain, chainPreparationItem.repoCwd)
-			await containSchedulerPreparationFailure(options, chain, chainPreparationItem, slot, { kind: "chain-plan" }, { kind: "item" }, error)
+			await containSchedulerPreparationFailure(options, chain, chainPreparationItem, slot, { kind: "chain-plan" }, error)
 			continue
 		}
 		const runs = options.store.listRuns(chain.id)
@@ -539,66 +500,13 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		for (const repoCwd of repoCwds) {
 			if (spawnCapped()) break
 			const slot = getOrCreateSlot(options.state, chain, repoCwd)
-			const activeRun = slot.activeRun
-			if (activeRun !== null) {
-				const activeDomain = runnerExecutionDomain(activeRun.runner.kind)
-				if (activeDomain.kind === "external-terminal"
-					&& (activeRun.origin.kind === "chain-complete" || !chainStatuses.terminal.includes(activeItemStatus(options.store, activeRun.itemId)))
-					&& !options.state.externalTerminalLossRunIds.has(activeRun.runId)) {
-					const activeItem = options.store.getItem(activeRun.itemId)
-					if (activeItem === null) throw new Error(`active external-terminal run ${activeRun.runId} references missing item ${activeRun.itemId}`)
-					const availability = await probeResolvedExternalTerminal(activeRun.runner, activeDomain)
-					if (slot.activeRun?.runId !== activeRun.runId) continue
-					if (availability.kind !== "available") {
-						const itemAfterProbe = options.store.getItem(activeItem.id)
-						if (itemAfterProbe === null) throw new Error(`active external-terminal run ${activeRun.runId} references missing item ${activeItem.id}`)
-						if (activeRun.origin.kind === "item" && chainStatuses.terminal.includes(itemAfterProbe.status)) {
-							if (externalTerminalHold(itemAfterProbe.extra) !== null) {
-								options.store.updateItem(itemAfterProbe.id, { extra: clearExternalTerminalHold(itemAfterProbe.extra), updatedAt: nowSeconds(options) })
-							}
-							await emit(options, { type: "slot.busy", slotKey: slot.key, chainId: chain.id, repoCwd, activeRunId: activeRun.runId })
-							continue
-						}
-						const checkedAt = nowIso(options)
-						const previousHold = externalTerminalHold(itemAfterProbe.extra)
-						const sameHold = previousHold !== null && previousHold.runner === activeRun.runner.kind
-							&& previousHold.binary === activeRun.runner.binary && previousHold.availability.kind === availability.kind
-							&& previousHold.availability.reason === availability.reason
-						const endpointAlreadyUnavailable = hasMatchingExternalTerminalHold(options.store, itemAfterProbe.id, activeRun.runner.kind, activeRun.runner.binary, availability.kind, availability.reason)
-						const since = sameHold ? previousHold.availability.since : checkedAt
-						options.store.updateItem(itemAfterProbe.id, { extra: withExternalTerminalHold(itemAfterProbe.extra, {
-							kind: "external-terminal-unavailable", runner: activeRun.runner.kind, phase: activeRun.phase,
-							binary: activeRun.runner.binary, probeArgv: activeDomain.probe.argv,
-							availability: availability.kind === "unavailable"
-								? { kind: "unavailable", reason: availability.reason, exitCode: availability.exitCode, signal: null, checkedAt, since }
-								: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
-						}), updatedAt: nowSeconds(options) })
-						const terminating = activeRun
-						const durableRun = options.store.getRunByRunId(terminating.runId)
-						if (durableRun === null) throw new Error(`active external-terminal run ${terminating.runId} has no durable run row`)
-						if (durableRun.endedAt !== null) continue
-						options.store.updateRunExtra(terminating.runId, withExternalTerminalLoss(durableRun.extra, {
-							kind: "lost", detectedAt: checkedAt, reason: availability.reason, terminationPhase: "term",
-						}))
-						options.state.externalTerminalLossRunIds.add(terminating.runId)
-						terminating.revokeCredential()
-						options.store.setItemSessionId(activeItem.id, { phase: terminating.phase, runner: terminating.runner.kind, sessionId: null, updatedAt: nowSeconds(options) })
-						const termination = terminating.terminate({ forceAfterMs: options.attemptKillMs ?? ATTEMPT_KILL_MS })
-						if (!sameHold && !endpointAlreadyUnavailable) await emit(options, {
-							type: "runner.external_terminal_unavailable", chainId: chain.id, rowId: activeItem.id, itemId: activeItem.itemId,
-							phase: terminating.phase, runner: terminating.runner.kind, binary: terminating.runner.binary,
-							probeArgv: activeDomain.probe.argv, availability,
-							affected: activeExternalTerminalEndpointAffected(options, terminating.runner),
-						})
-						void termination.finally(() => options.state.externalTerminalLossRunIds.delete(terminating.runId))
-					}
-				}
+			if (slot.activeRun !== null) {
 				await emit(options, {
 					type: "slot.busy",
 					slotKey: slot.key,
 					chainId: chain.id,
 					repoCwd,
-					activeRunId: activeRun.runId,
+					activeRunId: slot.activeRun.runId,
 				})
 				continue
 			}
@@ -607,30 +515,19 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			items = await exhaustItemsOverAttemptLimitForRepo(options, chain, repoCwd, items, chainStatuses)
 			const now = nowSeconds(options)
 			await emitRepoWaitingDecisions(options, chain, repoCwd, items, chainStatuses, now)
-			let remainingCandidates = items
-			while (!spawnCapped()) {
-				const next = selectNextItemAndPhase({
-					repoCwd,
-					items: remainingCandidates,
-					runs,
-					chainStatuses,
-					phasePlan,
-					explicitPhase: options.phase,
-					now,
-				})
-				if (next === null) break
+			const next = selectNextItemAndPhase({
+				repoCwd,
+				items,
+				runs,
+				chainStatuses,
+				phasePlan,
+				explicitPhase: options.phase,
+				now,
+			})
+			if (next === null) continue
 
-				const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, { kind: "item", phasePlan })
-				if (activeRun !== null) {
-					spawnedRuns.push(activeRun)
-					break
-				}
-				const candidateAfterSpawn = options.store.getItem(next.item.id)
-				if (candidateAfterSpawn === null) throw new Error(`spawn candidate ${next.item.id} disappeared`)
-				const invocationPending = options.state.invocationPendingItemIds.delete(next.item.id)
-				if (externalTerminalHold(candidateAfterSpawn.extra) === null && !invocationPending) break
-				remainingCandidates = remainingCandidates.filter((candidate) => candidate.id !== next.item.id)
-			}
+			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan)
+			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
 		// Restore dependency-unblocked terminal items AFTER selection so a freshly-unblocked item is
@@ -642,7 +539,7 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		// `chainCompletionTriggerAllowsCompletion` below.
 		items = await unblockDependencySatisfiedItems(options, chain, items, chainStatuses)
 
-		if (await completeChainIfReady(options, chain, undefined, chainStatuses.terminal, spawnedRuns)) completedChainIds.push(chain.id)
+		if (await completeChainIfReady(options, chain, undefined, chainStatuses.terminal)) completedChainIds.push(chain.id)
 	}
 
 	return { spawnedRuns, completedChainIds }
@@ -1074,7 +971,7 @@ async function spawnSchedulerRun(
 	item: ItemRecord,
 	slot: SchedulerSlot,
 	phase: string,
-	origin: SchedulerRunOrigin,
+	phasePlan: SchedulerPhasePlan,
 ): Promise<SchedulerActiveRun | null> {
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	const attribution: SchedulerSpawnErrorAttribution = { kind: "phase", phase }
@@ -1085,27 +982,17 @@ async function spawnSchedulerRun(
 	let credentialContext: SchedulerRunCredentialContext | null = null
 	let activeRun: SchedulerPreparingRun | null = null
 	try {
-		// Item runs take their phase plan, runner, and prompt from the item's preset. Chain-complete
-		// runs merely borrow an item as their durable anchor; resolving any execution fact through
-		// that item's preset breaks mixed-preset chains before the chain-owned trigger can start.
-		const runner = origin.kind === "chain-complete"
-			? await resolveChainCompletePhaseRunner(options, { chain, item, phase })
-			: await resolvePhaseRunner(options, { chain, item, phase })
-		if (!await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, runner)) return null
-		if (!await runnerInvocationAllowsScheduling(options, chain, item, phase, runner)) return null
-		const runnerDomain = runnerExecutionDomain(runner.kind)
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
 		const baseCommitResult = git(worktreePath, ["rev-parse", "HEAD"])
 		const branchName = schedulerSlotBranchName(chain, item.repoCwd)
 
-		const loadedPreset = origin.kind === "chain-complete"
-			? await schedulerLoadedPreset(options, chain)
-			: await schedulerLoadedPresetForItem(options, chain, item)
+		const runner = await resolvePhaseRunner(options, { chain, item, phase })
+		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
 		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
 		const persistedSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
 		const resumeDecision: ResumeDecision = persistedSessionId === null ? freshResume() : { kind: "resume", sessionId: persistedSessionId }
-		const startsAttempt = origin.kind === "item" && phase === origin.phasePlan.firstPhase && resumeDecision.kind === "fresh"
+		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
 		options.store.recordRun({
@@ -1129,16 +1016,7 @@ async function spawnSchedulerRun(
 				})),
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
-				schedulerRunOrigin: origin.kind,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
-				startAttempts: item.attempts,
-				...(runnerDomain.kind === "external-terminal" ? {
-					externalTerminalCurrent: {
-						runner: runner.kind,
-						binary: runner.binary,
-						availability: { kind: "available", checkedAt: new Date(startedAt * 1000).toISOString() },
-					},
-				} : {}),
 			}),
 		})
 		options.store.setCurrentRun({
@@ -1146,36 +1024,18 @@ async function spawnSchedulerRun(
 			phase,
 			runId,
 			startedAt,
-			extra: storedItemExtra({
-				slotKey: slot.key,
-				itemId: item.id,
-				repoCwd: item.repoCwd,
-				startStatus: item.status,
-				startStatusUpdatedAt: item.statusUpdatedAt,
-				schedulerRunOrigin: origin.kind,
-				...(item.phase === null ? {} : { startPhase: item.phase }),
-				startAttempts: item.attempts,
-				...(runnerDomain.kind === "external-terminal" ? {
-					externalTerminalCurrent: {
-						runner: runner.kind,
-						binary: runner.binary,
-						availability: { kind: "available", checkedAt: new Date(startedAt * 1000).toISOString() },
-					},
-				} : {}),
-			}),
+			extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
 		})
-		if (origin.kind === "item") {
-			const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
-				attempts: item.attempts + (startsAttempt ? 1 : 0),
-				lastRunId: runId,
-				agentCwd: worktreePath,
-				phase,
-				updatedAt: startedAt,
-			}
-			const extraWithoutSpawnError = clearItemSchedulerSpawnError(item.extra)
-			if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
-			options.store.updateItem(item.id, spawnUpdate)
+		const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
+			attempts: item.attempts + (startsAttempt ? 1 : 0),
+			lastRunId: runId,
+			agentCwd: worktreePath,
+			phase,
+			updatedAt: startedAt,
 		}
+		const extraWithoutSpawnError = clearItemSchedulerSpawnError(item.extra)
+		if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
+		options.store.updateItem(item.id, spawnUpdate)
 
 		const presetDir = loadedPreset.preset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
@@ -1201,7 +1061,6 @@ async function spawnSchedulerRun(
 			resumeDecision,
 			invocationAuthorization(chain, item, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root, authorizationPhase),
 		)
-		if (runnerPlan.kind === "invocation-pending") throw new Error(`runner ${runnerPlan.runner} crossed its invocation-pending scheduler gate`)
 		for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
 		await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
 		const runPaths = resolveChainRuntimePaths(chain.name, options.loopDataRootOptions)
@@ -1226,22 +1085,17 @@ async function spawnSchedulerRun(
 			env: spawnEnv,
 		})
 		await waitForChildSpawn(child)
-		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext, origin)
+		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
 		slot.activeRun = activeRun
-		const durableRun = options.store.getRunByRunId(runId)
-		if (durableRun === null) throw new Error(`run ${runId} missing after spawn`)
-		options.store.updateRunExtra(runId, storedItemExtra({
-			...itemExtraToJsonObject(durableRun.extra),
-			worktreePath,
-			...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
-			processGroupLeader: true,
-		}))
-		const currentRun = options.store.listCurrentRuns(chain.id).find((candidate) => candidate.runId === runId) ?? null
-		if (currentRun === null) throw new Error(`current run ${runId} missing after spawn`)
 		options.store.setCurrentRun({
-			...currentRun,
+			chainId: chain.id,
+			phase,
+			runId,
+			startedAt,
 			extra: storedItemExtra({
-				...itemExtraToJsonObject(currentRun.extra),
+				slotKey: slot.key,
+				itemId: item.id,
+				repoCwd: item.repoCwd,
 				worktreePath,
 				...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
 				processGroupLeader: true,
@@ -1272,126 +1126,9 @@ async function spawnSchedulerRun(
 			credential,
 			credentialContext,
 		}, error)
-		await containSchedulerPreparationFailure(options, chain, item, slot, attribution, origin, failure)
+		await containSchedulerPreparationFailure(options, chain, item, slot, attribution, failure)
 		return null
 	}
-}
-
-function hasMatchingExternalTerminalHold(
-	store: SchedulerStore,
-	excludeItemId: number,
-	runner: AgentRunnerKind,
-	binary: string,
-	kind: "unavailable" | "probe-failed",
-	reason: "binary-missing" | "endpoint-unavailable" | "unexpected-exit" | "signal" | "deadline-exceeded",
-): boolean {
-	return store.listChains().some((chain) => store.listItems(chain.id).some((candidate) => {
-		if (candidate.id === excludeItemId) return false
-		const hold = externalTerminalHold(candidate.extra)
-		return hold !== null && hold.runner === runner && hold.binary === binary
-			&& hold.availability.kind === kind && hold.availability.reason === reason
-	}))
-}
-
-function activeExternalTerminalEndpointAffected(
-	options: SchedulerOptions,
-	runner: AgentRunnerSelection,
-): { chainId: number; rowId: number; itemId: string; phase: string }[] {
-	return [...options.state.slots.values()].flatMap((slot) => {
-		const active = slot.activeRun
-		if (active === null || active.runner.kind !== runner.kind || active.runner.binary !== runner.binary) return []
-		const item = options.store.getItem(active.itemId)
-		return item === null ? [] : [{ chainId: active.chainId, rowId: item.id, itemId: item.itemId, phase: active.phase }]
-	})
-}
-
-export async function refreshExternalTerminalAvailabilityForItem(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	item: ItemRecord,
-	phase: string,
-	resolvedRunner?: AgentRunnerSelection,
-	warningAffected: readonly { chainId: number; rowId: number; itemId: string; phase: string }[] = [{ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }],
-): Promise<boolean> {
-	const runner = resolvedRunner ?? await resolvePhaseRunner(options, { chain, item, phase })
-	const gate = await gateResolvedRunnerAvailability(runner)
-	if (gate.kind === "local-process") {
-		if (externalTerminalHold(item.extra) !== null) {
-			options.store.updateItem(item.id, { extra: clearExternalTerminalHold(item.extra), updatedAt: nowSeconds(options) })
-		}
-		return true
-	}
-	const availability = gate.kind === "available" ? { kind: "available" } as const : gate.availability
-	const executionDomain = gate.domain
-	const currentItem = options.store.getItem(item.id)
-	if (currentItem === null) return false
-	if (availability.kind !== "available") {
-		const checkedAt = new Date(nowSeconds(options) * 1000).toISOString()
-		const previousHold = externalTerminalHold(currentItem.extra)
-		const sameHold = previousHold !== null && previousHold.runner === runner.kind && previousHold.phase === phase
-			&& previousHold.binary === runner.binary && previousHold.availability.kind === availability.kind
-			&& previousHold.availability.reason === availability.reason
-		const since = sameHold ? previousHold.availability.since : checkedAt
-		options.store.updateItem(item.id, { extra: withExternalTerminalHold(currentItem.extra, {
-			kind: "external-terminal-unavailable", runner: runner.kind, phase, binary: runner.binary,
-			probeArgv: executionDomain.probe.argv,
-			availability: availability.kind === "unavailable"
-				? { kind: "unavailable", reason: availability.reason, exitCode: availability.exitCode, signal: null, checkedAt, since }
-				: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
-		}), updatedAt: nowSeconds(options) })
-		const endpointAlreadyUnavailable = hasMatchingExternalTerminalHold(options.store, item.id, runner.kind, runner.binary, availability.kind, availability.reason)
-		if (!sameHold && !endpointAlreadyUnavailable) await emit(options, { type: "runner.external_terminal_unavailable",
-			chainId: chain.id, rowId: item.id, itemId: item.itemId, phase, runner: runner.kind, binary: runner.binary,
-			probeArgv: executionDomain.probe.argv, availability, affected: warningAffected })
-		return false
-	}
-	const checkedAt = new Date(nowSeconds(options) * 1000).toISOString()
-	if (clearExternalTerminalHoldsForEndpoint(options.store, runner.kind, runner.binary, nowSeconds(options))) {
-		await emit(options, {
-			type: "runner.availability_restored", chainId: chain.id, rowId: item.id, itemId: item.itemId, phase,
-			runner: runner.kind, binary: runner.binary, probeArgv: executionDomain.probe.argv, checkedAt,
-		})
-	}
-	return true
-}
-
-async function runnerInvocationAllowsScheduling(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	item: ItemRecord,
-	phase: string,
-	runner: AgentRunnerSelection,
-): Promise<boolean> {
-	const capability = runnerInvocationCapability(runner.kind)
-	if (capability.kind === "invocable") {
-		options.state.invocationPendingItemIds.delete(item.id)
-		return true
-	}
-	options.state.invocationPendingItemIds.add(item.id)
-	await emit(options, {
-		type: "runner.invocation_pending",
-		chainId: chain.id,
-		rowId: item.id,
-		itemId: item.itemId,
-		phase,
-		runner: runner.kind,
-		binary: runner.binary,
-		capability,
-	})
-	return false
-}
-
-function clearExternalTerminalHoldsForEndpoint(store: SchedulerStore, runner: AgentRunnerKind, binary: string, updatedAt: number): boolean {
-	let cleared = false
-	for (const chain of store.listChains()) {
-		for (const candidate of store.listItems(chain.id)) {
-			const hold = externalTerminalHold(candidate.extra)
-			if (hold === null || hold.runner !== runner || hold.binary !== binary) continue
-			store.updateItem(candidate.id, { extra: clearExternalTerminalHold(candidate.extra), updatedAt })
-			cleared = true
-		}
-	}
-	return cleared
 }
 
 async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void> {
@@ -1488,32 +1225,22 @@ async function containSchedulerPreparationFailure(
 	item: ItemRecord,
 	slot: SchedulerSlot,
 	attribution: SchedulerSpawnErrorAttribution,
-	origin: { kind: SchedulerRunOrigin["kind"] },
 	failure: unknown,
 ): Promise<void> {
 	const failedAt = nowSeconds(options)
 	const message = errorMessage(failure)
-	if (origin.kind === "item") {
-		const persistedItem = options.store.getItem(item.id) ?? item
-		const nextFromAttemptStart = withNextSchedulerBackoff(item.extra, failedAt, spawnFailureBackoffForChain(options, chain))
-		const backoff = itemSchedulerBackoff(nextFromAttemptStart)
-		if (backoff === null) throw new Error("scheduler preparation backoff construction failed")
-		const extraWithBackoff = withSchedulerBackoff(persistedItem.extra, backoff)
-		options.store.updateItem(item.id, {
-			status: engineLifecycleAdmittedItemStatus(item.status, "scheduler.spawn-aborted-entry-restore"),
-			statusUpdatedAt: item.statusUpdatedAt,
-			phase: item.phase,
-			extra: withSchedulerSpawnError(extraWithBackoff, failedAt, attribution, message),
-			updatedAt: failedAt,
-		})
-	} else {
-		await emit(options, {
-			type: "chain.complete_trigger_failed",
-			chainId: chain.id,
-			chainName: chain.name,
-			error: message,
-		})
-	}
+	const persistedItem = options.store.getItem(item.id) ?? item
+	const nextFromAttemptStart = withNextSchedulerBackoff(item.extra, failedAt, spawnFailureBackoffForChain(options, chain))
+	const backoff = itemSchedulerBackoff(nextFromAttemptStart)
+	if (backoff === null) throw new Error("scheduler preparation backoff construction failed")
+	const extraWithBackoff = withSchedulerBackoff(persistedItem.extra, backoff)
+	options.store.updateItem(item.id, {
+		status: engineLifecycleAdmittedItemStatus(item.status, "scheduler.spawn-aborted-entry-restore"),
+		statusUpdatedAt: item.statusUpdatedAt,
+		phase: item.phase,
+		extra: withSchedulerSpawnError(extraWithBackoff, failedAt, attribution, message),
+		updatedAt: failedAt,
+	})
 	console.warn(`coder-loop scheduler: preparation failed for chain=${chain.name} item=${item.id} id=${item.itemId}: ${message}`)
 	await emit(options, {
 		type: "spawn.aborted",
@@ -1544,19 +1271,14 @@ function attachRunCloseHandler(
 	// error branch — the run is no longer active either way.
 	credential: SchedulerRunCredential | null,
 	credentialContext: SchedulerRunCredentialContext,
-	origin: SchedulerRunOrigin,
 ): SchedulerPreparingRun {
 	let parsedSessionId: string | null = null
 	let sessionIdInvalid = false
 	let rateLimit = classifyRateLimitFromStdout("")
-	let chainCompleteDecisionState = createFinalizerSummaryDecisionState()
 	const stdoutState = createStreamTextState((line) => {
 		if (parsedSessionId === null) parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, `${line}\n`)
 		const observed = classifyRateLimitFromStdout(line)
 		rateLimit = { code: rateLimit.code ?? observed.code, reset: observed.reset ?? rateLimit.reset }
-		if (origin.kind === "chain-complete") {
-			chainCompleteDecisionState = observeFinalizerSummaryDecisionLine(chainCompleteDecisionState, line, runner.kind)
-		}
 	})
 	const stderrState = createStreamTextState((line) => {
 		sessionIdInvalid = sessionIdInvalid || detectsSessionIdInvalid(runner.kind, line)
@@ -1625,10 +1347,9 @@ function attachRunCloseHandler(
 							stdoutBytes,
 							stderrBytes,
 							status: (options.store.getItem(item.id) ?? item).status,
-							result: { kind: "status", status: (options.store.getItem(item.id) ?? item).status },
 						}
 					} finally {
-						revokeCredential()
+						if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
 					}
 				}
 				// #478: detect account rate-limit BEFORE the first await so the in-state cooldown
@@ -1642,14 +1363,10 @@ function attachRunCloseHandler(
 				const rateLimitExit = (rateLimit.code !== null && isRateLimitErrorCode(rateLimit.code)) || rateLimit.reset !== null
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
-				const durableRunBeforeClose = options.store.getRunByRunId(runId)
-				const latchedLoss = durableRunBeforeClose === null ? null : externalTerminalLoss(durableRunBeforeClose.extra)
-				const externalTerminalLossWon = latchedLoss !== null
-				const closedLoss: ExternalTerminalLossFact | null = latchedLoss === null ? null : { ...latchedLoss, terminationPhase: "closed" }
-				const status = origin.kind === "chain-complete" || externalTerminalLossWon ? item.status : (currentItem ?? item).status
+				const status = (currentItem ?? item).status
 				const endedAt = nowSeconds(options)
-				const itemTransitionedToTerminal = origin.kind === "item" && !terminalStatuses.has(item.status) && terminalStatuses.has(status)
-				if (origin.kind === "item") options.state.finalizingItemStatuses.set(item.id, status)
+				const itemTransitionedToTerminal = !terminalStatuses.has(item.status) && terminalStatuses.has(status)
+				options.state.finalizingItemStatuses.set(item.id, status)
 				let persistenceStage: RunnerStatusPersistenceFailure["stage"] | null = "status-artifact"
 				try {
 					await closeSchedulerPhaseOutputWriters(outputWriters)
@@ -1676,7 +1393,6 @@ function attachRunCloseHandler(
 							...(completedRun === null ? {} : itemExtraToJsonObject(completedRun.extra)),
 							stdoutBytes,
 							stderrBytes,
-							...(closedLoss === null ? {} : { externalTerminalLoss: closedLoss }),
 						}),
 					})
 
@@ -1688,7 +1404,7 @@ function attachRunCloseHandler(
 					// #530: revoke synchronously alongside activeRun=null so `listActiveRuns`
 					// empty and credential-absent are atomic from the event loop's perspective.
 					// The `finally` below still runs (Map.delete is idempotent) as safety net.
-					revokeCredential()
+					if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
 					const excerpt = await collectObservabilityExcerpt({
 						stdoutPath: outputPaths.stdoutPath,
 						stderrPath: outputPaths.stderrPath,
@@ -1705,20 +1421,16 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					const itemBeforeBookkeeping = options.store.getItem(item.id)
 					const previousSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
-					if (origin.kind === "item" && !externalTerminalLossWon && itemBeforeBookkeeping !== null && terminalStatuses.has(itemBeforeBookkeeping.status) && externalTerminalHold(itemBeforeBookkeeping.extra) !== null) {
-						options.store.updateItem(item.id, { extra: clearExternalTerminalHold(itemBeforeBookkeeping.extra), updatedAt: endedAt })
-					}
-					if (origin.kind === "item" && (externalTerminalLossWon || itemBeforeBookkeeping === null || !terminalStatuses.has(itemBeforeBookkeeping.status))) {
-						const itemForBackoff = itemBeforeBookkeeping ?? item
-						const statusWasWrittenDuringRun = itemBeforeBookkeeping !== null && itemBeforeBookkeeping.statusUpdatedAt !== item.statusUpdatedAt && itemBeforeBookkeeping.statusUpdatedAt >= startedAt
+					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
+						const itemForBackoff = currentItem ?? item
+						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
 						// #478: rate-limit exits do not consume an attempt slot (roll the spawn-time
 						// +1 back to the pre-spawn value via explicit `attempts: item.attempts`) and
 						// do not enter the blind exponential spawn-failure backoff — the account
 						// cooldown is owned by the daemon-level gate. Non-rate-limit exits flow
 						// through `extraAfterRunCompletion` exactly as before.
-						const extra = rateLimitExit || externalTerminalLossWon
+						const extra = rateLimitExit
 							? clearItemSchedulerBackoff(itemForBackoff.extra)
 							: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt)
 						const update: Parameters<typeof options.store.updateItem>[1] = {
@@ -1728,14 +1440,8 @@ function attachRunCloseHandler(
 							// admission gate (see `admitItemStatusForRequest` in daemon.ts), so re-
 							// branding here under `scheduler.run-status-forwarded` records that this
 							// is engine-internal carry, not a fresh caller-provided write.
-							...(externalTerminalLossWon
-								? {
-									status: engineLifecycleAdmittedItemStatus(item.status, "scheduler.external-terminal-loss-entry-restore"),
-									statusUpdatedAt: item.statusUpdatedAt,
-									phase: item.phase,
-								}
-								: statusWasWrittenDuringRun ? { status: engineLifecycleAdmittedItemStatus(status, "scheduler.run-status-forwarded") } : {}),
-							...(rateLimitExit || externalTerminalLossWon ? { attempts: item.attempts } : {}),
+							...(statusWasWrittenDuringRun ? { status: engineLifecycleAdmittedItemStatus(status, "scheduler.run-status-forwarded") } : {}),
+							...(rateLimitExit ? { attempts: item.attempts } : {}),
 							lastRunId: runId,
 							agentCwd: worktreePath,
 							extra,
@@ -1756,9 +1462,7 @@ function attachRunCloseHandler(
 						})
 						await options.onRateLimitObserved?.({ runId, chainId: chain.id, itemId: item.id, reset: rateLimit.reset })
 					}
-					if (externalTerminalLossWon) {
-						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
-					} else if (origin.kind === "item" && sessionIdInvalid) {
+					if (sessionIdInvalid) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
 						await emit(options, {
 							type: "session_id.invalidated",
@@ -1771,7 +1475,7 @@ function attachRunCloseHandler(
 							previousSessionId,
 							reason: "runner_session_id_invalid",
 						})
-					} else if (origin.kind === "item" && parsedSessionId !== null) {
+					} else if (parsedSessionId !== null) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
 					}
 					if (itemTransitionedToTerminal) {
@@ -1785,11 +1489,8 @@ function attachRunCloseHandler(
 							terminalStatus: status,
 						})
 					}
-					if (origin.kind === "item") await completeChainIfReady(options, chain, runId, [...terminalStatuses])
-			return {
-				runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdoutBytes, stderrBytes, status,
-				result: closedLoss === null ? { kind: "status", status } : { kind: "external-terminal-lost", loss: closedLoss },
-			}
+					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
+			return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdoutBytes, stderrBytes, status }
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					if (persistenceStage === null) throw error
@@ -1808,13 +1509,13 @@ function attachRunCloseHandler(
 					options.onRunnerStatusPersistenceFailure?.(failure)
 					throw new RunnerStatusPersistenceError(failure)
 				} finally {
-					if (origin.kind === "item") options.state.finalizingItemStatuses.delete(item.id)
+					options.state.finalizingItemStatuses.delete(item.id)
 					// #406: revoke the run credential exactly once per run close. Composing with
 					// #417's double GC: this path runs after the natural close; explicit
 					// `terminateAllActiveRuns` (e.g. daemon shutdown) drives child exit through the
 					// same close event so this same `finally` runs. The supplier is responsible for
 					// idempotency if a revoke ever arrives twice.
-					revokeCredential()
+					if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
 				}
 			})()
 			options.state.pendingCloseHandlers.add(pendingCloseHandler)
@@ -1826,36 +1527,13 @@ function attachRunCloseHandler(
 				.catch(() => undefined)
 		})
 	})
-	const terminate = createRunTerminator(child, closed, terminatorCleanup, (terminationPhase) => {
-		const durableRun = options.store.getRunByRunId(runId)
-		if (durableRun === null || durableRun.endedAt !== null) return
-		const loss = externalTerminalLoss(durableRun.extra)
-		if (loss === null || loss.terminationPhase === terminationPhase) return
-		options.store.updateRunExtra(runId, withExternalTerminalLoss(durableRun.extra, { ...loss, terminationPhase }))
-	})
-	let credentialRevoked = false
-	const revokeCredential = (): void => {
-		if (credentialRevoked || credential === null) return
-		credentialRevoked = true
-		options.runCredentials?.revoke(credential, credentialContext)
-	}
+	const terminate = createRunTerminator(child, closed, terminatorCleanup)
 	const abortPreparation = (options?: SchedulerRunTerminateOptions): Promise<SchedulerCompletedRun> => {
 		decideCloseMode("preparation-abort")
 		return terminate(options)
 	}
 	const markPrepared = (): void => decideCloseMode("normal")
-	const readFinalizerDecision = (): ReturnType<typeof finalizerSummaryDecision> => finalizerSummaryDecision(chainCompleteDecisionState)
-	return {
-		runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd,
-		worktreePath, startedAt, phase, runner, origin: { kind: origin.kind }, closed, terminate,
-		revokeCredential, finalizerDecision: readFinalizerDecision, markPrepared, abortPreparation,
-	}
-}
-
-function activeItemStatus(store: SchedulerStore, itemId: number): InternalStatus {
-	const item = store.getItem(itemId)
-	if (item === null) throw new Error(`active run references missing item ${itemId}`)
-	return item.status
+	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate, markPrepared, abortPreparation }
 }
 
 type SchedulerPhaseOutputPaths = {
@@ -2219,7 +1897,6 @@ function createRunTerminator(
 	child: ReturnType<typeof spawn>,
 	closed: Promise<SchedulerCompletedRun>,
 	cleanup?: (() => void) | null,
-	onTerminationPhase?: (phase: "term" | "kill") => void,
 ): (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun> {
 	let requested = false
 	return async (options = {}) => {
@@ -2227,12 +1904,8 @@ function createRunTerminator(
 			requested = true
 			if (cleanup !== null && cleanup !== undefined) cleanup()
 			sendSignalToChildProcessGroup(child, "SIGTERM")
-			onTerminationPhase?.("term")
 			const closedBeforeForce = await promiseSettledWithin(closed, options.forceAfterMs ?? 5_000)
-			if (!closedBeforeForce && child.exitCode === null && child.signalCode === null) {
-				sendSignalToChildProcessGroup(child, "SIGKILL")
-				onTerminationPhase?.("kill")
-			}
+			if (!closedBeforeForce && child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
 		}
 		return await closed
 	}
@@ -2335,13 +2008,7 @@ function hasInflightDependency(options: SchedulerOptions, items: readonly ItemRe
 	)
 }
 
-async function completeChainIfReady(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	runId?: string,
-	terminalStatuses?: readonly InternalStatus[],
-	spawnedRuns?: SchedulerActiveRun[],
-): Promise<boolean> {
+async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string, terminalStatuses?: readonly InternalStatus[]): Promise<boolean> {
 	if (hasActiveSlotForChain(options.state, chain.id, runId)) return false
 	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
@@ -2365,7 +2032,7 @@ async function completeChainIfReady(
 		// pending trigger phase from the real preset.
 		const phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
 		if (hasPendingItemLevelTrigger(options, chain.id, phasePlan)) return false
-		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses, spawnedRuns)) return false
+		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
 		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
 		if (refreshed?.status !== "active") return false
 		const completionItems = options.store.listItems(chain.id)
@@ -2380,13 +2047,7 @@ async function completeChainIfReady(
 	}
 }
 
-async function chainCompletionTriggerAllowsCompletion(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	runId: string | undefined,
-	terminalStatuses: readonly InternalStatus[],
-	spawnedRuns?: SchedulerActiveRun[],
-): Promise<boolean> {
+async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly InternalStatus[]): Promise<boolean> {
 	try {
 		const items = listItemsIncludingFinalizing(options, chain.id)
 		const fingerprint = chainCompletionFingerprint(chain, items, terminalStatuses)
@@ -2397,19 +2058,6 @@ async function chainCompletionTriggerAllowsCompletion(
 			items,
 			...(runId === undefined ? {} : { runId }),
 			terminalStatusNames: terminalStatuses,
-		}
-		const representativeItem = items[0]!
-		if (options.chainCompleteExecution?.kind === "scheduler-managed") {
-			return await runSchedulerManagedChainCompleteTrigger(options, chain, representativeItem, fingerprint, terminalStatuses, spawnedRuns)
-		}
-		// Chain-complete execution is chain-owned: the daemon passes this same chain preset to
-		// `runPresetChainCompleteTriggerPhases`. Keep the availability gate on that exact preset and
-		// its chain-level runner resolver; the representative item is only the durable hold anchor.
-		const loadedPreset = await schedulerLoadedPreset(options, chain)
-		for (const triggerPhase of chainCompleteTriggerPhases(loadedPreset.preset)) {
-			const runner = await resolveChainCompletePhaseRunner(options, { chain, item: representativeItem, phase: triggerPhase.name })
-			if (!await refreshExternalTerminalAvailabilityForItem(options, chain, representativeItem, triggerPhase.name, runner)) return false
-			if (!await runnerInvocationAllowsScheduling(options, chain, representativeItem, triggerPhase.name, runner)) return false
 		}
 		const decision = options.chainCompleteTrigger !== undefined
 			? await options.chainCompleteTrigger(context)
@@ -2438,98 +2086,6 @@ async function chainCompletionTriggerAllowsCompletion(
 		})
 		return false
 	}
-}
-
-async function runSchedulerManagedChainCompleteTrigger(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	anchor: ItemRecord,
-	fingerprint: string,
-	terminalStatuses: readonly InternalStatus[],
-	spawnedRuns?: SchedulerActiveRun[],
-): Promise<boolean> {
-	const loadedPreset = await schedulerLoadedPreset(options, chain)
-	const phases = chainCompleteTriggerPhases(loadedPreset.preset)
-	if (phases.length === 0) return true
-
-	const existing = options.state.chainCompleteExecutions.get(chain.id)
-	const matching = existing?.fingerprint === fingerprint ? existing : null
-	if (existing !== undefined && matching === null) options.state.chainCompleteExecutions.delete(chain.id)
-	if (matching?.kind === "running") return false
-	const completedPhases = matching?.completedPhases ?? []
-	const nextPhase = phases.find((phase) => !completedPhases.includes(phase.name))
-	if (nextPhase === undefined) {
-		options.state.chainCompleteExecutions.delete(chain.id)
-		return true
-	}
-
-	const runner = await resolveChainCompletePhaseRunner(options, { chain, item: anchor, phase: nextPhase.name })
-	if (!await refreshExternalTerminalAvailabilityForItem(options, chain, anchor, nextPhase.name, runner)) return false
-	const executionFingerprint = chainCompletionFingerprint(chain, listItemsIncludingFinalizing(options, chain.id), terminalStatuses)
-	const slot = getOrCreateSlot(options.state, chain, anchor.repoCwd)
-	const activeRun = await spawnSchedulerRun(options, chain, anchor, slot, nextPhase.name, { kind: "chain-complete", fingerprint: executionFingerprint })
-	if (activeRun === null) return false
-	options.state.chainCompleteExecutions.set(chain.id, {
-		kind: "running",
-		fingerprint: executionFingerprint,
-		phase: nextPhase.name,
-		runId: activeRun.runId,
-		completedPhases,
-	})
-	spawnedRuns?.push(activeRun)
-
-	const settle = activeRun.closed.then(async (closed) => {
-		const currentExecution = options.state.chainCompleteExecutions.get(chain.id)
-		if (currentExecution?.kind !== "running" || currentExecution.runId !== activeRun.runId) return closed
-		if (closed.result.kind === "external-terminal-lost" || closed.exitCode !== 0) {
-			options.state.chainCompleteExecutions.delete(chain.id)
-			return closed
-		}
-		const decision = activeRun.finalizerDecision()
-		if (decision === null) {
-			options.state.chainCompleteExecutions.delete(chain.id)
-			await emit(options, {
-				type: "chain.complete_trigger_failed",
-				chainId: chain.id,
-				chainName: chain.name,
-				runId: activeRun.runId,
-				error: `chain-complete trigger phase ${nextPhase.name} did not print a valid FINALIZER SUMMARY`,
-			})
-			return closed
-		}
-		await emit(options, {
-			type: "chain.complete_trigger",
-			chainId: chain.id,
-			chainName: chain.name,
-			runId: activeRun.runId,
-			decision: decision.decision,
-			...(decision.reason === undefined ? {} : { reason: decision.reason }),
-		})
-		if (decision.decision === "keep-active") {
-			options.state.chainCompleteExecutions.delete(chain.id)
-			persistKeepActiveTriggerState(options, chain, executionFingerprint, decision, activeRun.runId)
-			return closed
-		}
-		options.state.chainCompleteExecutions.set(chain.id, {
-			kind: "progress",
-			fingerprint: executionFingerprint,
-			completedPhases: [...completedPhases, nextPhase.name],
-		})
-		return closed
-	}).catch(async (error: unknown) => {
-		options.state.chainCompleteExecutions.delete(chain.id)
-		await emit(options, {
-			type: "chain.complete_trigger_failed",
-			chainId: chain.id,
-			chainName: chain.name,
-			runId: activeRun.runId,
-			error: errorMessage(error),
-		})
-		return await activeRun.closed
-	})
-	options.state.pendingCloseHandlers.add(settle)
-	void settle.finally(() => options.state.pendingCloseHandlers.delete(settle)).catch(() => undefined)
-	return false
 }
 
 function keepActiveTriggerStateApplies(chain: ChainRecord, fingerprint: string): boolean {
@@ -2834,22 +2390,6 @@ async function resolvePhaseRunner(
 	throw new SchedulerError(
 		"spawn_failed",
 		`scheduler: no runner configured for chain=${input.chain.name} item=${input.item.id} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForItem, .phaseRunnerSelectionForChain, or .runner`,
-	)
-}
-
-async function resolveChainCompletePhaseRunner(
-	options: SchedulerOptions,
-	input: SchedulerPhaseRunnerInput,
-): Promise<AgentRunnerSelection> {
-	if (options.phaseRunner !== undefined) return await options.phaseRunner(input)
-	if (options.phaseRunnerSelectionForChain !== undefined) {
-		const selection = await options.phaseRunnerSelectionForChain(input.chain)
-		return selectRunnerForPhase(input.phase, input.item, selection)
-	}
-	if (options.runner !== undefined) return options.runner
-	throw new SchedulerError(
-		"spawn_failed",
-		`scheduler: no chain-complete runner configured for chain=${input.chain.name} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForChain, or .runner`,
 	)
 }
 

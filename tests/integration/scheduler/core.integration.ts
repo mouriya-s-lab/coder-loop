@@ -470,14 +470,7 @@ describe("scheduler", () => {
 			const secondTick = await schedulerTick(fixture.options())
 			expect(firstTick.spawnedRuns).toHaveLength(1)
 			expect(secondTick.spawnedRuns).toHaveLength(0)
-			const current = fixture.store.getCurrentRun(chain.id)
-			expect(current?.extra).toMatchObject({
-				itemId: firstTick.spawnedRuns[0]?.itemId,
-				pid: firstTick.spawnedRuns[0]?.pid,
-				startStatus: "queued",
-				startAttempts: 0,
-			})
-			expect(fixture.store.getRunByRunId(firstTick.spawnedRuns[0]!.runId)?.extra).toMatchObject({ startStatus: "queued", startAttempts: 0 })
+			expect(fixture.store.getCurrentRun(chain.id)?.extra).toMatchObject({ itemId: firstTick.spawnedRuns[0]?.itemId, pid: firstTick.spawnedRuns[0]?.pid })
 			expect(fixture.schedulerEvents.some((event) => event.type === "slot.busy")).toBe(true)
 			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["queued", "queued"])
 			await firstTick.spawnedRuns[0]!.closed

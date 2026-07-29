@@ -11,7 +11,6 @@ import { createStreamTextState } from "../../../src/runner-output"
 
 const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
-const EXTERNAL_TERMINAL_INTEGRATION = resolve(REPO_ROOT, "scripts/external-terminal-integration.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/smoke-tests", String(process.pid))
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
@@ -24,20 +23,6 @@ afterAll(async () => {
 })
 
 describe("smoke: v2 central chain CLI", () => {
-	test("ships the literal C3 external-terminal lifecycle driver", () => {
-		const result = Bun.spawnSync({
-			cmd: ["bun", EXTERNAL_TERMINAL_INTEGRATION, "--help"],
-			cwd: REPO_ROOT,
-			stdout: "pipe",
-			stderr: "pipe",
-		})
-		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
-		expect(result.exitCode, output).toBe(0)
-		for (const scenario of ["missing-binary", "endpoint-69", "restoration", "probe-failed", "evidence"]) {
-			expect(output).toContain(scenario)
-		}
-	})
-
 	test("bounds runner memory while preserving large output artifacts", async () => {
 		const artifactDir = resolve(TEST_ROOT, "large-output-artifacts")
 		await mkdir(artifactDir, { recursive: true })
@@ -135,7 +120,7 @@ describe("smoke: v2 central chain CLI", () => {
 		const bogusKind = runCli(["chain", "set-runner-model", "anychain", "--kind", "bogus", "--model", "claude-sonnet-4-6"])
 		expect(bogusKind.exitCode).toBe(1)
 		const bogusKindCombined = bogusKind.stderr + bogusKind.stdout
-		expect(bogusKindCombined).toContain("--kind must be claude, codex, opencode, or hapi")
+		expect(bogusKindCombined).toContain("--kind must be claude, codex, or opencode")
 
 		const whitespaceModel = runCli(["chain", "set-runner-model", "anychain", "--kind", "opencode", "--model", "   "])
 		expect(whitespaceModel.exitCode).toBe(1)

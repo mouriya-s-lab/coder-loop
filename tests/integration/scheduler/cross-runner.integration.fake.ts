@@ -2,10 +2,10 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 
 
-type PromptSessionRunnerKind = "claude" | "codex" | "opencode"
+type RunnerKind = "claude" | "codex" | "opencode"
 
 type FakeRunnerResponse = {
-	runner?: PromptSessionRunnerKind
+	runner?: RunnerKind
 	phase?: string
 	exitCode?: number
 	sessionId?: string | null
@@ -27,8 +27,8 @@ type FakeRunnerState = {
 
 const [planPath, eventLogPath, runnerKind, loopDataRoot, ...runnerArgs] = Bun.argv.slice(2)
 
-if (planPath === undefined || eventLogPath === undefined || !isPromptSessionRunnerKind(runnerKind) || loopDataRoot === undefined) {
-	console.error("usage: cross-runner-fake.ts <plan.json> <event-log.jsonl> <prompt-session-runner: claude|codex|opencode> <loop-data-root> [...runner args]")
+if (planPath === undefined || eventLogPath === undefined || !isRunnerKind(runnerKind) || loopDataRoot === undefined) {
+	console.error("usage: cross-runner-fake.ts <plan.json> <event-log.jsonl> <claude|codex|opencode> <loop-data-root> [...runner args]")
 	process.exit(2)
 }
 
@@ -96,7 +96,7 @@ if (typeof response.writeStatus === "string") {
 
 process.exit(response.exitCode ?? 0)
 
-function isPromptSessionRunnerKind(value: string | undefined): value is PromptSessionRunnerKind {
+function isRunnerKind(value: string | undefined): value is RunnerKind {
 	return value === "claude" || value === "codex" || value === "opencode"
 }
 
@@ -130,7 +130,7 @@ function parsePrompt(prompt: string): Record<string, unknown> {
 	}
 }
 
-function extractResumeSessionId(runner: PromptSessionRunnerKind, args: string[]): string | null {
+function extractResumeSessionId(runner: RunnerKind, args: string[]): string | null {
 	if (runner === "claude") {
 		const index = args.indexOf("--resume")
 		return index >= 0 ? args[index + 1] ?? null : null
@@ -144,7 +144,7 @@ function extractResumeSessionId(runner: PromptSessionRunnerKind, args: string[])
 	return index >= 0 ? args[index + 1] ?? null : null
 }
 
-function serializeRunnerText(runner: PromptSessionRunnerKind, text: string): string {
+function serializeRunnerText(runner: RunnerKind, text: string): string {
 	if (text.trimStart().startsWith("{")) return text
 	if (runner === "codex") return JSON.stringify({ type: "agent_message", text })
 	if (runner === "opencode") return JSON.stringify({ type: "message", role: "assistant", content: text })

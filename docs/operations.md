@@ -242,7 +242,7 @@ coder-loop item --help
 | `chain list` / `chain status <name>` | list / show one chain | `--json` `--loop-data-root <dir>` |
 | `chain stop <name>` / `chain resume <name>` | 暂停 / 恢复 chain scheduling | `--json` `--loop-data-root <dir>` |
 | `chain delete <name>` | 标记 chain 删除 | `--json` `--loop-data-root <dir>` |
-| `chain set-runner-model <chain>` | patch `chain.metadata.<kind>.model` runner-binding override | `--kind <claude\|codex\|opencode\|hapi>` `--model <name>` |
+| `chain set-runner-model <chain>` | patch `chain.metadata.<kind>.model` runner-binding override | `--kind <claude\|codex\|opencode>` `--model <name>` |
 | `item add <chain>` | 加一个 item；`--preset` / `--preset-path` 二选一必填 | `--issue <id>` `--repo-cwd <dir>` `--preset <name>` / `--preset-path <abs>` `--status` `--attempts` `--title` `--priority` `--field-json '{...}'` `--last-run-id` `--issue-file` `--evidence-dir` `--agent-cwd` `--runner` |
 | `item batch-add <chain> --items-json '[...]'` | 原子批量加 item | `--items-json` `--loop-data-root <dir>` |
 | `item list <chain>` / `item update <chain>` / `item reorder <chain>` | item 常规 CRUD | 看 `coder-loop item --help` |

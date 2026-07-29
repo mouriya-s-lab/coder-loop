@@ -5,14 +5,12 @@ import {
 	resolveChainRuntimePaths, resolvePhaseRunnerFromChain, runPresetChainCompleteTriggerPhases,
 	runnerAuthorizationForTest, runtimeStatus, schedulerTick, seedSessionClosure, stopFixture, storedChainMetadata,
 	writeBunMarkerRunner, writeFile, writeShellFinalizerMarkerScript, writeShellMarkerScript,
-	type AgentRunnerKind, type AgentRunnerSelection, type SchedulerPhaseRunner,
+	type AgentRunnerSelection, type SchedulerPhaseRunner,
 } from "./harness"
-
-type PromptSessionRunnerKind = Exclude<AgentRunnerKind, "hapi">
 
 describe("scheduler", () => {
 	test("runner projections reach scheduler fresh and resume paths for every runner", async () => {
-		for (const kind of ["claude", "codex", "opencode"] as const satisfies readonly PromptSessionRunnerKind[]) {
+		for (const kind of ["claude", "codex", "opencode"] as const) {
 			for (const resume of [false, true]) {
 				const fixture = await createFixture(`runner-projection-${kind}-${resume ? "resume" : "fresh"}`)
 				try {
@@ -404,7 +402,6 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.kind).toBe("codex")
 			expect(runner.model).toBe("gpt-5.6-sol")
 			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, runnerAuthorizationForTest("/repo/a", PRESET_DIR, "/lr"))
-			if (invocation.kind !== "spawn") throw new Error("local codex runner must produce a spawn plan")
 			const modelFlagIndex = invocation.args.indexOf("--model")
 			expect(modelFlagIndex).toBeGreaterThanOrEqual(0)
 			expect(invocation.args[modelFlagIndex + 1]).toBe("gpt-5.6-sol")
