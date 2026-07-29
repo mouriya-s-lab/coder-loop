@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, writeFile } from "node:fs/promises"
-import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
-import { basename, dirname, isAbsolute, resolve } from "node:path"
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { createWriteStream, existsSync, realpathSync, type WriteStream } from "node:fs"
+import { dirname, isAbsolute, resolve } from "node:path"
 
 import {
 	buildRenderBindings,
@@ -53,7 +53,7 @@ import {
 	type SchedulerSpawnErrorAttribution,
 } from "./runtime-data"
 import { detectsSessionIdInvalid } from "./runners/session-id"
-import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, type ClosureConsumptionAuthority, type ClosureConsumptionEvidence, type ClosureConsumptionObservation, type ConsumeClosureResult, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
 	LOOP_RUN_CREDENTIAL_ENV,
@@ -65,6 +65,19 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 import { createStreamTextState } from "./runner-output"
+import {
+	closureBranchName,
+	closureBranchPrefix,
+	classifyClosureResourceOwnership,
+	closureWorktreePath,
+	createRepositoryGitCoordinator,
+	persistedParPin,
+	type ClosureResourceOwnership,
+	type OriginFreshness,
+	type RepositoryGitCoordinator,
+	type RepositoryGitSingleflightResult,
+} from "./closure-lifecycle"
+import type { ClosureSnapshot, TaskNodeSnapshot } from "./task-runtime"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // Under the unified completion protocol (#451) the agent
@@ -178,12 +191,18 @@ export type SchedulerStore = Pick<
 	| "updateItem"
 	| "setItemSessionId"
 	| "getItemSessionId"
-	| "recordRun"
+	| "recordRunWithClosureResources"
 	| "getRunByRunId"
 	| "completeRun"
 	| "setCurrentRun"
 	| "getCurrentRun"
 	| "clearCurrentRun"
+	| "getTaskTree"
+	| "setClosureLifecycle"
+	| "setClosureResources"
+	| "assessClosureConsumption"
+	| "consumeClosureIfUnreachable"
+	| "markClosureConsumptionIntentEmitted"
 >
 
 export type SchedulerSpawnContext = {
@@ -197,16 +216,35 @@ export type SchedulerSpawnContext = {
 	phase: string
 }
 
-export type SchedulerWorktreeContext = {
+type SchedulerWorktreeContextBase = {
 	chain: ChainRecord
+	item: ItemRecord
+	phase: string
+	closureId: string
 	repoCwd: string
 	slotKey: string
 }
 
-export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Promise<string>
+export type SchedulerWorktreeContext =
+	| SchedulerWorktreeContextBase & { resourceState: "first-open"; existing: ClosureSnapshot | null }
+	| SchedulerWorktreeContextBase & { resourceState: "reopen"; existing: ClosureSnapshot }
+
+export type SchedulerClosureResources = {
+	worktreePath: string
+	branchName: string
+	baseCommit: string
+	freshness: OriginFreshness
+}
+
+export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Promise<SchedulerClosureResources | string>
 
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
+	| { type: "closure.resource_prepared"; chainId: number; itemId: number; phase: string; closureId: string; worktreePath: string; branchName: string; baseCommit: string; freshness: OriginFreshness }
+	| { type: "closure.lifecycle_changed"; chainId: number; itemId: number; phase: string; closureId: string; from: "active" | "suspended"; to: "active" | "suspended"; reason: "phase-left" | "phase-entered" }
+	| { type: "closure.consumed"; chainId: number; closureId: string; evidence: ClosureConsumptionEvidence; freshness: OriginFreshness }
+	| { type: "closure.git_failed"; chainId: number; itemId: number; phase: string; closureId: string; code: SchedulerError["code"]; error: string }
+	| { type: "closure.reconciled"; chainId: number; closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }
 	// #419 review I2: `itemId` (rowid integer) renamed to `rowId` for wire-shape consistency
 	// with other `item.*` audit events that use the split shape `{ rowId: number, itemId: string }`.
 	// `itemId` on the audit wire now uniformly means the opaque preset-declared string identity;
@@ -835,53 +873,93 @@ export function schedulerSlotKey(chainId: number, repoCwd: string): string {
 	return `${chainId}\u0000${repoCwd}`
 }
 
-export function schedulerSlotWorktreePath(chain: ChainRecord, repoCwd: string, options: LoopDataRootOptions = {}): string {
-	const chainPaths = resolveChainRuntimePaths(chain.name, options)
-	const repoLabel = safePathComponent(basename(repoCwd) || "repo")
-	const repoHash = createHash("sha256").update(repoCwd).digest("hex").slice(0, 16)
-	return resolve(chainPaths.chainRoot, "worktrees", `${repoLabel}-${repoHash}`)
-}
+const repositoryGitCoordinator = createRepositoryGitCoordinator()
 
-function schedulerSlotBranchName(chain: ChainRecord, repoCwd: string): string {
-	return `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
-}
-
-export function createGitWorktreeManager(options: LoopDataRootOptions = {}): SchedulerWorktreeManager {
-	return async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
-		await mkdir(dirname(worktreePath), { recursive: true })
-		if (gitWorktreeListIncludesPath(repoCwd, worktreePath)) {
-			if (existsSync(worktreePath)) return worktreePath
-			// Registered but the directory is gone (deleted loop-data root): clear the corpse
-			// registration so the add below can recreate the worktree.
-			git(repoCwd, ["worktree", "prune"])
+export function createGitWorktreeManager(
+	options: LoopDataRootOptions = {},
+	coordinator: RepositoryGitCoordinator = repositoryGitCoordinator,
+): SchedulerWorktreeManager {
+	return async (context) => {
+		const loopDataRoot = resolveLoopDataPaths(options).root
+		const expectedWorktreePath = closureWorktreePath(loopDataRoot, context.chain.name, context.repoCwd, context.closureId)
+		const expectedBranchName = closureBranchName(context.chain.name, context.closureId)
+		// Compatibility provisioning can copy a legacy slot tuple into every declared
+		// phase closure. Durable phase-run history distinguishes a real reopen from an
+		// unopened sibling; tuple equality cannot, because migrated resources predate the
+		// deterministic per-closure namespace and must remain byte-identical on reopen.
+		const retainedResources = context.resourceState === "first-open"
+			? null
+			: context.existing.worktreePath === null || context.existing.branchName === null
+				? null
+				: { worktreePath: context.existing.worktreePath, branchName: context.existing.branchName, baseCommit: context.existing.baseCommit }
+		if (context.resourceState === "reopen" && retainedResources === null) {
+			throw new SchedulerError("worktree_create_failed", `persisted closure ${context.closureId} cannot reopen without its resource tuple`)
 		}
-
-		const branchName = schedulerSlotBranchName(chain, repoCwd)
-		const startRef = chooseWorktreeStartRef(repoCwd, chain.baseBranch)
-		let result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
-		if (result.exitCode !== 0 && removeStaleSlotBranchWorktree(repoCwd, result.stderr)) {
-			result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
-		}
-		if (result.exitCode !== 0) {
-			throw new SchedulerError("worktree_create_failed", `failed to create scheduler worktree at ${worktreePath}: ${result.stderr}`)
-		}
-		return worktreePath
+		const worktreePath = retainedResources?.worktreePath ?? expectedWorktreePath
+		const branchName = retainedResources?.branchName ?? expectedBranchName
+		const parPin = persistedParPin(context.existing)
+		const retainedBase = retainedResources === null
+			? null
+			: { commit: retainedResources.baseCommit, freshness: { kind: "retained", commit: retainedResources.baseCommit } as const }
+		const base: RepositoryGitSingleflightResult = parPin !== null
+			? { commit: parPin, freshness: { kind: "retained", commit: parPin } }
+			: retainedBase ?? await coordinator.singleflight(
+				context.repoCwd,
+				`resolve-base:${context.chain.baseBranch}`,
+				async () => await coordinator.run(context.repoCwd, async () => await resolveClosureBase(context.repoCwd, context.chain.baseBranch)),
+			)
+		return await coordinator.run(context.repoCwd, async () => {
+			await loadOrCaptureRepositoryGitContract(context.chain.name, context.repoCwd, options)
+			const listed = await git(context.repoCwd, ["worktree", "list", "--porcelain"])
+			if (listed.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to inspect closure worktrees for ${context.closureId}: ${listed.stderr}`)
+			if (retainedBase !== null) {
+				if (!gitWorktreeListOutputIncludesPath(listed.stdout, worktreePath)) {
+					throw new SchedulerError("worktree_create_failed", `persisted closure worktree registration is missing for ${context.closureId}: ${worktreePath}`)
+				}
+				const registeredBranch = gitWorktreeBranchForPath(listed.stdout, worktreePath)
+				const persistedBranchRef = branchName.startsWith("refs/") ? branchName : `refs/heads/${branchName}`
+				if (registeredBranch !== persistedBranchRef) {
+					throw new SchedulerError("worktree_create_failed", `closure worktree ${worktreePath} is registered to unexpected branch ${registeredBranch ?? "(detached)"}; expected ${branchName}`)
+				}
+				if (!existsSync(worktreePath)) {
+					throw new SchedulerError("worktree_create_failed", `persisted closure worktree is missing for ${context.closureId}: ${worktreePath}`)
+				}
+				const head = await requireGitCommit(worktreePath, "HEAD", "closure_head_unavailable")
+				return { worktreePath, branchName, baseCommit: context.existing?.baseCommit ?? head, freshness: { kind: "retained", commit: head } }
+			}
+			await mkdir(dirname(worktreePath), { recursive: true })
+			if (gitWorktreeListOutputIncludesPath(listed.stdout, worktreePath)) {
+				const registeredBranch = gitWorktreeBranchForPath(listed.stdout, worktreePath)
+				if (registeredBranch !== branchName) {
+					throw new SchedulerError("worktree_create_failed", `closure worktree ${worktreePath} is registered to unexpected branch ${registeredBranch ?? "(detached)"}; expected ${branchName}`)
+				}
+				if (!existsSync(worktreePath)) {
+					const remove = await git(context.repoCwd, ["worktree", "remove", "--force", worktreePath])
+					if (remove.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to remove stale closure worktree registration ${worktreePath}: ${remove.stderr}`)
+				}
+				else {
+					const head = await requireGitCommit(worktreePath, "HEAD", "closure_head_unavailable")
+					return { worktreePath, branchName, baseCommit: context.existing?.baseCommit ?? head, freshness: { kind: "retained", commit: head } }
+				}
+			}
+			const shortBranch = branchName.replace(/^refs\/heads\//, "")
+			const branchExists = (await git(context.repoCwd, ["show-ref", "--verify", "--quiet", branchName])).exitCode === 0
+			if (branchExists) {
+				const registeredPath = gitWorktreePathForBranch(listed.stdout, branchName)
+				if (registeredPath !== null && registeredPath !== worktreePath) {
+					const suffix = closureWorktreePath("/", context.chain.name, context.repoCwd, context.closureId)
+					if (!resolve(registeredPath).endsWith(suffix)) throw new SchedulerError("worktree_create_failed", `closure branch ${branchName} is checked out outside its engine namespace at ${registeredPath}`)
+					const remove = await git(context.repoCwd, ["worktree", "remove", "--force", registeredPath])
+					if (remove.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to remove stale closure worktree registration ${registeredPath}: ${remove.stderr}`)
+				}
+			}
+			const result = await git(context.repoCwd, branchExists
+				? ["worktree", "add", worktreePath, branchName]
+				: ["worktree", "add", "-b", shortBranch, worktreePath, base.commit])
+			if (result.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to create closure worktree ${context.closureId} at ${worktreePath}: ${result.stderr}`)
+			return { worktreePath, branchName, baseCommit: base.commit, freshness: base.freshness }
+		})
 	}
-}
-
-// A daemon killed mid-run leaves its slot worktree checked out on the engine-owned
-// `coder-loop/...` slot branch; git then refuses `worktree add -B` for that branch
-// ("already used by worktree at <path>") from any future loop-data root, permanently
-// wedging every later chain on the same repository. The slot branch name proves the
-// conflicting worktree is engine-created scrap, so force-remove the stale registration
-// and let the caller retry the add once.
-function removeStaleSlotBranchWorktree(repoCwd: string, stderr: string): boolean {
-	const match = stderr.match(/already used by worktree at '([^']+)'/)
-	if (match === null) return false
-	const removeResult = git(repoCwd, ["worktree", "remove", "--force", match[1]!])
-	if (removeResult.exitCode !== 0) git(repoCwd, ["worktree", "prune"])
-	return true
 }
 
 export type SchedulerChainWorktreeCleanup = {
@@ -894,16 +972,321 @@ export type SchedulerChainWorktreeCleanup = {
 	error: string | null
 }
 
-export function cleanupSchedulerChainWorktrees(
-	chain: ChainRecord,
-	repoCwds: readonly string[],
-	options: LoopDataRootOptions = {},
-): SchedulerChainWorktreeCleanup[] {
+export type ClosureReconciliationMismatch =
+	| { kind: "missing-directory"; path: string; repaired: false }
+	| { kind: "missing-branch"; branchName: string; repaired: false }
+	| { kind: "registration-mismatch"; path: string; expectedBranchName: string; actualBranchName: string | null; repaired: false }
+	| { kind: "orphan-directory"; path: string; repaired: true }
+	| { kind: "orphan-directory"; path: string; repaired: false; error: string }
+	| { kind: "orphan-branch"; branchName: string; repaired: true }
+	| { kind: "orphan-branch"; branchName: string; repaired: false; error: string }
+	| { kind: "orphan-branch"; branchName: string; repaired: false; retained: "unpublished-work"; tip: string }
+	| { kind: "repository-scan-failed"; surface: "git-contract" | "branches" | "worktrees"; repaired: false; error: string }
+	| { kind: "hooks-drift"; expected: string | null; actual: string | null; repaired: false }
+	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; expected: string | null; actual: string | null; repaired: false }
+	| { kind: "retired-resource"; path: string; branchName: string; resourcesRemoved: boolean; repaired: true }
+	| { kind: "retired-resource"; path: string; branchName: string; resourcesRemoved: false; repaired: false; error: string }
+
+export type ReconcileClosureResourcesInput = {
+	chain: ChainRecord
+	items: readonly ItemRecord[]
+	tree: TaskNodeSnapshot | null
+	loopDataRootOptions?: LoopDataRootOptions
+	store: Pick<SqliteStateStore, "setClosureResources">
+}
+
+export type ClosureReconciliationFinding = {
+	closureId: string | null
+	repoCwd: string
+	mismatch: ClosureReconciliationMismatch
+}
+
+type RetiredResourceGroup =
+	| { kind: "retired-slot"; repoCwd: string; worktreePath: string; branchName: string; closures: RetiredResourceClosure[] }
+	| { kind: "migrated-legacy"; repoCwd: string; worktreePath: string; closures: RetiredResourceClosure[] }
+
+type RetiredResourceClosure = { snapshot: ClosureSnapshot; branchName: string }
+
+export async function reconcileClosureResources(input: ReconcileClosureResourcesInput): Promise<ClosureReconciliationFinding[]> {
+	const findings: ClosureReconciliationFinding[] = []
+	const items = new Map(input.items.map((item) => [item.id, item]))
+	const closures = collectClosures(input.tree)
+	const loopDataRoot = resolveLoopDataPaths(input.loopDataRootOptions).root
+	const retiredGroups = new Map<string, RetiredResourceGroup>()
+	const preservedRetiredPaths = new Set<string>()
+	for (const closure of closures) {
+		const item = items.get(closure.itemRowId)
+		if (item === undefined || closure.lifecycle !== "consumed" || closure.worktreePath === null || closure.branchName === null) continue
+		const ownership = classifyClosureResourceOwnership({ loopDataRoot, chainName: input.chain.name, repoCwd: item.repoCwd, closureId: closure.closureId, worktreePath: closure.worktreePath, branchName: closure.branchName })
+		if (ownership.kind !== "retired-slot" && ownership.kind !== "migrated-legacy") continue
+		const key = ownership.kind === "retired-slot"
+			? `retired-slot\0${item.repoCwd}\0${closure.worktreePath}\0${closure.branchName}`
+			: `migrated-legacy\0${item.repoCwd}\0${closure.worktreePath}`
+		const existing = retiredGroups.get(key)
+		if (existing !== undefined) {
+			existing.closures.push({ snapshot: closure, branchName: closure.branchName })
+			continue
+		}
+		retiredGroups.set(key, ownership.kind === "retired-slot"
+			? { kind: "retired-slot", repoCwd: item.repoCwd, worktreePath: closure.worktreePath, branchName: closure.branchName, closures: [{ snapshot: closure, branchName: closure.branchName }] }
+			: { kind: "migrated-legacy", repoCwd: item.repoCwd, worktreePath: closure.worktreePath, closures: [{ snapshot: closure, branchName: closure.branchName }] })
+	}
+	for (const group of retiredGroups.values()) {
+		const hasLiveReference = closures.some((closure) => closure.lifecycle !== "consumed"
+			&& closure.worktreePath === group.worktreePath
+			&& (group.kind === "migrated-legacy" || closure.branchName === group.branchName))
+		if (hasLiveReference) {
+			preservedRetiredPaths.add(group.worktreePath)
+			for (const closure of group.closures) {
+				input.store.setClosureResources(closure.snapshot.closureId, { worktreePath: null, branchName: null, updatedAt: Math.floor(Date.now() / 1000) })
+				findings.push({ closureId: closure.snapshot.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: closure.branchName, resourcesRemoved: false, repaired: true } })
+			}
+			continue
+		}
+		const representative = group.closures[0]?.snapshot
+		if (representative === undefined) continue
+		const [cleanup] = await cleanupSchedulerChainWorktrees([{
+			chainName: input.chain.name,
+			repoCwd: group.repoCwd,
+			closure: representative,
+			...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }),
+		}])
+		if (cleanup === undefined || cleanup.error !== null) {
+			preservedRetiredPaths.add(group.worktreePath)
+			const error = cleanup?.error ?? "retired resource cleanup produced no result"
+			for (const closure of group.closures) findings.push({ closureId: closure.snapshot.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: closure.branchName, resourcesRemoved: false, repaired: false, error } })
+			continue
+		}
+		for (const closure of group.closures) {
+			input.store.setClosureResources(closure.snapshot.closureId, { worktreePath: null, branchName: null, updatedAt: Math.floor(Date.now() / 1000) })
+			findings.push({ closureId: closure.snapshot.closureId, repoCwd: group.repoCwd, mismatch: { kind: "retired-resource", path: group.worktreePath, branchName: closure.branchName, resourcesRemoved: group.kind === "retired-slot", repaired: true } })
+		}
+	}
+	const registeredPaths = new Set([...preservedRetiredPaths, ...closures.flatMap((closure) => closure.lifecycle === "consumed" || closure.worktreePath === null ? [] : [closure.worktreePath])])
+	const branchesByRepo = new Map<string, Set<string>>()
+	const repositoryWorktrees = new Map<string, string>()
+	const repositoryWorktreeBranches = new Map<string, string | null>()
+	const worktreeScanFailed = new Set<string>()
+	for (const closure of closures) {
+		const item = items.get(closure.itemRowId)
+		if (item === undefined || closure.lifecycle === "consumed") continue
+		if (closure.worktreePath !== null && !existsSync(closure.worktreePath)) findings.push({ closureId: closure.closureId, repoCwd: item.repoCwd, mismatch: { kind: "missing-directory", path: closure.worktreePath, repaired: false } })
+		if (closure.branchName !== null) {
+			const ownership = closure.worktreePath === null
+				? { kind: "foreign" as const }
+				: classifyClosureResourceOwnership({ loopDataRoot, chainName: input.chain.name, repoCwd: item.repoCwd, closureId: closure.closureId, worktreePath: closure.worktreePath, branchName: closure.branchName })
+			const branchRef = ownership.kind === "foreign" ? closure.branchName : ownership.branchRef
+			const branches = branchesByRepo.get(item.repoCwd) ?? new Set<string>()
+			branches.add(branchRef)
+			branchesByRepo.set(item.repoCwd, branches)
+			if ((await git(item.repoCwd, ["show-ref", "--verify", "--quiet", branchRef])).exitCode !== 0) findings.push({ closureId: closure.closureId, repoCwd: item.repoCwd, mismatch: { kind: "missing-branch", branchName: closure.branchName, repaired: false } })
+		}
+	}
+	for (const repoCwd of new Set(input.items.map((item) => item.repoCwd))) {
+		await repositoryGitCoordinator.run(repoCwd, async () => {
+			try {
+				const expected = await loadOrCaptureRepositoryGitContract(input.chain.name, repoCwd, input.loopDataRootOptions)
+				const actual = await readRepositoryGitContract(repoCwd)
+				if (actual.hooksPath !== expected.hooksPath) findings.push({ closureId: null, repoCwd, mismatch: { kind: "hooks-drift", expected: expected.hooksPath, actual: actual.hooksPath, repaired: false } })
+				if (actual.worktreeConfig !== expected.worktreeConfig) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repo-config-drift", key: "extensions.worktreeConfig", expected: expected.worktreeConfig, actual: actual.worktreeConfig, repaired: false } })
+			} catch (error) {
+				findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "git-contract", repaired: false, error: error instanceof Error ? error.message : "repository Git contract scan failed" } })
+			}
+			const prefix = closureBranchPrefix(input.chain.name)
+			const listed = await git(repoCwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
+			if (listed.exitCode !== 0) findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "branches", repaired: false, error: gitFailure("for-each-ref", listed) } })
+			else for (const branchName of listed.stdout.split("\n").filter((name) => name.startsWith(prefix))) {
+				if (branchesByRepo.get(repoCwd)?.has(branchName) === true) continue
+				// An engine-namespace branch with no persisted closure can only appear through an
+				// interrupted consume or persistence loss. Deleting it is irreversible for commits
+				// that exist nowhere else, so repair only proves-published tips: the tip must be
+				// reachable from a remote-tracking ref or the chain base branch. Anything else is
+				// surfaced and retained rather than destroyed.
+				const tip = await git(repoCwd, ["rev-parse", "--verify", `${branchName}^{commit}`])
+				if (tip.exitCode === 0 && tip.stdout !== "") {
+					const containing = await git(repoCwd, ["for-each-ref", "--contains", tip.stdout, "--format=%(refname)", "refs/remotes/origin", `refs/heads/${input.chain.baseBranch}`])
+					if (containing.exitCode !== 0 || containing.stdout === "") {
+						findings.push({ closureId: null, repoCwd, mismatch: { kind: "orphan-branch", branchName, repaired: false, retained: "unpublished-work", tip: tip.stdout } })
+						continue
+					}
+				}
+				const removed = await git(repoCwd, ["update-ref", "-d", branchName])
+				findings.push({ closureId: null, repoCwd, mismatch: removed.exitCode === 0
+					? { kind: "orphan-branch", branchName, repaired: true }
+					: { kind: "orphan-branch", branchName, repaired: false, error: gitFailure("update-ref -d", removed) } })
+			}
+			const worktrees = await git(repoCwd, ["worktree", "list", "--porcelain"])
+			if (worktrees.exitCode !== 0) {
+				worktreeScanFailed.add(repoCwd)
+				findings.push({ closureId: null, repoCwd, mismatch: { kind: "repository-scan-failed", surface: "worktrees", repaired: false, error: gitFailure("worktree list", worktrees) } })
+			} else for (const registration of gitWorktreeRegistrations(worktrees.stdout)) {
+				repositoryWorktrees.set(registration.path, repoCwd)
+				repositoryWorktreeBranches.set(registration.path, registration.branchName)
+			}
+		})
+	}
+	for (const closure of closures) {
+		const item = items.get(closure.itemRowId)
+		if (item === undefined || closure.lifecycle === "consumed" || closure.worktreePath === null || closure.branchName === null || worktreeScanFailed.has(item.repoCwd)) continue
+		const ownership = classifyClosureResourceOwnership({ loopDataRoot, chainName: input.chain.name, repoCwd: item.repoCwd, closureId: closure.closureId, worktreePath: closure.worktreePath, branchName: closure.branchName })
+		const expectedBranchName = ownership.kind === "foreign" ? closure.branchName : ownership.branchRef
+		const actualBranchName = repositoryWorktreeBranches.get(resolve(closure.worktreePath)) ?? null
+		if (actualBranchName !== expectedBranchName) {
+			findings.push({
+				closureId: closure.closureId,
+				repoCwd: item.repoCwd,
+				mismatch: { kind: "registration-mismatch", path: closure.worktreePath, expectedBranchName, actualBranchName, repaired: false },
+			})
+		}
+	}
+	const worktreeRoot = resolve(resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions).chainRoot, "worktrees")
+	const attemptedRegisteredOrphans = new Set<string>()
+	for (const [path, repoCwd] of repositoryWorktrees) {
+		if (dirname(path) !== worktreeRoot || registeredPaths.has(path)) continue
+		attemptedRegisteredOrphans.add(path)
+		const removed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "remove", "--force", path]))
+		findings.push({ closureId: null, repoCwd, mismatch: removed.exitCode === 0
+			? { kind: "orphan-directory", path, repaired: true }
+			: { kind: "orphan-directory", path, repaired: false, error: gitFailure("worktree remove", removed) } })
+	}
+	try {
+		for (const entry of await readdir(worktreeRoot, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue
+			const path = resolve(worktreeRoot, entry.name)
+			if (registeredPaths.has(path) || attemptedRegisteredOrphans.has(path)) continue
+			const repoCwd = repositoryWorktrees.get(path)
+			if (repoCwd !== undefined) {
+				const removed = await repositoryGitCoordinator.run(repoCwd, async () => await git(repoCwd, ["worktree", "remove", "--force", path]))
+				findings.push({ closureId: null, repoCwd, mismatch: removed.exitCode === 0
+					? { kind: "orphan-directory", path, repaired: true }
+					: { kind: "orphan-directory", path, repaired: false, error: gitFailure("worktree remove", removed) } })
+				continue
+			}
+			if (worktreeScanFailed.size > 0) continue
+			if (existsSync(path)) await rm(path, { recursive: true, force: true })
+			findings.push({ closureId: null, repoCwd: "", mismatch: { kind: "orphan-directory", path, repaired: true } })
+		}
+	} catch (error) {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
+	}
+	return findings
+}
+
+function gitWorktreeRegistrations(output: string): { path: string; branchName: string | null }[] {
+	return output.split("\n\n").flatMap((record) => {
+		const lines = record.split("\n")
+		const worktree = lines.find((line) => line.startsWith("worktree "))
+		if (worktree === undefined) return []
+		const branch = lines.find((line) => line.startsWith("branch "))
+		return [{ path: resolve(worktree.slice("worktree ".length)), branchName: branch?.slice("branch ".length) ?? null }]
+	})
+}
+
+function gitWorktreePathForBranch(output: string, branchName: string): string | null {
+	for (const record of output.split("\n\n")) {
+		const lines = record.split("\n")
+		if (!lines.includes(`branch ${branchName}`)) continue
+		const worktree = lines.find((line) => line.startsWith("worktree "))
+		return worktree === undefined ? null : resolve(worktree.slice("worktree ".length))
+	}
+	return null
+}
+
+function gitWorktreeBranchForPath(output: string, worktreePath: string): string | null {
+	for (const record of output.split("\n\n")) {
+		const lines = record.split("\n")
+		const worktree = lines.find((line) => line.startsWith("worktree "))
+		if (worktree === undefined || !worktreePathsMatch(worktree.slice("worktree ".length), worktreePath)) continue
+		const branch = lines.find((line) => line.startsWith("branch "))
+		return branch === undefined ? null : branch.slice("branch ".length)
+	}
+	return null
+}
+
+function worktreePathsMatch(left: string, right: string): boolean {
+	return resolve(left) === resolve(right) || realpathForComparison(left) === realpathForComparison(right)
+}
+
+type RepositoryGitContract = {
+	hooksPath: string | null
+	worktreeConfig: string | null
+}
+
+async function readRepositoryGitContract(repoCwd: string): Promise<RepositoryGitContract> {
+	const readConfig = async (key: "core.hooksPath" | "extensions.worktreeConfig"): Promise<string | null> => {
+		const result = await git(repoCwd, ["config", "--get", key])
+		if (result.exitCode === 0) return result.stdout
+		if (result.exitCode === 1 && result.stdout === "" && result.stderr === "") return null
+		throw new SchedulerError("worktree_create_failed", `failed to read repository Git contract ${key}: ${result.stderr}`)
+	}
+	return {
+		hooksPath: await readConfig("core.hooksPath"),
+		worktreeConfig: await readConfig("extensions.worktreeConfig"),
+	}
+}
+
+function repositoryGitContractPath(chainName: string, repoCwd: string, options: LoopDataRootOptions = {}): string {
+	const identity = createHash("sha256").update(resolve(repoCwd)).digest("hex").slice(0, 24)
+	return resolve(resolveChainRuntimePaths(chainName, options).chainRoot, "git-contracts", identity)
+}
+
+function encodeGitContractValue(value: string | null): string {
+	return value === null ? "unset\n" : `value\n${value}`
+}
+
+function decodeGitContractValue(value: string): string | null {
+	if (value === "unset\n") return null
+	if (value.startsWith("value\n")) return value.slice("value\n".length)
+	throw new SchedulerError("worktree_create_failed", "persisted repository Git contract is malformed")
+}
+
+async function loadOrCaptureRepositoryGitContract(chainName: string, repoCwd: string, options: LoopDataRootOptions = {}): Promise<RepositoryGitContract> {
+	const root = repositoryGitContractPath(chainName, repoCwd, options)
+	const hooksFile = resolve(root, "core-hooks-path")
+	const worktreeConfigFile = resolve(root, "extensions-worktree-config")
+	try {
+		return {
+			hooksPath: decodeGitContractValue(await readFile(hooksFile, "utf8")),
+			worktreeConfig: decodeGitContractValue(await readFile(worktreeConfigFile, "utf8")),
+		}
+	} catch (error) {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
+	}
+	const current = await readRepositoryGitContract(repoCwd)
+	await mkdir(root, { recursive: true })
+	await writeFile(hooksFile, encodeGitContractValue(current.hooksPath), { flag: "wx" }).catch((error) => {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error
+	})
+	await writeFile(worktreeConfigFile, encodeGitContractValue(current.worktreeConfig), { flag: "wx" }).catch((error) => {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error
+	})
+	return {
+		hooksPath: decodeGitContractValue(await readFile(hooksFile, "utf8")),
+		worktreeConfig: decodeGitContractValue(await readFile(worktreeConfigFile, "utf8")),
+	}
+}
+
+function gitFailure(operation: string, result: { exitCode: number; stderr: string }): string {
+	return `${operation} failed (exit ${result.exitCode}): ${result.stderr}`
+}
+
+function collectClosures(node: TaskNodeSnapshot | null): ClosureSnapshot[] {
+	if (node === null) return []
+	if (node.kind === "leaf") return [node.closure]
+	return node.children.flatMap(collectClosures)
+}
+
+export async function cleanupSchedulerChainWorktrees(
+	closures: readonly { chainName: string; repoCwd: string; closure: ClosureSnapshot; loopDataRootOptions?: LoopDataRootOptions }[],
+): Promise<SchedulerChainWorktreeCleanup[]> {
 	const cleaned: SchedulerChainWorktreeCleanup[] = []
-	for (const repoCwd of distinct(repoCwds)) {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
-		const listResult = git(repoCwd, ["worktree", "list", "--porcelain"])
-		if (listResult.exitCode !== 0) {
+	for (const { chainName, repoCwd, closure, loopDataRootOptions } of closures) {
+		if (closure.lifecycle !== "consumed" || closure.worktreePath === null || closure.branchName === null) continue
+		const worktreePath = closure.worktreePath
+		const branchName = closure.branchName
+		const ownership = classifyClosureResourceOwnership({ loopDataRoot: resolveLoopDataPaths(loopDataRootOptions).root, chainName, repoCwd, closureId: closure.closureId, worktreePath, branchName })
+		const cleanupTarget = closureResourceCleanupTarget(ownership)
+		if (cleanupTarget.kind === "reject") {
 			cleaned.push({
 				repoCwd,
 				worktreePath,
@@ -911,40 +1294,234 @@ export function cleanupSchedulerChainWorktrees(
 				removed: false,
 				directoryRemoved: false,
 				pruned: false,
-				error: `git worktree list failed (exit ${listResult.exitCode}): ${listResult.stderr}`,
+				error: `closure ${closure.closureId} resources are outside engine closure namespace`,
 			})
 			continue
 		}
-
-		const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
-		let removed = false
-		let directoryRemoved = false
-		let error: string | null = null
-		if (registered && existsSync(worktreePath)) {
-			const removeResult = git(repoCwd, ["worktree", "remove", "--force", worktreePath])
-			removed = removeResult.exitCode === 0
-			if (!removed) error = `git worktree remove failed (exit ${removeResult.exitCode}): ${removeResult.stderr}`
+		if (cleanupTarget.kind === "none") {
+			cleaned.push({ repoCwd, worktreePath, registered: false, removed: false, directoryRemoved: false, pruned: false, error: null })
+			continue
 		}
-		if ((removed || !registered) && existsSync(worktreePath)) {
-			try {
-				rmSync(worktreePath, { recursive: true, force: true })
-				directoryRemoved = true
-			} catch (cleanupError) {
-				const directoryError = `worktree directory remove failed: ${errorMessage(cleanupError)}`
-				error = error === null ? directoryError : `${error}; ${directoryError}`
+		const branchRef = cleanupTarget.kind === "worktree-and-branch" ? cleanupTarget.branchRef : null
+		if (!existsSync(repoCwd)) {
+			cleaned.push({
+				repoCwd,
+				worktreePath,
+				registered: false,
+				removed: false,
+				directoryRemoved: false,
+				pruned: false,
+				error: `repository is unavailable; closure Git resources cannot be verified or removed: ${repoCwd}`,
+			})
+			continue
+		}
+		const result = await repositoryGitCoordinator.run(repoCwd, async (): Promise<SchedulerChainWorktreeCleanup> => {
+			const listResult = await git(repoCwd, ["worktree", "list", "--porcelain"])
+			if (listResult.exitCode !== 0) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered: false,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `git worktree list failed (exit ${listResult.exitCode}): ${listResult.stderr}`,
+				}
 			}
-		}
 
-		const pruneResult = git(repoCwd, ["worktree", "prune"])
-		const pruned = pruneResult.exitCode === 0
-		if (!pruned) {
-			const pruneError = `git worktree prune failed (exit ${pruneResult.exitCode}): ${pruneResult.stderr}`
-			error = error === null ? pruneError : `${error}; ${pruneError}`
-		}
+			const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
+			const registeredBranchPath = branchRef === null ? null : gitWorktreePathForBranch(listResult.stdout, branchRef)
+			const registeredPathBranch = gitWorktreeBranchForPath(listResult.stdout, worktreePath)
+			if (branchRef !== null && registeredBranchPath !== null && !worktreePathsMatch(registeredBranchPath, worktreePath)) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `closure branch ${branchName} is registered at unexpected worktree ${registeredBranchPath}`,
+				}
+			}
+			if (branchRef !== null && registered && registeredPathBranch === null) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `closure worktree ${worktreePath} is detached instead of registered to expected branch ${branchName}`,
+				}
+			}
+			if (branchRef !== null && registeredPathBranch !== null && registeredPathBranch !== branchRef) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `closure worktree ${worktreePath} is registered to unexpected branch ${registeredPathBranch}`,
+				}
+			}
+			let removed = false
+			let directoryRemoved = false
+			if (registered) {
+				const removeResult = await git(repoCwd, ["worktree", "remove", "--force", worktreePath])
+				removed = removeResult.exitCode === 0
+				if (!removed) {
+					return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("worktree remove", removeResult) }
+				}
+			}
+			if ((removed || !registered) && existsSync(worktreePath)) {
+				try {
+					await rm(worktreePath, { recursive: true, force: true })
+					directoryRemoved = true
+				} catch (cleanupError) {
+					return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: `worktree directory remove failed: ${errorMessage(cleanupError)}` }
+				}
+			}
 
-		cleaned.push({ repoCwd, worktreePath, registered, removed, directoryRemoved, pruned, error })
+			const verifyWorktrees = await git(repoCwd, ["worktree", "list", "--porcelain"])
+			if (verifyWorktrees.exitCode !== 0) {
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("worktree list verification", verifyWorktrees) }
+			}
+			if (gitWorktreeListOutputIncludesPath(verifyWorktrees.stdout, worktreePath) || (branchRef !== null && gitWorktreePathForBranch(verifyWorktrees.stdout, branchRef) !== null)) {
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: "closure worktree registration remains after cleanup" }
+			}
+			if (branchRef === null) return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: null }
+			const deleteBranchResult = await git(repoCwd, ["update-ref", "-d", branchRef])
+			if (deleteBranchResult.exitCode !== 0) {
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: gitFailure("update-ref -d", deleteBranchResult) }
+			}
+			const verifyBranch = await git(repoCwd, ["show-ref", "--verify", "--quiet", branchRef])
+			if (verifyBranch.exitCode !== 1) {
+				const error = verifyBranch.exitCode === 0
+					? `closure branch ${branchName} remains after cleanup`
+					: gitFailure("show-ref verification", verifyBranch)
+				return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error }
+			}
+
+			return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned: false, error: null }
+		})
+		cleaned.push(result)
 	}
 	return cleaned
+}
+
+type ClosureResourceCleanupTarget =
+	| { kind: "worktree-and-branch"; branchRef: string }
+	| { kind: "worktree-only" }
+	| { kind: "none" }
+	| { kind: "reject" }
+
+function closureResourceCleanupTarget(ownership: ClosureResourceOwnership): ClosureResourceCleanupTarget {
+	switch (ownership.kind) {
+		case "closure": return { kind: "worktree-and-branch", branchRef: ownership.branchRef }
+		case "retired-slot": return { kind: "worktree-and-branch", branchRef: ownership.branchRef }
+		case "migrated-legacy": return ownership.worktree.kind === "retired-slot" ? { kind: "worktree-only" } : { kind: "none" }
+		case "foreign": return { kind: "reject" }
+	}
+}
+
+export type ConsumeSchedulerClosureInput = {
+	chainId: number
+	chainName: string
+	baseBranch: string
+	repoCwd: string
+	closure: ClosureSnapshot
+	authority: ClosureConsumptionAuthority
+	updatedAt: number
+	loopDataRootOptions?: LoopDataRootOptions
+	store: Pick<SqliteStateStore, "assessClosureConsumption" | "consumeClosureIfUnreachable" | "getTaskTree" | "markClosureConsumptionIntentEmitted" | "setClosureResources">
+	emit: (event: Extract<SchedulerEvent, { type: "closure.consumed" }>) => Promise<void> | void
+}
+
+export type ConsumeSchedulerClosureResult = {
+	decision: ConsumeClosureResult
+	cleanup: SchedulerChainWorktreeCleanup | null
+	complete: boolean
+}
+
+export async function sampleClosureConsumptionObservation(input: {
+	repoCwd: string
+	baseBranch: string
+	branchName: string
+	baseCommit: string
+}): Promise<ClosureConsumptionObservation> {
+	return await repositoryGitCoordinator.run(input.repoCwd, async () => {
+		const branch = await git(input.repoCwd, ["rev-parse", "--verify", `${input.branchName}^{commit}`])
+		if (branch.exitCode !== 0 || branch.stdout === "") {
+			const origin = await git(input.repoCwd, ["remote", "get-url", "origin"])
+			return {
+				evidence: "unevaluable",
+				freshness: origin.exitCode === 0
+					? { kind: "retained", commit: input.baseCommit }
+					: { kind: "no-origin", availability: "unavailable", commit: input.baseCommit },
+			}
+		}
+		let freshness: OriginFreshness
+		try {
+			freshness = (await resolveClosureBase(input.repoCwd, input.baseBranch)).freshness
+		} catch {
+			return { evidence: "unevaluable", freshness: { kind: "retained", commit: input.baseCommit } }
+		}
+		if (branch.stdout === input.baseCommit) return { evidence: "no-work", freshness }
+		if (freshness.kind === "fetched") {
+			const refreshed = await git(input.repoCwd, ["fetch", "--no-tags", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+			if (refreshed.exitCode !== 0) return { evidence: "unevaluable", freshness }
+			const publicationFreshness: OriginFreshness = {
+				kind: "fetched",
+				remote: freshness.remote,
+				commit: freshness.commit,
+				observedAt: new Date().toISOString(),
+			}
+			const remoteContains = await git(input.repoCwd, ["for-each-ref", "--contains", branch.stdout, "--format=%(refname)", "refs/remotes/origin/"])
+			if (remoteContains.exitCode !== 0) return { evidence: "unevaluable", freshness: publicationFreshness }
+			if (remoteContains.stdout.split("\n").some((ref) => ref.startsWith("refs/remotes/origin/"))) return { evidence: "published", freshness: publicationFreshness }
+			return { evidence: "unpublished-discarded", freshness: publicationFreshness }
+		}
+		return { evidence: "unpublished-discarded", freshness }
+	})
+}
+
+export async function consumeSchedulerClosure(input: ConsumeSchedulerClosureInput): Promise<ConsumeSchedulerClosureResult> {
+	const assessment = input.store.assessClosureConsumption(input.closure.closureId, input.authority)
+	if (assessment.kind === "retained") return { decision: assessment, cleanup: null, complete: false }
+	const assessedClosure = assessment.closure
+	const observation = assessment.kind === "already-consumed" && assessment.intent !== null
+		? assessment.intent.observation
+		: assessedClosure.worktreePath === null || assessedClosure.branchName === null
+			? { evidence: "unevaluable" as const, freshness: { kind: "retained" as const, commit: assessedClosure.baseCommit } }
+			: await sampleClosureConsumptionObservation({ repoCwd: input.repoCwd, baseBranch: input.baseBranch, branchName: assessedClosure.branchName, baseCommit: assessedClosure.baseCommit })
+	const decision = input.store.consumeClosureIfUnreachable(input.closure.closureId, {
+		authority: input.authority,
+		updatedAt: input.updatedAt,
+		observation,
+	})
+	if (decision.kind === "retained") return { decision, cleanup: null, complete: false }
+	const closure = decision.closure
+	let cleanup: SchedulerChainWorktreeCleanup | null = null
+	if (closure.worktreePath !== null && closure.branchName !== null) {
+		const ownership = classifyClosureResourceOwnership({ loopDataRoot: resolveLoopDataPaths(input.loopDataRootOptions).root, chainName: input.chainName, repoCwd: input.repoCwd, closureId: closure.closureId, worktreePath: closure.worktreePath, branchName: closure.branchName })
+		const tree = input.store.getTaskTree(input.chainId)
+		const sharedRetiredResource = tree !== null && collectClosures(tree.root).some((candidate) => candidate.closureId !== closure.closureId
+			&& candidate.lifecycle !== "consumed"
+			&& candidate.worktreePath === closure.worktreePath
+			&& (ownership.kind === "migrated-legacy" ? ownership.worktree.kind === "retired-slot" : ownership.kind === "retired-slot" && candidate.branchName === closure.branchName))
+		if (!sharedRetiredResource) {
+			const [cleanupResult] = await cleanupSchedulerChainWorktrees([{ chainName: input.chainName, repoCwd: input.repoCwd, closure, ...(input.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: input.loopDataRootOptions }) }])
+			cleanup = cleanupResult ?? null
+			if (cleanup === null || cleanup.error !== null) return { decision, cleanup, complete: false }
+		}
+	}
+	if (decision.intent.status === "pending") {
+		await input.emit({ type: "closure.consumed", chainId: input.chainId, closureId: closure.closureId, evidence: decision.intent.observation.evidence, freshness: decision.intent.observation.freshness })
+		input.store.markClosureConsumptionIntentEmitted(closure.closureId, input.updatedAt)
+	}
+	if (closure.worktreePath !== null || closure.branchName !== null) input.store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: input.updatedAt })
+	return { decision, cleanup, complete: true }
 }
 
 export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
@@ -955,9 +1532,29 @@ export function listPendingCloseHandlers(state: SchedulerState): Promise<Schedul
 	return [...state.pendingCloseHandlers]
 }
 
+function findClosure(node: TaskNodeSnapshot | null, closureId: string): ClosureSnapshot | null {
+	if (node === null) return null
+	if (node.kind === "leaf") return node.closure.closureId === closureId ? node.closure : null
+	for (const child of node.children) {
+		const found = findClosure(child, closureId)
+		if (found !== null) return found
+	}
+	return null
+}
+
+function findClosureForItemPhase(node: TaskNodeSnapshot | null, itemRowId: number, phase: string): ClosureSnapshot | null {
+	if (node === null) return null
+	if (node.kind === "leaf") return node.closure.itemRowId === itemRowId && node.closure.phase === phase ? node.closure : null
+	for (const child of node.children) {
+		const found = findClosureForItemPhase(child, itemRowId, phase)
+		if (found !== null) return found
+	}
+	return null
+}
+
 export class SchedulerError extends Error {
 	constructor(
-		readonly code: "max_ticks_exceeded" | "worktree_create_failed" | "spawn_failed",
+		readonly code: "max_ticks_exceeded" | "worktree_create_failed" | "base_fetch_failed" | "base_resolve_failed" | "local_base_missing" | "closure_head_unavailable" | "spawn_failed",
 		message: string,
 	) {
 		super(message)
@@ -981,12 +1578,10 @@ async function spawnSchedulerRun(
 	let credential: SchedulerRunCredential | null = null
 	let credentialContext: SchedulerRunCredentialContext | null = null
 	let activeRun: SchedulerPreparingRun | null = null
+	let closureId = `closure:${item.id}:${phase}`
 	try {
-		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
-		slot.worktreePath = worktreePath
-		const baseCommitResult = git(worktreePath, ["rev-parse", "HEAD"])
-		const branchName = schedulerSlotBranchName(chain, item.repoCwd)
-
+		const existingClosure = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, phase)
+		closureId = existingClosure?.closureId ?? closureId
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
 		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
 		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
@@ -995,7 +1590,21 @@ async function spawnSchedulerRun(
 		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
-		options.store.recordRun({
+		const hasRecordedPhaseRun = options.store.listRuns(chain.id).some((run) => run.itemId === item.id && run.phase === phase)
+		const managed = existingClosure !== null && hasRecordedPhaseRun
+			? await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, resourceState: "reopen", existing: existingClosure })
+			: await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, resourceState: "first-open", existing: existingClosure })
+		const resources = typeof managed === "string"
+			? {
+				worktreePath: managed,
+				branchName: existingClosure?.branchName ?? closureBranchName(chain.name, closureId),
+				baseCommit: existingClosure?.baseCommit ?? await requireGitCommit(managed, "HEAD", "closure_head_unavailable"),
+				freshness: { kind: "retained", commit: existingClosure?.baseCommit ?? await requireGitCommit(managed, "HEAD", "closure_head_unavailable") } as const,
+			}
+			: managed
+		worktreePath = resources.worktreePath
+		const branchName = resources.branchName
+		options.store.recordRunWithClosureResources({
 			runId,
 			chainId: chain.id,
 			itemId: item.id,
@@ -1006,8 +1615,9 @@ async function spawnSchedulerRun(
 				slotKey: slot.key,
 				repoCwd: item.repoCwd,
 				worktreePath,
-				...(baseCommitResult.exitCode === 0 && baseCommitResult.stdout !== "" ? { baseCommit: baseCommitResult.stdout } : {}),
+				baseCommit: resources.baseCommit,
 				branchName,
+				originFreshness: resources.freshness,
 				definitionKind: "preset",
 				definitionContentIdentity,
 				definitionPhases: loadedPreset.preset.tasks.children.map((phaseTree) => ({
@@ -1018,7 +1628,15 @@ async function spawnSchedulerRun(
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 			}),
+		}, {
+			closureId,
+			worktreePath: resources.worktreePath,
+			branchName: resources.branchName,
+			baseCommit: resources.baseCommit,
+			updatedAt: startedAt,
 		})
+		await emit(options, { type: "closure.resource_prepared", chainId: chain.id, itemId: item.id, phase, closureId, worktreePath, branchName, baseCommit: resources.baseCommit, freshness: resources.freshness })
+		await enterClosurePhase(options, chain, item, phase, closureId, startedAt)
 		options.store.setCurrentRun({
 			chainId: chain.id,
 			phase,
@@ -1048,7 +1666,7 @@ async function spawnSchedulerRun(
 			item,
 			runId,
 			worktreePath,
-			loopDataRootOptions: options.loopDataRootOptions,
+			...(options.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: options.loopDataRootOptions }),
 			resume: resumeDecision,
 			runner: runner.kind,
 		})
@@ -1085,7 +1703,7 @@ async function spawnSchedulerRun(
 			env: spawnEnv,
 		})
 		await waitForChildSpawn(child)
-		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
+		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, phasePlan, child, runner, credential, credentialContext)
 		slot.activeRun = activeRun
 		options.store.setCurrentRun({
 			chainId: chain.id,
@@ -1120,6 +1738,9 @@ async function spawnSchedulerRun(
 		activeRun.markPrepared()
 		return activeRun
 	} catch (error) {
+		if (error instanceof SchedulerError && error.code !== "spawn_failed" && error.code !== "max_ticks_exceeded") {
+			await emit(options, { type: "closure.git_failed", chainId: chain.id, itemId: item.id, phase, closureId, code: error.code, error: error.message })
+		}
 		const failure = await cleanupFailedRunPreparation(options, chain, item, slot, {
 			runId,
 			activeRun,
@@ -1129,6 +1750,48 @@ async function spawnSchedulerRun(
 		await containSchedulerPreparationFailure(options, chain, item, slot, attribution, failure)
 		return null
 	}
+}
+
+async function enterClosurePhase(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	phase: string,
+	closureId: string,
+	updatedAt: number,
+): Promise<void> {
+	if (item.phase !== null && item.phase !== phase) {
+		const previous = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, item.phase)
+		if (previous?.lifecycle === "active") {
+			options.store.setClosureLifecycle(previous.closureId, { kind: "suspend", updatedAt })
+			await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase: item.phase, closureId: previous.closureId, from: "active", to: "suspended", reason: "phase-left" })
+		}
+	}
+	const current = findClosure(options.store.getTaskTree(chain.id)?.root ?? null, closureId)
+	if (current?.lifecycle === "suspended") {
+		options.store.setClosureLifecycle(closureId, { kind: "activate", updatedAt })
+		await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase, closureId, from: "suspended", to: "active", reason: "phase-entered" })
+	}
+}
+
+function runLeavesPhase(input: {
+	itemAtSpawn: ItemRecord
+	currentItem: ItemRecord | null
+	phase: string
+	phasePlan: SchedulerPhasePlan
+	chainStatuses: SchedulerChainStatuses
+	exitCode: number
+	startedAt: number
+}): boolean {
+	if (input.exitCode !== 0 || input.currentItem === null || input.chainStatuses.terminal.includes(input.currentItem.status)) return false
+	const index = input.phasePlan.nonTriggerPhases.indexOf(input.phase)
+	if (index < 0) return false
+	if (index < input.phasePlan.nonTriggerPhases.length - 1) return true
+	const statusChanged = input.currentItem.statusUpdatedAt !== input.itemAtSpawn.statusUpdatedAt
+		&& input.currentItem.statusUpdatedAt >= input.startedAt
+	return statusChanged
+		&& input.currentItem.status !== input.itemAtSpawn.status
+		&& input.chainStatuses.pending.includes(input.currentItem.status)
 }
 
 async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void> {
@@ -1263,6 +1926,7 @@ function attachRunCloseHandler(
 	worktreePath: string,
 	startedAt: number,
 	phase: string,
+	phasePlan: SchedulerPhasePlan,
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
 	// #406: the credential minted at spawn for this run, revoked here when the run closes
@@ -1361,7 +2025,8 @@ function attachRunCloseHandler(
 					options.state.rateLimitedUntilMs = rateLimit.reset.resetsAt * 1000
 				}
 				const rateLimitExit = (rateLimit.code !== null && isRateLimitErrorCode(rateLimit.code)) || rateLimit.reset !== null
-				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
+				const chainStatuses = await schedulerStatusesForChain(options, chain)
+				const terminalStatuses = new Set(chainStatuses.terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = (currentItem ?? item).status
 				const endedAt = nowSeconds(options)
@@ -1477,6 +2142,13 @@ function attachRunCloseHandler(
 						})
 					} else if (parsedSessionId !== null) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
+					}
+					if (runLeavesPhase({ itemAtSpawn: item, currentItem, phase, phasePlan, chainStatuses, exitCode, startedAt })) {
+						const closure = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, phase)
+						if (closure?.lifecycle === "active") {
+							options.store.setClosureLifecycle(closure.closureId, { kind: "suspend", updatedAt: endedAt })
+							await emit(options, { type: "closure.lifecycle_changed", chainId: chain.id, itemId: item.id, phase, closureId: closure.closureId, from: "active", to: "suspended", reason: "phase-left" })
+						}
 					}
 					if (itemTransitionedToTerminal) {
 						await emit(options, {
@@ -2038,13 +2710,43 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 		const completionItems = options.store.listItems(chain.id)
 		if (completionItems.length === 0) return false
 		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
+		if (!await consumeCompletedChainClosures(options, current, completionItems, effectiveTerminalStatuses)) return false
 		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 		await emit(options, { type: "chain.completed", chainId: current.id, chainName: current.name, ...(runId === undefined ? {} : { runId }) })
-		cleanupSchedulerChainWorktrees(updated, completionItems.map((item) => item.repoCwd), options.loopDataRootOptions)
+		void updated
 		return true
 	} finally {
 		options.state.finalizingChainIds.delete(chain.id)
 	}
+}
+
+async function consumeCompletedChainClosures(options: SchedulerOptions, chain: ChainRecord, items: readonly ItemRecord[], terminalStatuses: readonly InternalStatus[]): Promise<boolean> {
+	const tree = options.store.getTaskTree(chain.id)
+	if (tree === null) return true
+	const closures = collectClosures(tree.root)
+	const repoByItem = new Map(items.map((item) => [item.id, item.repoCwd]))
+	let consumable = true
+	for (const closure of closures) {
+		const repoCwd = repoByItem.get(closure.itemRowId)
+		if (repoCwd === undefined) {
+			consumable = false
+			continue
+		}
+		const result = await consumeSchedulerClosure({
+			chainId: chain.id,
+			chainName: chain.name,
+			baseBranch: chain.baseBranch,
+			repoCwd,
+			closure,
+			authority: { kind: "outer-completion", chainId: chain.id, terminalStatuses: [...terminalStatuses] },
+			updatedAt: nowSeconds(options),
+			...(options.loopDataRootOptions === undefined ? {} : { loopDataRootOptions: options.loopDataRootOptions }),
+			store: options.store,
+			emit: async (event) => await emit(options, event),
+		})
+		if (!result.complete) consumable = false
+	}
+	return consumable
 }
 
 async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly InternalStatus[]): Promise<boolean> {
@@ -2676,27 +3378,22 @@ async function writeSchedulerRunStatus(
 	}, null, "\t")}\n`)
 }
 
-function safePathComponent(input: string): string {
-	const sanitized = input.replace(/[^A-Za-z0-9._-]/g, "_")
-	return sanitized === "" || sanitized === "." || sanitized.includes("..") ? "repo" : sanitized
-}
-
-function safeGitRefComponent(input: string): string {
-	return input.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "") || "chain"
-}
-
-function chooseWorktreeStartRef(repoCwd: string, baseBranch: string): string {
-	for (const candidate of [`origin/${baseBranch}`, baseBranch, "HEAD"]) {
-		if (git(repoCwd, ["rev-parse", "--verify", candidate]).exitCode === 0) return candidate
+async function resolveClosureBase(repoCwd: string, baseBranch: string): Promise<RepositoryGitSingleflightResult> {
+	const origin = await git(repoCwd, ["remote", "get-url", "origin"])
+	if (origin.exitCode === 0) {
+		const fetched = await git(repoCwd, ["fetch", "--no-tags", "origin", baseBranch])
+		if (fetched.exitCode !== 0) throw new SchedulerError("base_fetch_failed", `git fetch origin ${baseBranch} failed: ${fetched.stderr}`)
+		const commit = await requireGitCommit(repoCwd, `refs/remotes/origin/${baseBranch}^{commit}`, "base_resolve_failed")
+		return { commit, freshness: { kind: "fetched", remote: "origin", commit, observedAt: new Date().toISOString() } }
 	}
-	return "HEAD"
+	const commit = await requireGitCommit(repoCwd, `refs/heads/${baseBranch}^{commit}`, "local_base_missing")
+	return { commit, freshness: { kind: "no-origin", availability: "unavailable", commit } }
 }
 
-function gitWorktreeListIncludesPath(repoCwd: string, expectedPath: string): boolean {
-	if (!existsSync(expectedPath)) return false
-	const result = git(repoCwd, ["worktree", "list", "--porcelain"])
-	if (result.exitCode !== 0) return false
-	return gitWorktreeListOutputIncludesPath(result.stdout, expectedPath)
+async function requireGitCommit(cwd: string, ref: string, code: "closure_head_unavailable" | "base_resolve_failed" | "local_base_missing"): Promise<string> {
+	const result = await git(cwd, ["rev-parse", "--verify", ref])
+	if (result.exitCode !== 0 || result.stdout === "") throw new SchedulerError(code, `git could not resolve ${ref}: ${result.stderr}`)
+	return result.stdout
 }
 
 function gitWorktreeListOutputIncludesPath(stdout: string, expectedPath: string): boolean {
@@ -2726,17 +3423,16 @@ function hasValidChainName(chainName: string): boolean {
 	}
 }
 
-function git(cwd: string, args: readonly string[]): { stdout: string; stderr: string; exitCode: number } {
-	try {
-		const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
-		return {
-			stdout: new TextDecoder().decode(proc.stdout).trim(),
-			stderr: new TextDecoder().decode(proc.stderr).trim(),
-			exitCode: proc.exitCode,
-		}
-	} catch (error) {
-		return { stdout: "", stderr: errorMessage(error), exitCode: 1 }
-	}
+async function git(cwd: string, args: readonly string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	return await new Promise((resolveResult) => {
+		const child = spawn("git", [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] })
+		const stdout: Buffer[] = []
+		const stderr: Buffer[] = []
+		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
+		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+		child.on("error", (error) => resolveResult({ stdout: "", stderr: errorMessage(error), exitCode: 1 }))
+		child.on("close", (code) => resolveResult({ stdout: Buffer.concat(stdout).toString("utf8").trim(), stderr: Buffer.concat(stderr).toString("utf8").trim(), exitCode: code ?? 1 }))
+	})
 }
 
 export async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {

@@ -1,8 +1,8 @@
 import { afterAll, describe, expect as bunExpect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { chmod, cp, mkdir, readdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
+import { chmod, cp, link, mkdir, readdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import { createConnection } from "node:net"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 
 import { type as arkType } from "arktype"
 
@@ -24,11 +24,11 @@ import {
 import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type JsonObject, type JsonValue } from "../../../src/loop"
 import {
 	createGitWorktreeManager,
-	schedulerSlotWorktreePath,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "../../../src/scheduler"
+import { closureWorktreePath } from "../../../src/closure-lifecycle"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "../../../src/runtime-paths"
 import { openSqliteStateStore } from "../../../src/sqlite-state"
 import { makeObservabilityEvent, ObservabilityEventBoundary, queryObservabilityEvents } from "../../../src/observability"
@@ -44,6 +44,7 @@ const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/dt", String(process.pid))
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+const runnerWritableFixtureArtifacts = new Set<string>()
 
 let nextFixtureId = 0
 
@@ -179,6 +180,7 @@ function daemonFakeRunnerWriteStatus(phase: string, extra: BoundaryRecord): stri
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
+	runnerWritableFixtureArtifacts.clear()
 })
 
 
@@ -298,8 +300,8 @@ exit 0
 	await chmod(fakeClaude, 0o755)
 
 	const schedulerEvents: SchedulerEvent[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		return worktreePath
 	}
@@ -493,6 +495,8 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	const eventLog = resolve(root, "events.jsonl")
 	await mkdir(root, { recursive: true })
 	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(eventLog, "")
+	runnerWritableFixtureArtifacts.add(eventLog)
 	await writeFakeRunner(fakeRunner)
 	const schedulerEnabled = options.schedulerEnabled ?? true
 	const defaultItemPresetPath = schedulerEnabled && options.schedulerPresetDir !== null
@@ -502,9 +506,18 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 
 	const schedulerEvents: SchedulerEvent[] = []
 	const configuredOnEvent = options.schedulerConfig?.onEvent
-	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd }) => {
-		await mkdir(schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot }), { recursive: true })
-		return root
+	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
+		await mkdir(worktreePath, { recursive: true })
+		for (const artifactPath of runnerWritableFixtureArtifacts) {
+			if (!artifactPath.startsWith(`${root}/`)) continue
+			try {
+				await link(artifactPath, resolve(worktreePath, basename(artifactPath)))
+			} catch (error) {
+				if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error
+			}
+		}
+		return worktreePath
 	})
 
 	const scheduler: SchedulerOptions["runner"] = {
@@ -524,15 +537,13 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			runner: scheduler,
 			...(options.schedulerPresetDir === null ? {} : { presetDir: defaultItemPresetPath ?? PRESET_DIR }),
 			worktreeManager,
-			prompt: ({ chain, item, runId, phase }) => {
+			prompt: ({ item, runId, phase }) => {
 				const extra = itemExtraToJsonObject(item.extra)
 				const payload: BoundaryRecord = {
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
-					eventLog: typeof extra.eventLog === "string"
-						? extra.eventLog
-						: resolve(resolveChainRuntimePaths(chain.name, { loopDataRoot }).runsDir, "events.jsonl"),
+					eventLog: basename(eventLog),
 					sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
 					exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
 					writeStatus: daemonFakeRunnerWriteStatus(phase, extra),
@@ -865,7 +876,7 @@ async function pathIsSocket(path: string): Promise<boolean> {
 
 async function initGitTarget(path: string): Promise<void> {
 	await mkdir(path, { recursive: true })
-	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["init", "-q", "-b", "main"])
 	gitOutput(path, ["config", "user.email", "test@example.invalid"])
 	gitOutput(path, ["config", "user.name", "Test User"])
 	await writeFile(resolve(path, "README.md"), "test\n")
@@ -949,13 +960,15 @@ process.exitCode = input.exitCode
 }
 
 async function writePromptCaptureRunner(path: string, capturePath: string): Promise<void> {
+	await writeFile(capturePath, "")
+	runnerWritableFixtureArtifacts.add(capturePath)
 	await writeFile(
 		path,
 		`import { writeFile } from "node:fs/promises"
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
-await writeFile(${JSON.stringify(capturePath)}, prompt)
+await writeFile(${JSON.stringify(basename(capturePath))}, prompt)
 process.exitCode = 0
 `,
 	)
@@ -1027,7 +1040,7 @@ export {
 	buildCoderLoopStatusSnapshot,
 	loadPreset,
 	createGitWorktreeManager,
-	schedulerSlotWorktreePath,
+	closureWorktreePath,
 	resolveChainRuntimePaths,
 	resolveLoopDataPaths,
 	openSqliteStateStore,

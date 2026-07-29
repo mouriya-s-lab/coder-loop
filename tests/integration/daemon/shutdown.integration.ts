@@ -132,7 +132,9 @@ describe("daemon", () => {
 			})).item)
 			const itemId = numberValue(added.id)
 			const activeRuns = await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
-			const agentPid = (activeRuns as unknown as Array<{ pid?: number }>)[0]?.pid
+			if (!Array.isArray(activeRuns)) throw new Error("expected activeRuns array")
+			const firstActiveRun = record(activeRuns[0])
+			const agentPid: number | undefined = typeof firstActiveRun.pid === "number" ? firstActiveRun.pid : undefined
 
 			const downStartedAt = Date.now()
 			const down = expectOk(await request(fixture, "daemon.down"))

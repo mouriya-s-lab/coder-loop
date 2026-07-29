@@ -13,7 +13,6 @@ import {
 	Preset,
 	PresetVariableSource,
 	ResolveContext,
-	ItemRecord,
 	BUNDLED_PRESET_DIR,
 	REAL_E2E_MINIMAL_PRESET_DIR,
 	status,
@@ -255,7 +254,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 		// Populated metadata.bindings produces the literal value.
 		const populated: ResolveContext = {
-			item: { issue: 457 } as unknown as ItemRecord,
+			item: makeItemRecord(),
 			chain: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 457, repository: "x", baseBranch: "main" },
 			runtime: makeMinimalRuntimeBindings(),
 			preset,
@@ -264,7 +263,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(resolveBinding(umbrellaIssueVar!.source, populated)).toBe("457")
 		// Empty metadata.bindings: declared fallback emits "" rather than crashing.
 		const empty: ResolveContext = {
-			item: { issue: 457 } as unknown as ItemRecord,
+			item: makeItemRecord(),
 			chain: { repository: "x", baseBranch: "main" },
 			runtime: makeMinimalRuntimeBindings(),
 			preset,

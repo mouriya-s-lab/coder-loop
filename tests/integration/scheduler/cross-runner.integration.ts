@@ -4,13 +4,13 @@ import { resolve } from "node:path"
 
 import {
 	createSchedulerState,
-	schedulerSlotWorktreePath,
 	schedulerTick,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "../../../src/scheduler"
+import { closureWorktreePath } from "../../../src/closure-lifecycle"
 import { loadPreset, type JsonObject } from "../../../src/loop"
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "../../../src/daemon"
 import { type ChainRecord, openSqliteStateStore } from "../../../src/sqlite-state"
@@ -59,6 +59,7 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 		const iterClosed = await iterTick.spawnedRuns[0]!.closed
 		expect(iterClosed.status).toBe("queued")
 		expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
+		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
 
 		const reviewTick = await schedulerTick(options)
 		expect(reviewTick.spawnedRuns).toHaveLength(1)
@@ -67,8 +68,8 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 		expect(fixture.store.getItem(item.id)?.phase).toBe("review")
 		expect(fixture.store.getItem(item.id)?.status).toBe("done")
 
-		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
-		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe("019e6cf2-5b39-7b83-9bc5-8c8b96122682")
+		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBeNull()
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBeNull()
 		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
 		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "codex" })).toBeNull()
 
@@ -167,6 +168,13 @@ test("invalid review session id clears only review/claude and the next review sp
 			runner: "claude",
 			phase: "review",
 			exitCode: 1,
+			sessionId: staleReviewSessionId,
+			stderr: ["transient review failure"],
+		},
+		{
+			runner: "claude",
+			phase: "review",
+			exitCode: 1,
 			stderr: [`No conversation found with session ID: ${staleReviewSessionId}`],
 		},
 		{
@@ -187,13 +195,10 @@ test("invalid review session id clears only review/claude and the next review sp
 		})
 
 		await closeOnlySpawn(await schedulerTick(options))
-		fixture.store.setItemSessionId(item.id, {
-			phase: "review",
-			runner: "claude",
-			sessionId: staleReviewSessionId,
-			updatedAt: now,
-		})
+		await closeOnlySpawn(await schedulerTick(options))
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe(staleReviewSessionId)
 
+		now += 1
 		const invalidReviewTick = await schedulerTick(options)
 		expect(invalidReviewTick.spawnedRuns).toHaveLength(1)
 		const invalidReviewClosed = await invalidReviewTick.spawnedRuns[0]!.closed
@@ -211,20 +216,21 @@ test("invalid review session id clears only review/claude and the next review sp
 			previousSessionId: staleReviewSessionId,
 		}))
 
-		now += 1
+		now += 2
 		const freshReviewTick = await schedulerTick(options)
 		expect(freshReviewTick.spawnedRuns).toHaveLength(1)
 		const freshReviewClosed = await freshReviewTick.spawnedRuns[0]!.closed
 		expect(freshReviewClosed.status).toBe("done")
-		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe(freshReviewSessionId)
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBeNull()
 
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
 			"codex:iteration:fresh",
+			"claude:review:fresh",
 			`claude:review:${staleReviewSessionId}`,
 			"claude:review:fresh",
 		])
-		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
+		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review", "review"])
 	} finally {
 		await stopCrossRunnerFixture(fixture)
 	}
@@ -259,6 +265,13 @@ test("invalid review session id on opencode clears only review/opencode and the 
 			runner: "opencode",
 			phase: "review",
 			exitCode: 1,
+			sessionId: staleReviewSessionId,
+			stderr: ["transient review failure"],
+		},
+		{
+			runner: "opencode",
+			phase: "review",
+			exitCode: 1,
 			stderr: [opencodeInvalidStderr],
 		},
 		{
@@ -283,13 +296,10 @@ test("invalid review session id on opencode clears only review/opencode and the 
 		})
 
 		await closeOnlySpawn(await schedulerTick(options))
-		fixture.store.setItemSessionId(item.id, {
-			phase: "review",
-			runner: "opencode",
-			sessionId: staleReviewSessionId,
-			updatedAt: now,
-		})
+		await closeOnlySpawn(await schedulerTick(options))
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBe(staleReviewSessionId)
 
+		now += 1
 		const invalidReviewTick = await schedulerTick(options)
 		expect(invalidReviewTick.spawnedRuns).toHaveLength(1)
 		const invalidReviewClosed = await invalidReviewTick.spawnedRuns[0]!.closed
@@ -309,20 +319,21 @@ test("invalid review session id on opencode clears only review/opencode and the 
 			reason: "runner_session_id_invalid",
 		}))
 
-		now += 1
+		now += 2
 		const freshReviewTick = await schedulerTick(options)
 		expect(freshReviewTick.spawnedRuns).toHaveLength(1)
 		const freshReviewClosed = await freshReviewTick.spawnedRuns[0]!.closed
 		expect(freshReviewClosed.status).toBe("done")
-		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBe(freshReviewSessionId)
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBeNull()
 
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
 			"codex:iteration:fresh",
+			"opencode:review:fresh",
 			`opencode:review:${staleReviewSessionId}`,
 			"opencode:review:fresh",
 		])
-		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
+		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review", "review"])
 	} finally {
 		await stopCrossRunnerFixture(fixture)
 	}
@@ -446,8 +457,8 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
 	const state = daemon.schedulerExecutionState()
 	const schedulerEvents: SchedulerEvent[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		return worktreePath
 	}

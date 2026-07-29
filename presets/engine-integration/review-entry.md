@@ -5,5 +5,5 @@ CHAIN={{CHAIN_NAME}}
 ITEM={{ITEM_KEY}}
 RUN={{RUN_ID}}
 
-Task: verify `engine-integration-marker.txt` is committed in the worktree, then write the terminal
+Task: verify `engine-integration-marker.txt` is committed on the iteration closure branch, then write the terminal
 status through `coder-loop item update` (credentialed admission; #397 gate).

@@ -9,6 +9,7 @@ import {
 	resolve,
 	SqliteStateError,
 	openSqliteStateStore,
+	storedChainMetadata,
 	storedItemExtra,
 	seedCanonicalHistoricalRuntime,
 	ItemRecord,
@@ -60,6 +61,98 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("prepared closure resources and run history commit atomically", async () => {
+		const { store } = await openTestStore("prepared-resources-run")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			const closureId = `closure-${item.id}`
+			store.createTaskTree(chain.id, singleLeafTree(item))
+			store.recordRun({ runId: "existing-run", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_001 })
+			const prepared = {
+				closureId,
+				worktreePath: "/worktrees/prepared",
+				branchName: "coder-loop/closures/prepared",
+				baseCommit: "1234567890abcdef1234567890abcdef12345678",
+				updatedAt: 1_800_000_002,
+			} as const
+
+			expect(() => store.recordRunWithClosureResources({
+				runId: "existing-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_002,
+			}, prepared)).toThrow(SqliteStateError)
+			expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: {
+				closureId,
+				worktreePath: "/repo/coder-loop",
+				branchName: "issue-177",
+				baseCommit: "0123456789abcdef",
+			} })
+
+			const run = store.recordRunWithClosureResources({
+				runId: "prepared-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_003,
+			}, prepared)
+			expect(run.closureId).toBe(closureId)
+			expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: {
+				closureId,
+				worktreePath: prepared.worktreePath,
+				branchName: prepared.branchName,
+				baseCommit: prepared.baseCommit,
+			} })
+		} finally {
+			store.close()
+		}
+	})
+
+	test("v16 reachability seeds migrate to explicit future-writer target variants", async () => {
+		const fixture = await openTestStore("v16-reachability-seeds")
+		const chain = createFullChain(fixture.store)
+		const item = createFullItem(fixture.store, chain)
+		fixture.store.createTaskTree(chain.id, singleLeafTree(item))
+		const tree = fixture.store.getTaskTree(chain.id)
+		if (tree?.root.kind !== "leaf") throw new Error("expected single migrated leaf")
+		const closureId = tree.root.closure.closureId
+		fixture.store.close()
+
+		const legacy = new Database(fixture.dbFile)
+		try {
+			legacy.exec("PRAGMA foreign_keys=OFF")
+			legacy.exec(`
+				DROP TABLE closure_consumption_intents;
+				CREATE TABLE closure_reachability_seeds_v16 (
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
+					kind TEXT NOT NULL CHECK (kind IN ('open-append')),
+					PRIMARY KEY (chain_id, closure_id, kind)
+				);
+				INSERT INTO closure_reachability_seeds_v16 (chain_id, closure_id, kind)
+					VALUES (${chain.id}, '${closureId}', 'open-append');
+				DROP TABLE closure_reachability_seeds;
+				ALTER TABLE closure_reachability_seeds_v16 RENAME TO closure_reachability_seeds;
+				PRAGMA user_version=16;
+			`)
+		} finally { legacy.close() }
+
+		openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }).close()
+		const migrated = new Database(fixture.dbFile)
+		try {
+			expect(migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16)
+			expect(migrated.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name='closure_consumption_intents'").get()?.name).toBe("closure_consumption_intents")
+			migrated.query("INSERT INTO closure_reachability_seeds (chain_id,closure_id,kind) VALUES ($chain,$closure,'decided-reopen'),($chain,$closure,'next-epoch-candidate')").run({ $chain: chain.id, $closure: closureId })
+			expect(migrated.query<{ kind: string }, []>("SELECT kind FROM closure_reachability_seeds ORDER BY kind").all().map((row) => row.kind)).toEqual([
+				"decided-reopen",
+				"next-epoch-candidate",
+				"open-append",
+			])
+		} finally { migrated.close() }
+	})
+
 	test("existing task root materializes every phase for a newly encountered item with stable identities", async () => {
 		const { store, dbFile } = await openTestStore("existing-root-full-item-definition")
 		const chain = createFullChain(store)
@@ -77,6 +170,11 @@ describe("sqlite state store", () => {
 		const secondRun = store.recordRun({ runId: "second-definition-run", chainId: chain.id, itemId: second.id, phase: "review", startedAt: 1_800_000_206, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/second", branchName: "issue-second" }) })
 		store.setCurrentRun({ chainId: chain.id, phase: "review", runId: secondRun.runId, startedAt: secondRun.startedAt, extra: storedItemExtra({}) })
 		const definitionRef = { kind: "preset", contentIdentity: "sha256:second-definition" } as const
+		const reviewIdentity = {
+			runtimeNodeId: `closure-node:${second.id}:review`,
+			definitionRef,
+			definitionNodeId: "task:review",
+		}
 		const expectedSecondIdentities = ["review", "finalize"].map((phase) => ({
 			runtimeNodeId: `closure-node:${second.id}:${phase}`,
 			definitionRef,
@@ -85,7 +183,16 @@ describe("sqlite state store", () => {
 		try {
 			const tree = store.getTaskTree(chain.id)
 			if (tree?.root.kind !== "seq") throw new Error("expected seq root")
-			expect(tree.root.children.filter((node) => node.kind === "leaf" && node.closure.itemRowId === second.id).map((node) => node.identity)).toEqual(expectedSecondIdentities)
+			const firstOpenLeaves = tree.root.children.flatMap((node) => node.kind === "leaf" && node.closure.itemRowId === second.id ? [node] : [])
+			expect(firstOpenLeaves.map((node) => node.identity)).toEqual([reviewIdentity])
+			const finalizeRun = store.recordRun({ runId: "second-finalize-run", chainId: chain.id, itemId: second.id, phase: "finalize", startedAt: 1_800_000_207, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/finalize", branchName: "issue-finalize" }) })
+			store.setCurrentRun({ chainId: chain.id, phase: "finalize", runId: finalizeRun.runId, startedAt: finalizeRun.startedAt, extra: storedItemExtra({}) })
+			const openedTree = store.getTaskTree(chain.id)
+			if (openedTree?.root.kind !== "seq") throw new Error("expected opened seq root")
+			const secondLeaves = openedTree.root.children.flatMap((node) => node.kind === "leaf" && node.closure.itemRowId === second.id ? [node] : [])
+			expect(secondLeaves.map((node) => node.identity)).toEqual(expectedSecondIdentities)
+			expect(new Set(secondLeaves.map((node) => node.closure.worktreePath)).size).toBe(secondLeaves.length)
+			expect(new Set(secondLeaves.map((node) => node.closure.branchName)).size).toBe(secondLeaves.length)
 		} finally { store.close() }
 		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
 		try {
@@ -155,6 +262,68 @@ describe("sqlite state store", () => {
 			expectSqliteCode(() => store.setClosureLifecycle(`closure-${item.id}`, { kind: "activate", updatedAt: 1_800_000_103 }), "closure_lifecycle_conflict")
 			expectSqliteCode(() => store.setClosureLifecycle(`closure-${item.id}`, { kind: "suspend", updatedAt: 1_800_000_104 }), "closure_lifecycle_conflict")
 			expect(store.setClosureResources(`closure-${item.id}`, { worktreePath: null, branchName: null, updatedAt: 1_800_000_103 }).worktreePath).toBeNull()
+		} finally { store.close() }
+	})
+
+	test("closure consumption intent survives reopen and is emitted once", async () => {
+		const fixture = await openTestStore("closure-consumption-intent")
+		const chain = createFullChain(fixture.store)
+		const item = createFullItem(fixture.store, chain)
+		const closureId = `closure-${item.id}`
+		fixture.store.createTaskTree(chain.id, singleLeafTree(item))
+		const authority = { kind: "chain-deletion", chainId: chain.id } as const
+		const observation = {
+			evidence: "unevaluable",
+			freshness: { kind: "no-origin", availability: "unavailable", commit: "0123456789abcdef" },
+		} as const
+		expect(fixture.store.consumeClosureIfUnreachable(closureId, { authority, observation, updatedAt: 1_800_000_105 })).toMatchObject({
+			kind: "consumed",
+			intent: { status: "pending", observation },
+		})
+		fixture.store.close()
+
+		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try {
+			expect(reopened.assessClosureConsumption(closureId, authority)).toMatchObject({
+				kind: "already-consumed",
+				intent: { status: "pending", observation },
+			})
+			expect(reopened.markClosureConsumptionIntentEmitted(closureId, 1_800_000_106)).toEqual({ status: "emitted", observation })
+			expect(reopened.markClosureConsumptionIntentEmitted(closureId, 1_800_000_107)).toEqual({ status: "emitted", observation })
+		} finally { reopened.close() }
+
+		const verified = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try {
+			expect(verified.assessClosureConsumption(closureId, authority)).toMatchObject({
+				kind: "already-consumed",
+				intent: { status: "emitted", observation },
+			})
+		} finally { verified.close() }
+	})
+
+	test("typed reachability facts keep closures retained and reject foreign chains", async () => {
+		const { store } = await openTestStore("typed-reachability-facts")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain, { status: "done" })
+			store.createTaskTree(chain.id, twoPhaseLeafTree(item))
+			const iterationClosure = `closure-${item.id}-iteration`
+			const reviewClosure = `closure-${item.id}-review`
+			const authority = { kind: "outer-completion", chainId: chain.id, terminalStatuses: [runtimeStatus("done")] } as const
+
+			expect(store.assessClosureConsumption(iterationClosure, authority)).toMatchObject({ kind: "consumable" })
+			expect(store.assessClosureConsumption(reviewClosure, authority)).toMatchObject({ kind: "consumable" })
+
+			store.addClosureReachabilityFact(chain.id, { kind: "seed", closureId: iterationClosure, seed: "decided-reopen" })
+			store.addClosureReachabilityFact(chain.id, { kind: "seed", closureId: iterationClosure, seed: "decided-reopen" })
+			store.addClosureReachabilityFact(chain.id, { kind: "edge", edge: { kind: "scope-target", fromClosureId: iterationClosure, toClosureId: reviewClosure } })
+
+			expect(store.assessClosureConsumption(iterationClosure, authority)).toMatchObject({ kind: "retained", reason: "reachable" })
+			expect(store.assessClosureConsumption(reviewClosure, authority)).toMatchObject({ kind: "retained", reason: "reachable" })
+
+			const foreignChain = store.createChain({ name: "foreign-facts", preset: null, repository: "mouriya-s-lab/coder-loop", baseBranch: "main", status: "active", metadata: storedChainMetadata({}), createdAt: 1_800_000_000, updatedAt: 1_800_000_000 })
+			expectSqliteCode(() => store.addClosureReachabilityFact(foreignChain.id, { kind: "seed", closureId: iterationClosure, seed: "open-append" }), "run_closure_mismatch")
+			expectSqliteCode(() => store.addClosureReachabilityFact(chain.id, { kind: "seed", closureId: "closure-missing", seed: "next-epoch-candidate" }), "not_found")
 		} finally { store.close() }
 	})
 

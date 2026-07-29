@@ -6,6 +6,7 @@ import { type as arkType } from "arktype"
 
 import {
 	cleanupSchedulerChainWorktrees,
+	consumeSchedulerClosure,
 	createGitWorktreeManager,
 	createSchedulerState,
 	DEFAULT_MAX_ITEM_ATTEMPTS,
@@ -16,7 +17,7 @@ import {
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	runSchedulerUntilIdle,
-	schedulerSlotWorktreePath,
+	sampleClosureConsumptionObservation,
 	schedulerTick,
 	selectNextPendingItemFromSnapshot,
 	type SchedulerEvent,
@@ -26,6 +27,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "../../../src/scheduler"
+import { closureBranchName, closureWorktreePath } from "../../../src/closure-lifecycle"
 import { resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent, startCoderLoopDaemon, type CoderLoopDaemon } from "../../../src/daemon"
 import {
 	buildRunnerFilesystemAuthorization,
@@ -330,7 +332,7 @@ exit 0
 
 export async function initGitTarget(path: string): Promise<void> {
 	await mkdir(path, { recursive: true })
-	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["init", "-q", "-b", "main"])
 	gitOutput(path, ["config", "user.email", "test@example.invalid"])
 	gitOutput(path, ["config", "user.name", "Test User"])
 	await writeFile(resolve(path, "README.md"), "test\n")
@@ -416,8 +418,8 @@ export async function createFixture(name: string): Promise<Fixture> {
 	const defaultPresetDir = fixturePresetDir
 	const defaultLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
 	if (defaultLoadedPreset.preset.phases.find((phase) => phase.name === "iteration")?.exits.length === 0) throw new Error("scheduler fixture preset did not declare iteration exits")
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
@@ -922,8 +924,8 @@ export async function createPresetPromptIntegrationFixture(name: string): Promis
 	const state = createSchedulerState()
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeCalls: string[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
@@ -993,9 +995,9 @@ process.exitCode = 0
 
 export {
 	chmod, cp, mkdir, readFile, rm, writeFile, existsSync, resolve, arkType,
-	cleanupSchedulerChainWorktrees, createGitWorktreeManager, createSchedulerState, DEFAULT_MAX_ITEM_ATTEMPTS,
+	cleanupSchedulerChainWorktrees, consumeSchedulerClosure, createGitWorktreeManager, createSchedulerState, DEFAULT_MAX_ITEM_ATTEMPTS,
 	listActiveRuns, makeRunId, markRunPendingRecycle, presetExecutionContentIdentity, renderSchedulerSpawnPrompt,
-	resumeDecisionForItem, runSchedulerUntilIdle, schedulerSlotWorktreePath, schedulerTick,
+	resumeDecisionForItem, runSchedulerUntilIdle, sampleClosureConsumptionObservation, schedulerTick, closureBranchName, closureWorktreePath,
 	selectNextPendingItemFromSnapshot,
 	resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent, startCoderLoopDaemon,
 	buildRunnerFilesystemAuthorization, buildRunnerInvocation, loadPreset, resolvePhaseRunnerFromChain,

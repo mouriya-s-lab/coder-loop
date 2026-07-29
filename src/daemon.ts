@@ -25,12 +25,13 @@ import {
 	type RunnerStatusPersistenceFailure,
 } from "./loop"
 import {
-	cleanupSchedulerChainWorktrees,
+	consumeSchedulerClosure,
 	createSchedulerState,
 	listActiveRuns,
 	listPendingCloseHandlers,
 	markRunPendingRecycle,
 	maxItemAttemptsFromChainMetadata,
+	reconcileClosureResources,
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerEvent,
@@ -126,7 +127,7 @@ import {
 	type PrivilegedOpAuditOp,
 	type PrivilegedOpAuditReason,
 } from "./observability"
-import type { TaskNodeIdentity, TaskNodeSnapshot } from "./task-runtime"
+import type { ClosureSnapshot, TaskNodeIdentity, TaskNodeSnapshot } from "./task-runtime"
 
 // #409: every daemon command an agent process can reach belongs to exactly one
 // authorization class. The classification is the engine's compile-time gate —
@@ -740,6 +741,11 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 		case "chain.completed":
 			return { kind: "chain", chainId: event.chainId }
 		case "slot.busy":
+		case "closure.resource_prepared":
+		case "closure.lifecycle_changed":
+		case "closure.consumed":
+		case "closure.git_failed":
+		case "closure.reconciled":
 		case "item.dependency_wait":
 		case "item.backoff":
 		case "session_id.invalidated":
@@ -794,6 +800,10 @@ export class DaemonError extends Error {
 	}
 }
 
+type ChainRuntimeCleanupResult =
+	| { kind: "complete"; details: JsonObject }
+	| { kind: "incomplete"; details: JsonObject }
+
 function schedulerEventRunId(event: SchedulerEvent): string | null {
 	if (event.type === "slot.busy") return event.activeRunId
 	if ("runId" in event) return event.runId ?? null
@@ -820,6 +830,52 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 	if (runId === null && identity !== null) throw new DaemonError("internal_error", `non-run scheduler event ${event.type} received task identity`)
 	const identityFields = identity === null ? {} : identity
 	switch (event.type) {
+		case "closure.resource_prepared":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				item: event.itemId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, worktreePath: event.worktreePath, branchName: event.branchName, baseCommit: event.baseCommit, freshness: event.freshness },
+			})
+		case "closure.lifecycle_changed":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				item: event.itemId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, from: event.from, to: event.to, reason: event.reason },
+			})
+		case "closure.consumed":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, evidence: event.evidence, freshness: event.freshness },
+			})
+		case "closure.git_failed":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				item: event.itemId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, code: event.code, error: event.error },
+			})
+		case "closure.reconciled":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, repoCwd: event.repoCwd, mismatch: event.mismatch },
+			})
 		case "slot.busy":
 			return makeObservabilityEvent({
 				...identityFields,
@@ -1086,6 +1142,11 @@ function findTaskNodeIdentity(node: TaskNodeSnapshot, runtimeNodeId: string): Ta
 			return null
 		default: return assertNeverTaskNode(node)
 	}
+}
+
+function collectTaskClosures(node: TaskNodeSnapshot): ClosureSnapshot[] {
+	if (node.kind === "leaf") return [node.closure]
+	return node.children.flatMap(collectTaskClosures)
 }
 
 function assertNeverTaskNode(node: never): never {
@@ -2121,7 +2182,7 @@ export class CoderLoopDaemon {
 			name: validateChainNameForRequest(requiredString(args, "name")),
 			preset: chainPreset,
 			repository: validateRepositoryForRequest(requiredString(args, "repository")),
-			baseBranch: validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
+			baseBranch: await validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
 			status: "active",
 			metadata: validateChainMetadata(sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {}),
 		}
@@ -2296,6 +2357,12 @@ export class CoderLoopDaemon {
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
+			try {
+				sanitizeChainName(chain.name)
+			} catch (error) {
+				if (isInvalidChainNameError(error)) continue
+				throw error
+			}
 			for (const currentRun of store.listCurrentRuns(chain.id)) {
 				const run = store.getRunByRunId(currentRun.runId)
 				if (run === null) throw new DaemonError("internal_error", `active run ${currentRun.runId} has no durable run row`)
@@ -2322,6 +2389,11 @@ export class CoderLoopDaemon {
 			}
 
 			await this.reconcileOrphanedRuns(chain)
+			const tree = store.getTaskTree(chain.id)
+			for (const finding of await reconcileClosureResources({ chain, items: store.listItems(chain.id), tree: tree?.root ?? null, loopDataRootOptions: { loopDataRoot: this.paths.root }, store })) {
+				const event: SchedulerEvent = { type: "closure.reconciled", chainId: chain.id, ...finding }
+				await this.recordObservabilityEventIfChainNameIsValid(chain, schedulerEventToObservabilityEvent(chain, event))
+			}
 		}
 	}
 
@@ -2433,15 +2505,25 @@ export class CoderLoopDaemon {
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
 		if (chain.status === "deleted") {
+			const cleanup = await this.cleanupChainRuntime(chain)
+			if (cleanup.kind === "incomplete") {
+				throw new DaemonError("runtime_cleanup_incomplete", `chain ${chain.name} runtime cleanup is incomplete and can be retried`, cleanup.details)
+			}
 			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
 			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
-			return { chain: chainToJson(chain), alreadyDeleted: true, invalidatedContextAppendSessions, deletedContextEntries }
+			return { chain: chainToJson(chain), alreadyDeleted: true, cleanup: cleanup.details, invalidatedContextAppendSessions, deletedContextEntries }
 		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
-			const cleanup = await this.cleanupChainRuntime(chain)
+			const cleanupOwner = chain.status === "active"
+				? this.requireStore().updateChain(chain.id, { status: "stopped" })
+				: chain
+			const cleanup = await this.cleanupChainRuntime(cleanupOwner)
+			if (cleanup.kind === "incomplete") {
+				throw new DaemonError("runtime_cleanup_incomplete", `chain ${chain.name} runtime cleanup is incomplete and can be retried`, cleanup.details)
+			}
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
 			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
 			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
@@ -2450,7 +2532,7 @@ export class CoderLoopDaemon {
 				chain: chainToJson(updated),
 				alreadyDeleted: false,
 				terminatedRuns: terminatedRuns.map(completedRunToJson),
-				cleanup,
+				cleanup: cleanup.details,
 				invalidatedContextAppendSessions,
 				deletedContextEntries,
 			}
@@ -2758,24 +2840,47 @@ export class CoderLoopDaemon {
 		return settled.filter((run): run is SchedulerCompletedRun => run !== null)
 	}
 
-	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {
+	private async cleanupChainRuntime(chain: ChainRecord): Promise<ChainRuntimeCleanupResult> {
 		const store = this.requireStore()
-		const repoCwds = store.listItems(chain.id).map((item) => item.repoCwd)
-		const worktrees = cleanupSchedulerChainWorktrees(chain, repoCwds, { loopDataRoot: this.paths.root })
+		const items = new Map(store.listItems(chain.id).map((item) => [item.id, item]))
+		const tree = store.getTaskTree(chain.id)
+		const closures = tree === null ? [] : collectTaskClosures(tree.root).flatMap((closure) => {
+			const item = items.get(closure.itemRowId)
+			return item === undefined ? [] : [{ repoCwd: item.repoCwd, closure }]
+		})
+		const worktrees: SchedulerChainWorktreeCleanup[] = []
+		const incompleteClosures: JsonObject[] = []
+		for (const { repoCwd, closure } of closures) {
+			const consumed = await consumeSchedulerClosure({
+				chainId: chain.id,
+				chainName: chain.name,
+				baseBranch: chain.baseBranch,
+				repoCwd,
+				closure,
+				authority: { kind: "chain-deletion", chainId: chain.id },
+				updatedAt: unixSeconds(),
+				loopDataRootOptions: { loopDataRoot: this.paths.root },
+				store,
+				emit: async (event) => await this.recordObservabilityEventIfChainNameIsValid(chain, schedulerEventToObservabilityEvent(chain, event)),
+			})
+			if (consumed.cleanup !== null) worktrees.push(consumed.cleanup)
+			if (!consumed.complete) incompleteClosures.push({ closureId: closure.closureId, reason: "closure-consumption-incomplete" })
+		}
 		try {
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
+			const worktreeDetails = schedulerWorktreeCleanupsToJson(worktrees)
+			if (incompleteClosures.length > 0) {
+				return { kind: "incomplete", details: { chainRoot: paths.chainRoot, chainRootRemoved: false, worktrees: worktreeDetails, incompleteClosures } }
+			}
 			await rm(paths.chainRoot, { recursive: true, force: true })
-			return { chainRoot: paths.chainRoot, chainRootRemoved: true, worktrees: schedulerWorktreeCleanupsToJson(worktrees) }
+			return { kind: "complete", details: { chainRoot: paths.chainRoot, chainRootRemoved: true, worktrees: worktreeDetails } }
 		} catch (error) {
 			if (isInvalidChainNameError(error)) {
-				return {
-					chainRoot: null,
-					chainRootRemoved: false,
-					worktrees: schedulerWorktreeCleanupsToJson(worktrees),
-					error: errorMessage(error),
-				}
+				return { kind: "incomplete", details: { chainRoot: null, chainRootRemoved: false, worktrees: schedulerWorktreeCleanupsToJson(worktrees), error: errorMessage(error) } }
 			}
-			throw error
+			let chainRoot: string | null = null
+			try { chainRoot = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root }).chainRoot } catch { /* reported by the original error */ }
+			return { kind: "incomplete", details: { chainRoot, chainRootRemoved: false, worktrees: schedulerWorktreeCleanupsToJson(worktrees), error: errorMessage(error) } }
 		}
 	}
 
@@ -3061,7 +3166,7 @@ export class CoderLoopDaemon {
 			if (Object.hasOwn(extraInnerCarrier, "branch")) {
 				const branchValue = extraInnerCarrier.branch
 				if (branchValue !== null && typeof branchValue === "string") {
-					validateGitBranchNameForRequest(branchValue, "extra.branch")
+					await validateGitBranchNameForRequest(branchValue, "extra.branch")
 				} else if (branchValue !== null) {
 					throw new DaemonError("invalid_request", "extra.branch must be a string or null", { field: "extra.branch" })
 				}
@@ -4653,7 +4758,7 @@ function validateRepositoryForRequest(input: string): string {
 	return input
 }
 
-function validateBaseBranchForRequest(input: string): string {
+async function validateBaseBranchForRequest(input: string): Promise<string> {
 	if (/[\u0000-\u001f\u007f]/u.test(input)) {
 		throw new DaemonError("invalid_request", "baseBranch must not contain control characters", { baseBranch: input })
 	}
@@ -4661,11 +4766,17 @@ function validateBaseBranchForRequest(input: string): string {
 		throw new DaemonError("invalid_request", "baseBranch must be a literal branch name, not checkout shorthand", { baseBranch: input })
 	}
 
-	const check = Bun.spawnSync({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "pipe", stderr: "pipe" })
-	if (check.exitCode !== 0) {
+	if (await gitBranchGrammarRejects(input)) {
 		throw new DaemonError("invalid_request", "baseBranch must be a valid git branch name", { baseBranch: input })
 	}
 	return input
+}
+
+// `git check-ref-format` runs per validated request on the daemon's main thread; keep it
+// asynchronous so request validation can never stall socket dispatch behind process spawn.
+async function gitBranchGrammarRejects(input: string): Promise<boolean> {
+	const check = Bun.spawn({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "ignore", stderr: "ignore" })
+	return await check.exited !== 0
 }
 
 function validateItemTitleForRequest(value: string | null | undefined): string | null | undefined {
@@ -4698,7 +4809,7 @@ function validateItemId(value: string): string {
 	return value
 }
 
-function validateGitBranchNameForRequest(input: string, field: string): string {
+async function validateGitBranchNameForRequest(input: string, field: string): Promise<string> {
 	if (/[\u0000-\u001f\u007f]/u.test(input)) {
 		throw new DaemonError("invalid_request", `${field} must not contain control characters`, { [field]: input })
 	}
@@ -4706,8 +4817,7 @@ function validateGitBranchNameForRequest(input: string, field: string): string {
 		throw new DaemonError("invalid_request", `${field} must be a literal branch name, not checkout shorthand`, { [field]: input })
 	}
 
-	const check = Bun.spawnSync({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "pipe", stderr: "pipe" })
-	if (check.exitCode !== 0) {
+	if (await gitBranchGrammarRejects(input)) {
 		throw new DaemonError("invalid_request", `${field} must be a valid git branch name`, { [field]: input })
 	}
 	return input

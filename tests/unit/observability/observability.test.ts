@@ -16,6 +16,7 @@ import {
 	parseObservabilityEvent,
 	parseObservabilityEventSegmentName,
 	queryObservabilityEvents,
+	renderObservabilityEvent,
 } from "../../../src/observability"
 
 const REPO_ROOT = resolve(import.meta.dir, "../../..")
@@ -31,6 +32,87 @@ describe("observability", () => {
 		expect(ObservabilityKindBoundary.assert(JSON.parse(JSON.stringify(event.kind)))).toBe("lifecycle")
 		expect(ObservabilityEventTypeBoundary.assert(JSON.parse(JSON.stringify(event.type)))).toBe("daemon.stop")
 		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+	})
+
+	test("closure consumption audit preserves evidence and origin freshness", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.consumed",
+			chain: "consume-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: "closure:consume:review",
+				evidence: "unpublished-discarded",
+				freshness: { kind: "retained", commit: "0123456789abcdef" },
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("evidence=unpublished-discarded freshness=retained")
+	})
+
+	test("closure reconciliation preserves worktree registration mismatch identity", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.reconciled",
+			chain: "registration-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: "closure:registration:iteration",
+				repoCwd: "/repo/registration",
+				mismatch: {
+					kind: "registration-mismatch",
+					path: "/worktrees/registration",
+					expectedBranchName: "refs/heads/coder-loop/closures/registration/expected",
+					actualBranchName: "refs/heads/foreign",
+					repaired: false,
+				},
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("mismatch=registration-mismatch repaired=false")
+	})
+
+	test("closure reconciliation preserves Git-contract scan failure identity", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.reconciled",
+			chain: "unavailable-repository-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: null,
+				repoCwd: "/repo/unavailable",
+				mismatch: {
+					kind: "repository-scan-failed",
+					surface: "git-contract",
+					repaired: false,
+					error: "repository Git contract unavailable",
+				},
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("mismatch=repository-scan-failed repaired=false")
+	})
+
+	test("closure reconciliation preserves retired resource repair identity", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.reconciled",
+			chain: "retired-resource-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: "closure:retired:iteration",
+				repoCwd: "/repo/retired",
+				mismatch: {
+					kind: "retired-resource",
+					path: "/worktrees/retired-slot",
+					branchName: "coder-loop/retired-resource-chain-a1b2c3d4e5f6",
+					resourcesRemoved: true,
+					repaired: true,
+				},
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("mismatch=retired-resource repaired=true")
 	})
 
 	test("task event identity is an exact all-or-none triple", () => {
