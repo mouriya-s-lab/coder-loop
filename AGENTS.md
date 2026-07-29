@@ -82,13 +82,13 @@ Runner 与 model 声明在 preset per-phase，item 可选择性覆盖。
 ```toml
 [[phases]]
 name  = "review"
-runner = "claude"       # "claude" | "codex" | "opencode"
+runner = "claude"       # "claude" | "codex" | "opencode" | "hapi"
 model  = "claude-opus-4-7"
 ```
 
 - Phase runner 未声明时走 engine-builtin fallback（当前 `codex`）。
 - Item 上的 `--runner` 只覆盖非 trigger phase（`gh-issue-pr-iteration` 中是 `iteration` 与 `review`；`blocked-responder` / `umbrella-finalizer` 是 trigger phase，不受 item override 影响）。
-- Runner binary 是 PATH 上的 `claude` / `codex` / `opencode`；模型来自 phase 的 `model`。
+- Runner binary 是 PATH 上的 `claude` / `codex` / `opencode` / `hapi-remote-session`；模型来自 phase 的 `model`。
 - Chain 级 model 覆盖走 `coder-loop chain set-runner-model <chain> --kind <k> --model <m>`（patch `chain.metadata.<kind>.model`）。
 - `coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`queue.selected.phaseRunners.<phase>`、`current.runner`、`current.phaseStatus.value.runner/model` — 这是 runner/model 的唯一稳定读面。agent 每个 phase 的 `status.json` 位于 `<logDir>/<runId>/<phase>/status.json`，只作 fallback debug。
 
@@ -98,7 +98,7 @@ preset 层配套的 target-side starter 在 `presets/<name>/templates/`。跨 pr
 
 ## Tech stack
 
-Bun + TypeScript (strict, ESM)。runtime 依赖是 PATH 上的 CLI：`gh` + 每个 phase 声明的 runner CLI（`claude` / `codex` / `opencode`）。
+Bun + TypeScript (strict, ESM)。runtime 依赖是 PATH 上的 CLI：`gh` + 每个 phase 声明的 runner CLI（`claude` / `codex` / `opencode` / `hapi-remote-session`）。
 
 ## Conventions
 

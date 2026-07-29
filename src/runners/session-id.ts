@@ -37,10 +37,16 @@ export const opencodeSessionIdInvalidDetector: RunnerSessionIdInvalidDetector = 
 	detectsSessionIdInvalid: (stderr) => OPENCODE_SESSION_ID_INVALID.test(stripAnsi(stderr)),
 }
 
+export const hapiSessionIdInvalidDetector: RunnerSessionIdInvalidDetector = {
+	runner: "hapi",
+	detectsSessionIdInvalid: () => false,
+}
+
 const SESSION_ID_INVALID_DETECTORS: Record<AgentRunnerKind, RunnerSessionIdInvalidDetector> = {
 	claude: claudeSessionIdInvalidDetector,
 	codex: codexSessionIdInvalidDetector,
 	opencode: opencodeSessionIdInvalidDetector,
+	hapi: hapiSessionIdInvalidDetector,
 }
 
 export function detectsSessionIdInvalid(runner: AgentRunnerKind, stderr: string): boolean {

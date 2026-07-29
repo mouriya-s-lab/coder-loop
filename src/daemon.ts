@@ -10,7 +10,7 @@ import {
 	loadPreset,
 	phaseChainActions,
 	phaseWritableStatuses,
-	runPresetChainCompleteTriggerPhases,
+	selectRunnerForPhase,
 	substitutePresetRootToken,
 	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
@@ -30,6 +30,7 @@ import {
 	listActiveRuns,
 	listPendingCloseHandlers,
 	markRunPendingRecycle,
+	refreshExternalTerminalAvailabilityForItem,
 	maxItemAttemptsFromChainMetadata,
 	schedulerTick,
 	type SchedulerCompletedRun,
@@ -47,6 +48,7 @@ import {
 	type SchedulerState,
 } from "./scheduler"
 import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
+import { runnerExecutionDomain, type RunnerExecutionDomain } from "./runner-execution"
 import {
 	buildEffectiveHookView,
 	loadGlobalHookDeclarations,
@@ -86,7 +88,12 @@ import {
 	assertRequestAdmittedItemStatus,
 	chainMetadataToJsonObject,
 	chainPresetPath,
+	clearSchedulerBackoff as clearItemSchedulerBackoff,
+	clearExternalTerminalHold,
 	engineLifecycleAdmittedItemStatus,
+	externalTerminalCurrent,
+	externalTerminalHold,
+	externalTerminalLoss,
 	itemDependsOnIds,
 	itemExtraToJsonObject,
 	parseInternalStatus,
@@ -753,6 +760,9 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 		case "recycle.timeout_kill":
 		case "recycle.natural_exit":
 		case "scheduler.rate_limited":
+		case "runner.external_terminal_unavailable":
+		case "runner.availability_restored":
+		case "runner.invocation_pending":
 			return null
 		default:
 			return assertNeverSchedulerEvent(event)
@@ -820,6 +830,52 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 	if (runId === null && identity !== null) throw new DaemonError("internal_error", `non-run scheduler event ${event.type} received task identity`)
 	const identityFields = identity === null ? {} : identity
 	switch (event.type) {
+		case "runner.external_terminal_unavailable": {
+			const checkedAt = new Date().toISOString()
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "daemon.warning",
+				chain: chain.name,
+				item: event.rowId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: {
+					code: "external_terminal_unavailable",
+					runner: event.runner,
+					binary: event.binary,
+					probeArgv: [...event.probeArgv],
+					availability: { ...event.availability, checkedAt, since: checkedAt },
+					affected: event.affected.map((affected) => ({ ...affected })),
+				},
+			})
+		}
+		case "runner.availability_restored":
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "runner.availability_restored",
+				chain: chain.name,
+				item: event.rowId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: {
+					runner: event.runner,
+					binary: event.binary,
+					probeArgv: [...event.probeArgv],
+					checkedAt: event.checkedAt,
+					affected: [{ chainId: event.chainId, rowId: event.rowId, itemId: event.itemId, phase: event.phase }],
+				},
+			})
+		case "runner.invocation_pending":
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "runner.invocation_pending",
+				chain: chain.name,
+				item: event.rowId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { runner: event.runner, binary: event.binary, capability: event.capability },
+			})
+
 		case "slot.busy":
 			return makeObservabilityEvent({
 				...identityFields,
@@ -2287,12 +2343,11 @@ export class CoderLoopDaemon {
 	}
 
 	private async recoverStaleSchedulerState(): Promise<void> {
-		// #508: daemon recovery is a process-layer concern only. It kills any stale process group
-		// from the previous daemon instance and clears each exact `active_runs` orphan row so the
-		// scheduler is free to take a new run on this chain. It MUST NOT write `items.status`,
-		// `items.phase`, or closure sessions — those are business fields the agent owns. An
-		// interrupted in_progress item is left as-is and re-scheduled because the preset's
-		// `statuses.continuable` covers `in_progress` (see preset.toml).
+		// #508: ordinary daemon recovery is process-layer only: terminate stale process groups,
+		// clear each exact `active_runs` row, and leave agent-owned item business fields untouched.
+		// The one typed exception is an already-latched external-terminal loss: that durable run
+		// decision must restore its pre-run item facts and close with loss attribution before the
+		// generic orphan reconciliation can overwrite it.
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
@@ -2305,6 +2360,36 @@ export class CoderLoopDaemon {
 				const stalePid = await this.readRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
 				if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
+				const loss = externalTerminalLoss(run.extra)
+				if (loss !== null) {
+					const item = store.getItem(run.itemId)
+					const startStatus = run.extra.startStatus
+					const startStatusUpdatedAt = run.extra.startStatusUpdatedAt
+					const startAttempts = run.extra.startAttempts
+					const terminal = externalTerminalCurrent(run.extra)
+					if (item === null || startStatus === undefined || startStatusUpdatedAt === undefined || startAttempts === undefined || terminal === null) {
+						throw new DaemonError("internal_error", `external-terminal loss run ${run.runId} is missing its restoration facts`)
+					}
+					const reconciledAt = unixSeconds()
+					store.updateItem(item.id, {
+						status: engineLifecycleAdmittedItemStatus(startStatus, "scheduler.external-terminal-loss-entry-restore"),
+						statusUpdatedAt: startStatusUpdatedAt,
+						phase: run.extra.startPhase ?? null,
+						attempts: startAttempts,
+						extra: clearItemSchedulerBackoff(item.extra),
+						updatedAt: reconciledAt,
+					})
+					store.setItemSessionId(item.id, { phase: run.phase, runner: terminal.runner, sessionId: null, updatedAt: reconciledAt })
+					store.completeRun(run.runId, {
+						endedAt: reconciledAt,
+						exitCode: ORPHANED_RUN_EXIT_CODE,
+						status: startStatus,
+						extra: clearItemSchedulerBackoff(storedItemExtra({
+							...itemExtraToJsonObject(run.extra),
+							externalTerminalLoss: { ...loss, terminationPhase: "closed" },
+						})),
+					})
+				}
 				store.clearCurrentRun(currentRun.runId)
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 					kind: "lifecycle",
@@ -2313,11 +2398,7 @@ export class CoderLoopDaemon {
 					runId: currentRun.runId,
 					...identity,
 					subject: { kind: "engine" },
-					payload: {
-						reason: "stale_current_run",
-						pid: stalePid,
-						reconciledRuns: [],
-					},
+					payload: { reason: "stale_current_run", pid: stalePid, reconciledRuns: [] },
 				}))
 			}
 
@@ -2550,7 +2631,7 @@ export class CoderLoopDaemon {
 		const merged = chainMetadataToJsonObject(chain.metadata)
 		const beforeJson = JSON.stringify(merged)
 		const updatedKinds: string[] = []
-		for (const kind of ["claude", "codex", "opencode"] as const) {
+		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
 			const block = patch[kind]
 			if (block === undefined || block === null) continue
 			if (typeof block !== "object" || Array.isArray(block)) {
@@ -2828,6 +2909,7 @@ export class CoderLoopDaemon {
 			subject: caller.subject,
 			payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 		}))
+		await this.refreshPostPersistenceExternalTerminal(chain, [item])
 		this.queueSchedulerTick()
 		return { item: itemToJson(item) }
 	}
@@ -2889,6 +2971,7 @@ export class CoderLoopDaemon {
 				payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 			}))
 		}
+		await this.refreshPostPersistenceExternalTerminal(chain, items)
 		this.queueSchedulerTick()
 		return { items: items.map((item) => itemToJson(item)) }
 	}
@@ -3131,6 +3214,60 @@ export class CoderLoopDaemon {
 			return { item: itemToJson(updated) }
 		} finally {
 			resumeScheduler()
+			const currentItem = store.getItem(item.id)
+			if (currentItem !== null) await this.refreshPostPersistenceExternalTerminal(chain, [currentItem])
+			this.queueSchedulerTick()
+		}
+	}
+
+	private async resolvedPhaseForExternalTerminalRefresh(chain: ChainRecord, item: ItemRecord): Promise<{
+		phase: string
+		executionDomain: RunnerExecutionDomain
+		itemState: { kind: "active" } | { kind: "terminal" }
+	} | null> {
+		// `loadedPresetForItem` is backed by the daemon's shared promise cache keyed by canonical
+		// preset directory. Add, batch-add, update, and the scheduler therefore share one
+		// materialization/validation result; a batch does not reload the same preset per row and the
+		// subsequent synchronous scheduler tick consumes the same cached value. This preserves the
+		// creation-time probe for preset-selected external terminals without multiplying filesystem
+		// work across ordinary local-runner mutations.
+		const { preset } = await this.loadedPresetForItem(chain, item, "external-terminal.create-update-probe")
+		const phase = item.phase === null
+			? preset.phases.find((candidate) => candidate.trigger === null)
+			: preset.phases.find((candidate) => candidate.name === item.phase)
+		if (phase === undefined) return null
+		const selection = buildPhaseRunnerSelectionFromChain({ chain, loopDataRoot: this.paths.root, preset })
+		const runner = selectRunnerForPhase(phase.name, item, selection)
+		return {
+			phase: phase.name,
+			executionDomain: runnerExecutionDomain(runner.kind),
+			itemState: preset.statuses.terminal.includes(item.status) ? { kind: "terminal" } : { kind: "active" },
+		}
+	}
+
+	private async refreshPostPersistenceExternalTerminal(chain: ChainRecord, items: readonly ItemRecord[]): Promise<void> {
+		const options = this.buildSchedulerOptions()
+		const resolvedItems: {
+			item: ItemRecord
+			phase: string
+			executionDomain: RunnerExecutionDomain
+			itemState: { kind: "active" } | { kind: "terminal" }
+		}[] = []
+		for (const item of items) {
+			const resolved = await this.resolvedPhaseForExternalTerminalRefresh(chain, item)
+			if (resolved !== null) resolvedItems.push({ item, ...resolved })
+		}
+		const affected = resolvedItems
+			.filter(({ executionDomain, itemState }) => executionDomain.kind === "external-terminal" && itemState.kind === "active")
+			.map(({ item, phase }) => ({ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }))
+		for (const { item, phase, itemState } of resolvedItems) {
+			if (itemState.kind === "terminal") {
+				if (externalTerminalHold(item.extra) !== null) {
+					options.store.updateItem(item.id, { extra: clearExternalTerminalHold(item.extra), updatedAt: Math.floor(Date.now() / 1000) })
+				}
+				continue
+			}
+			await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, undefined, affected)
 		}
 	}
 
@@ -3679,18 +3816,7 @@ export class CoderLoopDaemon {
 		if (scheduler.recycleKillGraceMs !== undefined) options.recycleKillGraceMs = scheduler.recycleKillGraceMs
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
-		else {
-			const explicitRunnerOverride = scheduler.runner !== undefined ? fallbackRunner : null
-			options.chainCompleteTriggerForChain = async (context) =>
-				await runPresetChainCompleteTriggerPhases({
-					...context,
-					loopDataRoot: this.paths.root,
-					terminalStatusNames: context.terminalStatusNames,
-					...(await presetForChain(context.chain)),
-					...(explicitRunnerOverride === null ? {} : { phaseRunner: () => explicitRunnerOverride }),
-					onStatusPersistenceFailure: (failure) => this.recordRunnerStatusPersistenceFailure(failure, context.chain.id),
-				})
-		}
+		else options.chainCompleteExecution = { kind: "scheduler-managed" }
 		return options
 	}
 
@@ -5304,7 +5430,7 @@ function optionalRunner(record: UnknownRecord, key: string): AgentRunnerKind | n
 	const value = record[key]
 	if (value === undefined) return undefined
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex" && value !== "opencode") throw new DaemonError("invalid_request", `${key} must be claude, codex, opencode, or null`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode" && value !== "hapi") throw new DaemonError("invalid_request", `${key} must be claude, codex, opencode, hapi, or null`)
 	return value
 }
 

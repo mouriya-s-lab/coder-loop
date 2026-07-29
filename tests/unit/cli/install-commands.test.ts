@@ -1,10 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { buildLiveRuntimeHealthLines } from "../../../src/install-commands"
 import { buildCoderLoopStatusSnapshot } from "../../../src/loop"
 import { openSqliteStateStore } from "../../../src/sqlite-state"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "../../../src/runtime-data"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "../../..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/install-command-tests", String(process.pid))
@@ -36,15 +36,46 @@ describe("buildLiveRuntimeHealthLines", () => {
 	})
 })
 
-async function makeDoctorTarget(): Promise<string> {
+describe("doctor command ownership", () => {
+	test("reports hapi-remote-session guidance for a missing hapi runner", async () => {
+		const missingBinary = `missing-hapi-remote-session-${process.pid}`
+		const target = await makeDoctorTarget({ runner: "hapi", binary: missingBinary })
+		const loopDataRoot = resolve(target, "loop-data")
+		const bin = resolve(target, "doctor-bin")
+		await mkdir(bin, { recursive: true })
+		await writeFile(resolve(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+		await writeFile(resolve(bin, "coder-loop"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+		const proc = Bun.spawn({
+			cmd: [process.execPath, resolve(REPO_ROOT, "src/loop.ts"), "doctor", target, "--loop-data-root", loopDataRoot, "--chain", "doctor-chain"],
+			cwd: REPO_ROOT,
+			env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+		expect(exitCode).toBe(1)
+		expect(stderr).toContain(
+			`hapi runner CLI (${missingBinary}) 未在 PATH 中。安装/配置 hapi-remote-session，并确认 \`${missingBinary} --version\` 与 \`${missingBinary} probe\` 可运行。`,
+		)
+		expect(stderr).not.toContain(`claude runner CLI (${missingBinary})`)
+	})
+})
+
+async function makeDoctorTarget(runner?: { runner: "hapi"; binary: string }): Promise<string> {
 	const dir = resolve(TEST_ROOT, `doctor-${Date.now()}-${Math.random().toString(16).slice(2)}`)
 	const loopDataRoot = resolve(dir, "loop-data")
+	const presetPath = runner === undefined ? null : resolve(dir, "hapi-preset")
 	await mkdir(resolve(dir, ".coder-loop"), { recursive: true })
 	await mkdir(loopDataRoot, { recursive: true })
 	await mkdir(resolve(loopDataRoot, "chains", "doctor-chain", "issues"), { recursive: true })
 	await mkdir(resolve(loopDataRoot, "chains", "doctor-chain", "evidence"), { recursive: true })
 	await mkdir(resolve(loopDataRoot, "chains", "doctor-chain", "runs"), { recursive: true })
 	await writeFile(resolve(loopDataRoot, "chains", "doctor-chain", "shared.md"), "# Shared durable context\n\n")
+	if (presetPath !== null) {
+		await cp(resolve(REPO_ROOT, "presets/single-phase-example"), presetPath, { recursive: true })
+		const presetToml = resolve(presetPath, "preset.toml")
+		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replace('name   = "run"', 'name   = "run"\nrunner = "hapi"'))
+	}
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		const chain = store.createChain({
@@ -52,6 +83,9 @@ async function makeDoctorTarget(): Promise<string> {
 			preset: "single-phase-example",
 			repository: "fixture/repo",
 			baseBranch: "main",
+			metadata: runner === undefined || presetPath === null
+				? storedChainMetadata({})
+				: storedChainMetadata({ presetPath, hapi: { binary: runner.binary } }),
 		})
 		store.createItem({
 			chainId: chain.id,
@@ -61,6 +95,8 @@ async function makeDoctorTarget(): Promise<string> {
 			itemId: "alpha",
 			repoCwd: dir,
 			status: runtimeStatus("pending"),
+			preset: presetPath === null ? "single-phase-example" : null,
+			presetPath,
 			extra: storedItemExtra({ id: "alpha" }),
 		})
 	} finally {

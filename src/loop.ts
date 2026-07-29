@@ -60,6 +60,9 @@ import {
 import {
 	chainBindings as metadataBindings,
 	chainBindingsPresetPath,
+	externalTerminalHold,
+	externalTerminalCurrent,
+	externalTerminalLoss,
 	itemExtraJsonValue,
 	itemExtraToTransparentJsonObject,
 	metadataBoolean,
@@ -69,9 +72,12 @@ import {
 	parseInternalStatus,
 	RuntimeDataError,
 	type InternalStatus,
+	type ExternalTerminalHoldAvailability,
+	type ExternalTerminalLossFact,
 } from "./runtime-data"
 import { TaskTreeSnapshotBoundary, type TaskTreeSnapshot } from "./task-runtime"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
+import { gateResolvedRunnerAvailability, runnerExecutionDomain, runnerInvocationCapability, type RunnerInvocationCapability } from "./runner-execution"
 export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
 
@@ -394,12 +400,12 @@ type ContextAppendCommandArgs = {
 // reaches it via chain metadata now (see chainResolvedFromChain). The composed-options struct
 // below holds the live shape that the loop builds from a `ChainRecord` alone.
 
-// #481: opencode joins the union as the third runner kind. Boundary widens accordingly; the
+// #481/#602: opencode and hapi widen the authoritative runner vocabulary. The
 // `AgentRunnerKind` TS union below mirrors it (compile-time `Record<AgentRunnerKind, ...>`
 // admittance ensures we cannot leave a code path partial). ENGINE_BUILTIN_RUNNER stays `codex`
 // — opencode is an explicit opt-in via `runner = "opencode"` on a preset's phase, never a
 // fallback for missing claude/codex.
-const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"))
+const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi"))
 
 const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
@@ -882,7 +888,7 @@ export type PresetPhaseTrigger =
 	| { afterPhase: string; whenStatus: InternalStatus }
 	| { on: "chain-complete" }
 
-export type AgentRunnerKind = "claude" | "codex" | "opencode"
+export type AgentRunnerKind = "claude" | "codex" | "opencode" | "hapi"
 
 // #433: "config" source value is retired — there is no longer a target-side runtime preferences
 // file to override phase runner choice from. #456: role-named source values (`iteration-default` /
@@ -907,6 +913,7 @@ export type AgentRunnerCommands = {
 	claude: AgentRunnerCommand
 	codex: AgentRunnerCommand
 	opencode: AgentRunnerCommand
+	hapi: AgentRunnerCommand
 }
 
 export type RuntimeCheckError = {
@@ -1023,6 +1030,17 @@ export type StatusQueueSnapshot = {
 	continuable: number
 	terminal: number
 	selected: StatusSelectedIssue | null
+	holds: StatusExternalTerminalHoldSnapshot[]
+}
+
+export type StatusExternalTerminalHoldSnapshot = {
+	kind: "external-terminal-unavailable"
+	chainId: number
+	rowId: number
+	itemId: string
+	phase: string
+	runner: AgentRunnerKind
+	availability: ExternalTerminalHoldAvailability
 }
 
 export type StatusRunCountSnapshot = {
@@ -1050,6 +1068,7 @@ export type StatusCurrentSnapshot = {
 	item: StatusItemSnapshot | null
 	runner: StatusRunnerSelectionSnapshot | null
 	phaseStatus: StatusPhaseStatusSnapshot | null
+	externalTerminal: { availability: ExternalTerminalHoldAvailability | { kind: "available"; checkedAt: string }; loss: ExternalTerminalLossFact | null } | null
 }
 
 export type StatusEventsSnapshot = {
@@ -2085,8 +2104,8 @@ function parsePresetPhaseChainActionFlag(value: string): PresetPhaseChainAction 
 
 function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value === "claude" || value === "codex" || value === "opencode") return value
-	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode" || value === "hapi") return value
+	fail(`${flagName} must be claude, codex, opencode, or hapi, got: ${value}`)
 }
 
 // #526 chain set-runner-model boundary parsers. Required variants of the runner-kind /
@@ -2101,8 +2120,8 @@ function parseOptionalRunner(value: string | null, flagName: string): AgentRunne
 // narrowed input could never hit).
 function parseRequiredRunnerKind(value: string, flagName: string): AgentRunnerKind {
 	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
-	if (value === "claude" || value === "codex" || value === "opencode") return value
-	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode" || value === "hapi") return value
+	fail(`${flagName} must be claude, codex, opencode, or hapi, got: ${value}`)
 }
 
 function parseRequiredNonEmptyString(value: string, flagName: string): string {
@@ -2243,7 +2262,7 @@ async function runChainCommand(args: string[]): Promise<void> {
 		// #526: assemble the wire patch on the CLI side so the chain-action dispatch reads
 		// like every other chain.* op (one branch, one daemon call, one formatter). The
 		// daemon op re-validates `{<kind>: {model}}` with hand-rolled per-kind typeof
-		// guards (`src/daemon.ts:1962-2005` — kind in {claude,codex,opencode} union with
+		// guards (`src/daemon.ts:1962-2005` — kind in {claude,codex,opencode,hapi} union with
 		// model:string-non-whitespace), so the CLI passes the minimal shape it accepts.
 		const patch: JsonObject = { [chainArgs.kind]: { model: chainArgs.model } }
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.updateBindings", {
@@ -2653,7 +2672,7 @@ function daemonErrorResponse(code: string, message: string, details: JsonObject 
 
 function writeDaemonErrorResponse(response: JsonObject): void {
 	process.stdout.write(`${JSON.stringify(response, null, "\t")}\n`)
-	process.exitCode = 1
+	setCliExitCode(1)
 }
 
 function writeCommandResult(result: JsonObject, json: boolean, formatText: (result: JsonObject) => string): void {
@@ -2993,7 +3012,7 @@ async function runPresetCommand(args: string[]): Promise<void> {
 	const result = resolution.kind === "resolved" ? await compilePreset(resolution.presetDir) : resolution
 	if (result.kind === "rejected") {
 		process.stderr.write(`${JSON.stringify(projectPresetCompileResult(result))}\n`)
-		process.exitCode = 1
+		setCliExitCode(1)
 		return
 	}
 	const publicResult = projectPresetCompileResult(result)
@@ -3001,46 +3020,63 @@ async function runPresetCommand(args: string[]): Promise<void> {
 	process.stdout.write(`${JSON.stringify(publicResult.projection)}\n`)
 }
 
-async function main() {
-	const firstArg = process.argv[2]
+let activeCliExitCode: number | null = null
+
+export async function runCoderLoopCli(args: string[]): Promise<number> {
+	activeCliExitCode = 0
+	try {
+		await dispatchCoderLoopCli(args)
+		return activeCliExitCode
+	} finally {
+		activeCliExitCode = null
+	}
+}
+
+async function dispatchCoderLoopCli(args: string[]): Promise<void> {
+	const firstArg = args[0]
 	if (firstArg === "status") {
-		await runStatusCommand(process.argv.slice(3))
+		await runStatusCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "logs") {
-		await runLogsCommand(process.argv.slice(3))
+		await runLogsCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "daemon") {
-		await runDaemonCommand(process.argv.slice(3))
+		await runDaemonCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "chain") {
-		await runChainCommand(process.argv.slice(3))
+		await runChainCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "item") {
-		await runItemCommand(process.argv.slice(3))
+		await runItemCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "queue") {
-		await runQueueCommand(process.argv.slice(3))
+		await runQueueCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "preset") {
-		await runPresetCommand(process.argv.slice(3))
+		await runPresetCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "context") {
-		await runContextCommand(process.argv.slice(3))
+		await runContextCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "doctor") {
-		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
+		const handled = await dispatchSubcommand(firstArg, args.slice(1))
 		if (handled) return
 	}
 	process.stdout.write(rootUsage())
-	process.exitCode = 1
+	setCliExitCode(1)
+}
+
+function setCliExitCode(exitCode: number): void {
+	if (activeCliExitCode === null) process.exitCode = exitCode
+	else activeCliExitCode = exitCode
 }
 
 function rootUsage(): string {
@@ -3143,6 +3179,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const target = makeStatusTargetSnapshot(options.targetCwd, options.stateDbPath, options)
 	const items = readDbItemsForChain(options.loopDataRoot, loaded.chain.id)
 	const current = readDbCurrentRun(options.loopDataRoot, loaded.chain.id)
+	const runs = readDbRunsForChain(options.loopDataRoot, loaded.chain.id)
 	// #412: status snapshot must resolve continuable / terminal / idField from each item's own preset
 	// so mixed-preset chains stay selectable after chain-preset items finish. The resolver caches
 	// loaded presets by directory so we read each preset.toml at most once per snapshot, and falls
@@ -3150,7 +3187,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const itemPresets = await loadStatusItemPresets(options, items)
 	const selected = pickFirstSelectableStatusItem(options, loaded.chain, items, current, itemPresets)
 	const runtimeErrors = await collectStatusRuntimeErrors(options, loaded.chain, items, current, itemPresets)
-	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, current, itemPresets)
+	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, runs, current, itemPresets)
 	const events = await buildStatusEventsSnapshotFromRecords(options, current, selected, items)
 	const processes = await buildCentralStatusProcessSnapshot(options)
 	const snapshot: CoderLoopStatusSnapshot = {
@@ -3167,7 +3204,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			error: null,
 		},
 		queue: buildStatusQueueSnapshotFromRecords(options, items, selected, itemPresets),
-		runs: buildStatusRunsSnapshot(readDbRunsForChain(options.loopDataRoot, loaded.chain.id)),
+		runs: buildStatusRunsSnapshot(runs),
 		current: currentSnapshot,
 		events,
 		processes,
@@ -3269,7 +3306,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		}
 	}
 	const hostRunner = detectHostRunner(process.env)
-	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs"> = {
+	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs" | "hapiBinary" | "hapiModel" | "hapiExtraArgs"> = {
 		claudeBinary: null,
 		claudeModel: null,
 		claudeExtraArgs: [],
@@ -3279,6 +3316,9 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		opencodeBinary: null,
 		opencodeModel: null,
 		opencodeExtraArgs: [],
+		hapiBinary: null,
+		hapiModel: null,
+		hapiExtraArgs: [],
 	}
 	return {
 		hostDefault: hostRunner,
@@ -3308,9 +3348,9 @@ function makeUnavailableStatusSnapshot(input: {
 			errors: [{ path: input.errorPath, message: input.errorMessage }],
 			error: input.errorMessage,
 		},
-		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
+		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null, holds: [] },
 		runs: { total: 0, byPhaseStatus: {}, counts: [] },
-		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
+		current: { run: null, id: null, item: null, runner: null, phaseStatus: null, externalTerminal: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: input.processes ?? { live: [], scanError: null },
 		taskTree: null,
@@ -3405,6 +3445,18 @@ function buildStatusQueueSnapshotFromRecords(
 		byStatus,
 		continuable: items.filter(isContinuable).length,
 		terminal: items.filter(isTerminal).length,
+		holds: items.flatMap((item) => {
+			const hold = externalTerminalHold(item.extra)
+			return hold === null ? [] : [{
+				kind: hold.kind,
+				chainId: item.chainId,
+				rowId: item.id,
+				itemId: item.itemId,
+				phase: hold.phase,
+				runner: hold.runner,
+				availability: { ...hold.availability },
+			}]
+		}),
 		selected: selected === null || selectedPreset === null ? null : {
 			id: getItemId(selected.item, selectedPreset),
 			item: statusItemSnapshot(selected.item, selectedPreset),
@@ -3490,10 +3542,11 @@ function buildStatusRunsSnapshot(runs: readonly RunRecord[]): StatusRunsSnapshot
 async function buildStatusCurrentSnapshotFromRecords(
 	options: LoopOptions,
 	items: readonly ItemRecord[],
+	runs: readonly RunRecord[],
 	current: CurrentRunRecord | null,
 	itemPresets: StatusItemPresetResolver,
 ): Promise<StatusCurrentSnapshot> {
-	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null }
+	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null, externalTerminal: null }
 	let id: string | null = null
 	let item: ItemRecord | null = null
 	try {
@@ -3504,17 +3557,30 @@ async function buildStatusCurrentSnapshotFromRecords(
 		id = null
 	}
 	const outputPath = agentOutputPath(options, current.runId, current.phase)
-	// #412: current-run runner resolution must use the running item's preset (the scheduler spawned
-	// against that preset's phase plan). selectRunnerForPhase would otherwise look up the phase in
-	// the chain seed and throw "preset X does not define phase Y" on a foreign-preset item.
+	// #412: ordinary current-run resolution uses the running item's preset. Scheduler-managed
+	// chain-complete runs are chain-owned, however, so their durable origin selects the chain preset
+	// before phase lookup; otherwise a representative foreign-preset item can hide the active run.
 	const itemPreset = item === null ? null : itemPresets.presetForItem(item)
-	const selectionInput = itemPreset === null ? null : phaseRunnerSelectionInputForPreset(options, itemPreset)
+	const runnerPreset = current.extra.schedulerRunOrigin === "chain-complete" ? options.preset : itemPreset
+	const selectionInput = runnerPreset === null ? null : phaseRunnerSelectionInputForPreset(options, runnerPreset)
+	const currentRunner = item === null || selectionInput === null ? null : selectRunnerForPhase(current.phase, item, selectionInput)
+	const hold = item === null ? null : externalTerminalHold(item.extra)
+	const currentExternalTerminal = externalTerminalCurrent(current.extra)
+	const currentRun = runs.find((run) => run.runId === current.runId) ?? null
+	const loss = currentRun === null ? null : externalTerminalLoss(currentRun.extra)
+	const currentDomain = currentRunner === null ? null : runnerExecutionDomain(currentRunner.kind)
 	return {
 		run: statusCurrentRunSnapshot(current),
 		id,
 		item: item === null || itemPreset === null ? null : statusItemSnapshot(item, itemPreset),
-		runner: item === null || selectionInput === null ? null : statusRunnerSelection(selectRunnerForPhase(current.phase, item, selectionInput)),
+		runner: currentRunner === null ? null : statusRunnerSelection(currentRunner),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
+		externalTerminal: currentExternalTerminal === null && currentDomain?.kind !== "external-terminal" ? null : {
+			availability: hold === null
+				? currentExternalTerminal?.availability ?? { kind: "available", checkedAt: new Date(current.startedAt * 1000).toISOString() }
+				: { ...hold.availability },
+			loss: loss === null ? null : { ...loss },
+		},
 	}
 }
 
@@ -3838,12 +3904,12 @@ async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "
 	if (response === null) return
 	if (args.json) {
 		process.stdout.write(`${JSON.stringify(response, null, "\t")}\n`)
-		if (!response.ok) process.exitCode = 1
+		if (!response.ok) setCliExitCode(1)
 		return
 	}
 	if (!response.ok) {
 		process.stderr.write(`daemon down failed: ${response.error.code}: ${response.error.message}\n`)
-		process.exitCode = 1
+		setCliExitCode(1)
 		return
 	}
 	process.stdout.write(formatDaemonDownResult(response.result))
@@ -4287,9 +4353,9 @@ export type ChainResolved = {
 	evidenceDir: string
 	logDir: string
 	loopDataRoot: string | null
-	// #433: per-runner overrides flow exclusively through chain.metadata.{claude,codex,opencode}.{binary,model,extraArgs}.
+	// #433/#602: per-runner overrides flow exclusively through chain.metadata.{claude,codex,opencode,hapi}.{binary,model,extraArgs}.
 	// The retired target on-disk preferences file is no longer in the lookup chain.
-	// #481: opencode (the third runner kind) follows the same shape — chain.metadata.opencode.{binary,model,extraArgs}.
+	// All four runner kinds follow the same command-resolution shape.
 	claudeBinary: string | null
 	claudeModel: string | null
 	claudeExtraArgs: readonly string[]
@@ -4299,6 +4365,9 @@ export type ChainResolved = {
 	opencodeBinary: string | null
 	opencodeModel: string | null
 	opencodeExtraArgs: readonly string[]
+	hapiBinary: string | null
+	hapiModel: string | null
+	hapiExtraArgs: readonly string[]
 	preset: string | null
 	presetPath: string | null
 }
@@ -4322,6 +4391,9 @@ function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null)
 		opencodeBinary: metadataNestedString(metadata, "opencode", "binary") ?? null,
 		opencodeModel: metadataNestedString(metadata, "opencode", "model") ?? null,
 		opencodeExtraArgs: metadataNestedStringArray(metadata, "opencode", "extraArgs") ?? [],
+		hapiBinary: metadataNestedString(metadata, "hapi", "binary") ?? null,
+		hapiModel: metadataNestedString(metadata, "hapi", "model") ?? null,
+		hapiExtraArgs: metadataNestedStringArray(metadata, "hapi", "extraArgs") ?? [],
 		preset: presetPath === null ? chain.preset : null,
 		presetPath,
 	}
@@ -5038,7 +5110,7 @@ function parseChainBindingDefaultValue(value: BoundaryValue, label: string): Cha
 
 function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex" && value !== "opencode") presetError(`${label}: must be "claude", "codex", or "opencode"`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode" && value !== "hapi") presetError(`${label}: must be "claude", "codex", "opencode", or "hapi"`)
 	return value
 }
 
@@ -5253,13 +5325,13 @@ export function detectHostRunner(env: Record<string, string | undefined>): Agent
 
 // #433: runner binary / model / extraArgs come exclusively from chain.metadata.<kind> now —
 // the retired target on-disk preferences file no longer layers anything on top. Defaults are
-// the kind name on PATH (claude/codex/opencode) with no extra args.
+// the resolved kind command on PATH (claude/codex/opencode/hapi) with no extra args.
 // #481: opencode joins the slot list with the same shape; when a phase declares runner=opencode
 // with no explicit `model`, applyPhaseDefaultModel falls back to DEFAULT_OPENCODE_MODEL — the
 // only model the operator's opencode provider is currently configured for, per the issue body
 // dependency footnote.
 export const DEFAULT_OPENCODE_MODEL = "opencode-go/glm-5.2"
-export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs">): AgentRunnerCommands {
+export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs" | "hapiBinary" | "hapiModel" | "hapiExtraArgs">): AgentRunnerCommands {
 	return {
 		claude: {
 			kind: "claude",
@@ -5278,6 +5350,12 @@ export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBi
 			binary: resolved.opencodeBinary ?? "opencode",
 			extraArgs: [...resolved.opencodeExtraArgs],
 			model: resolved.opencodeModel,
+		},
+		hapi: {
+			kind: "hapi",
+			binary: resolved.hapiBinary ?? "hapi-remote-session",
+			extraArgs: [...resolved.hapiExtraArgs],
+			model: resolved.hapiModel,
 		},
 	}
 }
@@ -5326,7 +5404,7 @@ function phaseDefaultRunnerKind(phase: PresetPhase): AgentRunnerKind {
 // inherit it.
 // #481: when the phase declares runner = "opencode" but no explicit `model`, fall back to the
 // engine default `opencode-go/glm-5.2`. Explicit phase model still wins; chain.metadata
-// opencode.model still wins; item override to claude/codex still ignores opencode defaults
+// opencode.model still wins; item override to claude/codex/hapi still ignores opencode defaults
 // entirely (same kind-binding rule as before).
 function applyPhaseDefaultModel(selection: AgentRunnerSelection, phase: PresetPhase): AgentRunnerSelection {
 	if (selection.model !== null) return selection
@@ -5462,6 +5540,21 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	}
 
 	for (const phase of phases) {
+		const resolvedRunner = await resolvePhaseRunner(phase.name)
+		const gate = await gateResolvedRunnerAvailability(resolvedRunner)
+		if (gate.kind === "unavailable") {
+			return {
+				decision: "keep-active",
+				reason: `external terminal ${resolvedRunner.kind} unavailable: ${gate.availability.reason}`,
+			}
+		}
+		const invocationCapability = runnerInvocationCapability(resolvedRunner.kind)
+		if (invocationCapability.kind === "probe-only") {
+			return {
+				decision: "keep-active",
+				reason: `runner ${resolvedRunner.kind} invocation pending: ${invocationCapability.outcome}`,
+			}
+		}
 		const ctx: ResolveContext = {
 			item: anchorRecord,
 			chain: buildRenderBindings(options),
@@ -5480,7 +5573,6 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const promptRaw = await readFile(phase.prompt, "utf-8")
 		const prompt = renderPrompt(promptRaw, phase, ctx)
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
-		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
 		const { output, stdoutBytes, code } = await runAgent(
 			options,
@@ -5508,16 +5600,39 @@ function selectFinalizerAnchorItem(items: readonly ItemRecord[], runId: string |
 	return item
 }
 
-function parseFinalizerSummaryDecision(output: string, runner: AgentRunnerKind): PresetChainCompleteDecision | null {
-	let sawRunnerJson = false
-	let decision: PresetChainCompleteDecision | null = null
+export function parseFinalizerSummaryDecision(output: string, runner: AgentRunnerKind): PresetChainCompleteDecision | null {
+	let state = createFinalizerSummaryDecisionState()
 	for (const line of output.split(/\r?\n/)) {
-		const parsed = runnerAgentTextFromJsonLine(line, runner)
-		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
-		if (parsed.text === null) continue
-		decision = parseFinalizerSummaryDecisionFromText(parsed.text)
+		state = observeFinalizerSummaryDecisionLine(state, line, runner)
 	}
-	return sawRunnerJson ? decision : parseFinalizerSummaryDecisionFromText(output)
+	return finalizerSummaryDecision(state)
+}
+
+export type FinalizerSummaryDecisionState = {
+	sawRunnerJson: boolean
+	runnerDecision: PresetChainCompleteDecision | null
+	plainDecision: PresetChainCompleteDecision | null
+}
+
+export function createFinalizerSummaryDecisionState(): FinalizerSummaryDecisionState {
+	return { sawRunnerJson: false, runnerDecision: null, plainDecision: null }
+}
+
+export function observeFinalizerSummaryDecisionLine(
+	state: FinalizerSummaryDecisionState,
+	line: string,
+	runner: AgentRunnerKind,
+): FinalizerSummaryDecisionState {
+	const parsed = runnerAgentTextFromJsonLine(line, runner)
+	return {
+		sawRunnerJson: state.sawRunnerJson || parsed.parsedRunnerEvent,
+		runnerDecision: parsed.text === null ? state.runnerDecision : parseFinalizerSummaryDecisionFromText(parsed.text),
+		plainDecision: line.trim() === "" ? state.plainDecision : parseFinalizerSummaryDecisionFromText(line),
+	}
+}
+
+export function finalizerSummaryDecision(state: FinalizerSummaryDecisionState): PresetChainCompleteDecision | null {
+	return state.sawRunnerJson ? state.runnerDecision : state.plainDecision
 }
 
 function parseFinalizerSummaryDecisionFromText(text: string): PresetChainCompleteDecision | null {
@@ -6334,6 +6449,7 @@ function finalSummaryLine(text: string, marker: string): string | null {
 // (`parseFinalizerSummaryDecision`) — out of scope for this issue.
 
 function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { parsedRunnerEvent: boolean; text: string | null } {
+	if (runner === "hapi") return { parsedRunnerEvent: false, text: null }
 	const trimmed = line.trim()
 	if (trimmed === "" || !trimmed.startsWith("{")) return { parsedRunnerEvent: false, text: null }
 	try {
@@ -6357,7 +6473,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	const selectedRunner = input.runner ?? options.defaultRunner
 	const authorizationPaths = input.authorizationPaths ?? { currentIssueFile: "", evidenceDir: options.evidenceRootDir }
-	await mkdir(dirname(outputPath), { recursive: true })
 	const loopDataRoot = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).root
 	const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, buildRunnerFilesystemAuthorization({
 		agentCwd: input.agentCwd,
@@ -6372,6 +6487,8 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
 		declaredRuntimeBindingPaths: phaseDeclaredRuntimeBindingPaths(input.authorizationPhase ?? { variables: [] }),
 	}))
+	if (runnerPlan.kind === "invocation-pending") throw new Error(`runner ${runnerPlan.runner} invocation is pending its invocation contract`)
+	await mkdir(dirname(outputPath), { recursive: true })
 	for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
 	await writeFile(resolve(dirname(outputPath), "runner-authorization.json"), `${JSON.stringify(runnerPlan.authorizationEvidence)}\n`)
 	return new Promise((resolveResult, rejectResult) => {
@@ -6715,6 +6832,7 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 
 export type RunnerInvocation =
 	| { kind: "spawn"; binary: string; args: string[]; environment: Readonly<Record<string, string>>; runtimeDirectories: readonly string[]; authorizationEvidence: RunnerAuthorizationEvidence }
+	| { kind: "invocation-pending"; runner: AgentRunnerKind; capability: Extract<RunnerInvocationCapability, { kind: "probe-only" }> }
 
 // #505: the loop-process-side git worktree helpers (worktreeBasePath /
 // worktreePathForItem / ensureWorktreeForItem / removeWorktreeForItem /
@@ -6841,7 +6959,12 @@ function runnerGitMetadataSurfaces(agentCwd: string): RunnerFilesystemSurface[] 
 	}
 }
 
+export function buildRunnerInvocation(runner: AgentRunnerSelection & { kind: Exclude<AgentRunnerKind, "hapi"> }, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): Extract<RunnerInvocation, { kind: "spawn" }>
+export function buildRunnerInvocation(runner: AgentRunnerSelection & { kind: "hapi" }, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): Extract<RunnerInvocation, { kind: "invocation-pending" }>
+export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): RunnerInvocation
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): RunnerInvocation {
+	const capability = runnerInvocationCapability(runner.kind)
+	if (capability.kind === "probe-only") return { kind: "invocation-pending", runner: runner.kind, capability }
 	assertRunnerAuthorizationMetadata(runner)
 	const runnerExecutable = isAbsolute(runner.binary) ? runner.binary : Bun.which(runner.binary) ?? runner.binary
 	const effectiveAuthorization: RunnerFilesystemAuthorization = {
@@ -6857,11 +6980,7 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 	if (runnerScratch === undefined) throw new Error("declared runner surfaces require task-private runner scratch")
 	const writableDirs = effectiveAuthorization.surfaces.flatMap((surface) => surface.kind === "task-private-directory" || surface.kind === "writable-directory" ? [surface.path] : [])
 	const claudeDirs = effectiveAuthorization.surfaces.flatMap((surface) => surface.kind === "task-private-directory" || surface.kind === "read-only-directory" || surface.kind === "writable-directory" ? [surface.path] : [])
-	const nativeArgs = runner.kind === "claude"
-		? agentClaudeArgs(runner.extraArgs, prompt, resume, claudeDirs, runner.model)
-		: runner.kind === "opencode"
-			? agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model, authorization.agentCwd)
-			: agentCodexArgs(runner.extraArgs, prompt, resume, authorization.agentCwd, runner.model, writableDirs)
+	const nativeArgs = runnerNativeArgs(runner, prompt, resume, authorization.agentCwd, claudeDirs, writableDirs)
 	const environment = runnerEnvironment(runner.kind, runnerScratch.path)
 	const outerSandboxProfile = runnerSandboxProfile(effectiveAuthorization, runner.kind)
 	return {
@@ -6880,10 +6999,32 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 	}
 }
 
+function runnerNativeArgs(
+	runner: AgentRunnerSelection,
+	prompt: string,
+	resume: ResumeDecision,
+	agentCwd: string,
+	claudeDirs: readonly string[],
+	writableDirs: readonly string[],
+): string[] {
+	switch (runner.kind) {
+		case "claude": return agentClaudeArgs(runner.extraArgs, prompt, resume, claudeDirs, runner.model)
+		case "codex": return agentCodexArgs(runner.extraArgs, prompt, resume, agentCwd, runner.model, writableDirs)
+		case "opencode": return agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model, agentCwd)
+		case "hapi": throw new Error("hapi invocation is pending the #603 invocation contract")
+		default: return assertNeverRunnerKind(runner.kind)
+	}
+}
+
 function runnerEnvironment(runner: AgentRunnerKind, scratchPath: string): Readonly<Record<string, string>> {
 	const common = { TMPDIR: scratchPath, TMP: scratchPath, TEMP: scratchPath }
-	if (runner === "claude") return { ...common, CLAUDE_CODE_TMPDIR: scratchPath }
-	return common
+	switch (runner) {
+		case "claude": return { ...common, CLAUDE_CODE_TMPDIR: scratchPath }
+		case "codex":
+		case "opencode":
+		case "hapi": return common
+		default: return assertNeverRunnerKind(runner)
+	}
 }
 
 const RUNNER_AUTHORIZATION_OPTIONS = ["--add-dir", "--sandbox", "-s", "--cd", "-C", "--dir", "--permission-mode", "--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox"]
@@ -6936,15 +7077,14 @@ function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runn
 }
 
 function runnerRuntimeSurfaces(runner: AgentRunnerKind): RunnerFilesystemSurface[] {
-	if (runner === "claude") {
-		return [
+	switch (runner) {
+		case "claude": return [
 			{ kind: "runner-runtime-directory", runner: "claude", channel: "projects", path: resolve(homedir(), ".claude/projects") },
 			{ kind: "runner-runtime-directory", runner: "claude", channel: "session-env", path: resolve(homedir(), ".claude/session-env") },
 		]
-	}
-	if (runner === "codex") {
-		const codexHome = process.env.CODEX_HOME ?? resolve(homedir(), ".codex")
-		return [
+		case "codex": {
+			const codexHome = process.env.CODEX_HOME ?? resolve(homedir(), ".codex")
+			return [
 			{ kind: "runner-runtime-file", runner: "codex", channel: "installation-id", path: resolve(codexHome, "installation_id") },
 			{ kind: "runner-runtime-file", runner: "codex", channel: "models-cache", path: resolve(codexHome, "models_cache.json") },
 			{ kind: "runner-runtime-directory", runner: "codex", channel: "cache", path: resolve(codexHome, "cache") },
@@ -6964,13 +7104,19 @@ function runnerRuntimeSurfaces(runner: AgentRunnerKind): RunnerFilesystemSurface
 			{ kind: "runner-runtime-file", runner: "codex", channel: "memories-db", path: resolve(codexHome, "memories_1.sqlite") },
 			{ kind: "runner-runtime-file", runner: "codex", channel: "memories-db-shm", path: resolve(codexHome, "memories_1.sqlite-shm") },
 			{ kind: "runner-runtime-file", runner: "codex", channel: "memories-db-wal", path: resolve(codexHome, "memories_1.sqlite-wal") },
+			]
+		}
+		case "opencode": return [
+			{ kind: "runner-runtime-directory", runner: "opencode", channel: "data", path: resolve(homedir(), ".local/share/opencode") },
+			{ kind: "runner-runtime-directory", runner: "opencode", channel: "state", path: resolve(homedir(), ".local/state/opencode") },
 		]
+		case "hapi": return []
+		default: return assertNeverRunnerKind(runner)
 	}
-	if (runner === "opencode") return [
-		{ kind: "runner-runtime-directory", runner: "opencode", channel: "data", path: resolve(homedir(), ".local/share/opencode") },
-		{ kind: "runner-runtime-directory", runner: "opencode", channel: "state", path: resolve(homedir(), ".local/state/opencode") },
-	]
-	return []
+}
+
+function assertNeverRunnerKind(value: never): never {
+	throw new Error(`unsupported runner kind: ${JSON.stringify(value)}`)
 }
 
 function sandboxPathSpellings(path: string): string[] {
@@ -7114,9 +7260,12 @@ export function parseOpencodeSessionIdFromStream(text: string): string | null {
 }
 
 export function parseSessionIdFromRunnerStream(runner: AgentRunnerKind, text: string): string | null {
-	if (runner === "codex") return parseCodexThreadIdFromStream(text)
-	if (runner === "opencode") return parseOpencodeSessionIdFromStream(text)
-	return parseSessionIdFromStream(text)
+	switch (runner) {
+		case "claude": return parseSessionIdFromStream(text)
+		case "codex": return parseCodexThreadIdFromStream(text)
+		case "opencode": return parseOpencodeSessionIdFromStream(text)
+		case "hapi": return null
+	}
 }
 
 export function extractErrorCode(stdoutText: string, stderrText: string): string {
@@ -7409,7 +7558,9 @@ function fail(message: string): never {
 }
 
 if (import.meta.main) {
-	main().catch((error: BoundaryError) => {
+	runCoderLoopCli(process.argv.slice(2)).then((exitCode) => {
+		if (typeof process.exitCode !== "number" || process.exitCode === 0) process.exitCode = exitCode
+	}).catch((error: BoundaryError) => {
 		const message = errorMessage(error)
 		console.error(message)
 		process.exit(1)

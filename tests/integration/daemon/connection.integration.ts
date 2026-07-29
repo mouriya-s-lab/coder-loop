@@ -89,11 +89,11 @@ describe("daemon", () => {
 			beforeStart: async ({ fakeRunner }) => {
 				await writeFile(fakeRunner, `#!/usr/bin/env bun
 const prompt = Bun.argv.at(-1) ?? ""
-if (prompt.includes("FINALIZER SUMMARY")) {
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (input.phase === "umbrella-finalizer") {
 	const event = { type: "item.completed", item: { type: "agent_message", text: "x".repeat(1_000_001) + "\\nFINALIZER SUMMARY: decision=complete; reason=large-event" } }
 	await Bun.write(Bun.stdout, JSON.stringify(event) + "\\n")
 } else {
-	const input = JSON.parse(prompt)
 	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 }
 process.exitCode = 0

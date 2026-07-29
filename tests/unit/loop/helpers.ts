@@ -201,6 +201,7 @@ export function makeOptions(preset = makePreset()): LoopOptions {
 	const claudeRunner = { kind: "claude" as const, binary: "claude", extraArgs: [], model: null }
 	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [], model: null }
 	const opencodeRunner = { kind: "opencode" as const, binary: "opencode", extraArgs: [], model: null }
+	const hapiRunner = { kind: "hapi" as const, binary: "hapi-remote-session", extraArgs: [], model: null }
 	return {
 		targetCwd: REPO_ROOT,
 		sharedContextPath: resolve(TEST_ROOT, "shared.md"),
@@ -217,7 +218,7 @@ export function makeOptions(preset = makePreset()): LoopOptions {
 		worktree: false,
 		hostRunner: "codex",
 		defaultRunner: { ...codexRunner, source: "engine-builtin" },
-		runnerCommands: { claude: claudeRunner, codex: codexRunner, opencode: opencodeRunner },
+		runnerCommands: { claude: claudeRunner, codex: codexRunner, opencode: opencodeRunner, hapi: hapiRunner },
 		dryRun: false,
 		preset,
 	}

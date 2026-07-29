@@ -86,7 +86,7 @@ coder-loop status /path/to/target --json
 
 `chain create` 只写一次 chain 元数据到中央 daemon socket；target 目录不需要任何 bootstrap 文件。`--preset` 可选：不写时 chain 会 seed 默认 `gh-issue-pr-iteration`（`item add` 仍需自带 `--preset` 或 `--preset-path`——preset 声明在 item 级）。preset 业务资产（如 GitHub labels）不由本 CLI 管理——由 issue writer / operator 自己按需创建。用自定义 `--loop-data-root` 时，`daemon up` 与后续所有命令要传同一个 root。
 
-每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"|"opencode"` 声明；未声明时走 engine-builtin fallback。phase 还可用 `[[phases]].model` 声明默认模型。Runner binary 就是 PATH 上的 `claude` / `codex` / `opencode`；没有 target 级 override 通道。单个 queue item 的 `runner` 字段只覆盖非 trigger phase。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
+每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"|"opencode"|"hapi"` 声明；未声明时走 engine-builtin fallback。phase 还可用 `[[phases]].model` 声明默认模型。各 kind 的默认 binary 是 PATH 上的 `claude` / `codex` / `opencode` / `hapi-remote-session`；没有 target 级 override 通道。单个 queue item 的 `runner` 字段只覆盖非 trigger phase。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
 
 后台循环由 daemon API 管理：
 

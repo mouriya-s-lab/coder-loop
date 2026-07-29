@@ -15,15 +15,21 @@ const target = resolve(workRoot, "target")
 const preset = resolve(workRoot, "preset")
 const retainedEvidenceRoot = resolve(repoRoot, ".coder-loop", "evidence", "runner-filesystem-grants-integration", basename(workRoot))
 const { CODER_LOOP_RUN_CRED: _parentRunCredential, ...operatorEnv } = process.env
+const PROMPT_SESSION_RUNNER_KINDS = ["claude", "codex", "opencode"] as const
+type PromptSessionRunnerKind = typeof PROMPT_SESSION_RUNNER_KINDS[number]
+function isPromptSessionRunnerKind(value: string | undefined): value is PromptSessionRunnerKind {
+	return PROMPT_SESSION_RUNNER_KINDS.some((kind) => kind === value)
+}
 const runnerFlagIndex = Bun.argv.indexOf("--runner")
-const requestedRunner = runnerFlagIndex === -1 ? null : Bun.argv[runnerFlagIndex + 1]
-if (requestedRunner !== null && !["claude", "codex", "opencode"].includes(requestedRunner)) throw new Error(`invalid --runner ${requestedRunner}`)
+const requestedRunnerValue = runnerFlagIndex === -1 ? null : Bun.argv[runnerFlagIndex + 1]
+if (requestedRunnerValue !== null && !isPromptSessionRunnerKind(requestedRunnerValue)) throw new Error(`invalid --runner ${requestedRunnerValue}`)
+const requestedRunner: PromptSessionRunnerKind | null = requestedRunnerValue
 const SOCKET_WAIT_TIMEOUT_MS = 30_000
 const RUNNER_WAIT_TIMEOUT_MS = 300_000
 const DIAGNOSTIC_TAIL_CHARACTERS = 16_000
 
 type RunnerEvidenceResult = {
-	runner: string
+	runner: PromptSessionRunnerKind
 	runIds: string[]
 	nativeArgv: string
 	outerProfiles: string[]
@@ -74,7 +80,7 @@ function sqliteStateSnapshot(): SqliteStateSnapshot {
 	}
 }
 
-function writeDeterministicRunnerShim(wrapper: string, runner: string, capturePath: string): void {
+function writeDeterministicRunnerShim(wrapper: string, runner: PromptSessionRunnerKind, capturePath: string): void {
 	writeFileSync(wrapper, `#!/usr/bin/env bun
 import { appendFile, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
@@ -150,8 +156,7 @@ function runDirectories(chain: string): string[] {
 		.sort((left, right) => left.localeCompare(right))
 }
 
-function runSessionId(runner: string, chain: string, runId: string): string {
-	if (!(["claude", "codex", "opencode"] as const).some((kind) => kind === runner)) throw new Error(`${runner}: unknown runner kind`)
+function runSessionId(runner: PromptSessionRunnerKind, chain: string, runId: string): string {
 	const streamPath = resolve(loopDataRoot, "chains", chain, "runs", runId, "phase", "stdout.jsonl")
 	const sessionId = parseSessionIdFromRunnerStream(runner, readFileSync(streamPath, "utf8"))
 	if (sessionId === null) throw new Error(`${chain}/${runId}: missing retained runner session id`)
@@ -326,7 +331,7 @@ async function waitForRunner(chain: string, timeoutMs = RUNNER_WAIT_TIMEOUT_MS):
 writeFixture()
 mkdirSync(loopDataRoot, { recursive: true })
 writeFileSync(resolve(loopDataRoot, "central.sqlite"), "root-secret\n")
-const runners = ["claude", "codex", "opencode"].filter((candidate) => requestedRunner === null || candidate === requestedRunner)
+const runners = PROMPT_SESSION_RUNNER_KINDS.filter((candidate) => requestedRunner === null || candidate === requestedRunner)
 const captureBin = resolve(workRoot, "capture-bin")
 mkdirSync(captureBin, { recursive: true })
 for (const runner of runners) {

@@ -1,7 +1,7 @@
 import { type as arkType } from "arktype"
 
 import type { BoundaryValue } from "./boundary-types"
-import type { JsonObject, JsonValue } from "./loop"
+import type { AgentRunnerKind, JsonObject, JsonValue } from "./loop"
 
 declare const internalStatusBrand: unique symbol
 declare const admittedItemStatusBrand: unique symbol
@@ -36,6 +36,7 @@ export type EngineLifecycleAdmissionReason =
 	| "scheduler.exhausted-on-max-attempts"
 	| "scheduler.spawn-aborted-entry-restore"
 	| "scheduler.run-status-forwarded"
+	| "scheduler.external-terminal-loss-entry-restore"
 	| "scheduler.dependency-unblock-restore"
 	| "scheduler.recovery-entry-restore"
 	| "queue.unblock-entry-restore"
@@ -117,6 +118,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 	codex?: RunnerMetadata
 	// #481: opencode joins the typed slot list with the same shape as claude/codex.
 	opencode?: RunnerMetadata
+	hapi?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 
@@ -133,6 +135,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 		if (input.claude !== undefined) this.claude = input.claude
 		if (input.codex !== undefined) this.codex = input.codex
 		if (input.opencode !== undefined) this.opencode = input.opencode
+		if (input.hapi !== undefined) this.hapi = input.hapi
 		if (input.maxItemAttempts !== undefined) this.maxItemAttempts = input.maxItemAttempts
 		if (input.coderLoopChainCompleteTrigger !== undefined) this.coderLoopChainCompleteTrigger = input.coderLoopChainCompleteTrigger
 	}
@@ -153,6 +156,34 @@ export type SchedulerSpawnError = {
 	message: string
 }
 
+export type ExternalTerminalHoldAvailability =
+	| { kind: "unavailable"; reason: "binary-missing" | "endpoint-unavailable"; exitCode: number | null; signal: string | null; checkedAt: string; since: string }
+	| { kind: "probe-failed"; reason: "unexpected-exit" | "signal" | "deadline-exceeded"; exitCode: number | null; signal: string | null; checkedAt: string; since: string }
+
+export type ExternalTerminalHoldFact = {
+	kind: "external-terminal-unavailable"
+	runner: AgentRunnerKind
+	phase: string
+	binary: string
+	probeArgv: readonly ["probe"]
+	availability: ExternalTerminalHoldAvailability
+}
+
+export type ExternalTerminalLossFact = {
+	kind: "lost"
+	detectedAt: string
+	reason: "binary-missing" | "endpoint-unavailable" | "unexpected-exit" | "signal" | "deadline-exceeded"
+	terminationPhase: "term" | "kill" | "closed"
+}
+
+export type ExternalTerminalCurrentFact = {
+	runner: AgentRunnerKind
+	binary: string
+	availability: { kind: "available"; checkedAt: string }
+}
+
+export type SchedulerRunOriginKind = "item" | "chain-complete"
+
 // #457: `blockerRepo` / `blockerRef` are no longer engine-typed ItemExtra fields. Presets that store
 // blocker info on an item write the keys as preset-owned strings inside the same JSON blob; they round
 // trip through `runtimeRemainder` exactly like any other preset-owned extra key.
@@ -160,6 +191,10 @@ export class ItemExtra extends RuntimeDataRecord {
 	dependsOn?: number[]
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
+	externalTerminalHold?: ExternalTerminalHoldFact
+	externalTerminalLoss?: ExternalTerminalLossFact
+	externalTerminalCurrent?: ExternalTerminalCurrentFact
+	schedulerRunOrigin?: SchedulerRunOriginKind
 	slotKey?: string
 	hooks?: HookDeclaration[]
 	itemId?: number
@@ -168,6 +203,7 @@ export class ItemExtra extends RuntimeDataRecord {
 	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
+	startAttempts?: number
 	pid?: number
 	processGroupLeader?: boolean
 
@@ -182,6 +218,10 @@ export class ItemExtra extends RuntimeDataRecord {
 				attribution: { ...input.schedulerSpawnError.attribution },
 			}
 		}
+		if (input.externalTerminalHold !== undefined) this.externalTerminalHold = copyExternalTerminalHold(input.externalTerminalHold)
+		if (input.externalTerminalLoss !== undefined) this.externalTerminalLoss = { ...input.externalTerminalLoss }
+		if (input.externalTerminalCurrent !== undefined) this.externalTerminalCurrent = { ...input.externalTerminalCurrent, availability: { ...input.externalTerminalCurrent.availability } }
+		if (input.schedulerRunOrigin !== undefined) this.schedulerRunOrigin = input.schedulerRunOrigin
 		if (input.slotKey !== undefined) this.slotKey = input.slotKey
 		if (input.itemId !== undefined) this.itemId = input.itemId
 		if (input.repoCwd !== undefined) this.repoCwd = input.repoCwd
@@ -189,6 +229,7 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.startStatus !== undefined) this.startStatus = input.startStatus
 		if (input.startStatusUpdatedAt !== undefined) this.startStatusUpdatedAt = input.startStatusUpdatedAt
 		if (input.startPhase !== undefined) this.startPhase = input.startPhase
+		if (input.startAttempts !== undefined) this.startAttempts = input.startAttempts
 		if (input.pid !== undefined) this.pid = input.pid
 		if (input.processGroupLeader !== undefined) this.processGroupLeader = input.processGroupLeader
 	}
@@ -220,6 +261,7 @@ type ChainMetadataInput = {
 	claude?: RunnerMetadata
 	codex?: RunnerMetadata
 	opencode?: RunnerMetadata
+	hapi?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 }
@@ -233,6 +275,10 @@ type ItemExtraInput = {
 	dependsOn?: number[]
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
+	externalTerminalHold?: ExternalTerminalHoldFact
+	externalTerminalLoss?: ExternalTerminalLossFact
+	externalTerminalCurrent?: ExternalTerminalCurrentFact
+	schedulerRunOrigin?: SchedulerRunOriginKind
 	slotKey?: string
 	itemId?: number
 	repoCwd?: string
@@ -240,6 +286,7 @@ type ItemExtraInput = {
 	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
+	startAttempts?: number
 	pid?: number
 	processGroupLeader?: boolean
 }
@@ -251,6 +298,8 @@ type ArkAssertable<T> = {
 const OptionalStringBoundary = arkType("string|undefined")
 const OptionalBooleanBoundary = arkType("boolean|undefined")
 const OptionalPositiveIntegerBoundary = arkType("number.integer > 0 | undefined")
+const OptionalNonNegativeIntegerBoundary = arkType("number.integer >= 0 | undefined")
+const OptionalSchedulerRunOriginBoundary = arkType("'item'|'chain-complete'|undefined")
 const RequiredPositiveIntegerBoundary = arkType("number.integer > 0")
 const OptionalStringArrayBoundary = arkType("string[]|undefined")
 const OptionalPositiveIntegerArrayBoundary = arkType("(number.integer > 0)[]|undefined")
@@ -272,6 +321,7 @@ const CHAIN_METADATA_KEYS = new Set([
 	"claude",
 	"codex",
 	"opencode",
+	"hapi",
 	"maxItemAttempts",
 	"coderLoopChainCompleteTrigger",
 ])
@@ -287,6 +337,10 @@ const ITEM_EXTRA_KEYS = new Set([
 	"dependsOn",
 	"schedulerBackoff",
 	"schedulerSpawnError",
+	"externalTerminalHold",
+	"externalTerminalLoss",
+	"externalTerminalCurrent",
+	"schedulerRunOrigin",
 	"slotKey",
 	"itemId",
 	"repoCwd",
@@ -294,6 +348,7 @@ const ITEM_EXTRA_KEYS = new Set([
 	"startStatus",
 	"startStatusUpdatedAt",
 	"startPhase",
+	"startAttempts",
 	"pid",
 	"processGroupLeader",
 ])
@@ -359,6 +414,7 @@ export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	assignJson(result, "claude", metadata.claude === undefined ? undefined : runnerMetadataToJsonObject(metadata.claude))
 	assignJson(result, "codex", metadata.codex === undefined ? undefined : runnerMetadataToJsonObject(metadata.codex))
 	assignJson(result, "opencode", metadata.opencode === undefined ? undefined : runnerMetadataToJsonObject(metadata.opencode))
+	assignJson(result, "hapi", metadata.hapi === undefined ? undefined : runnerMetadataToJsonObject(metadata.hapi))
 	assignJson(result, "maxItemAttempts", metadata.maxItemAttempts)
 	assignJson(
 		result,
@@ -392,14 +448,14 @@ export function metadataBoolean(metadata: ChainMetadata, key: keyof ChainMetadat
 	return typeof value === "boolean" ? value : null
 }
 
-export function metadataNestedString(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode", key: keyof RunnerMetadata & string): string | null {
+export function metadataNestedString(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode" | "hapi", key: keyof RunnerMetadata & string): string | null {
 	const object = metadata[objectKey]
 	if (object === undefined) return null
 	const value = object[key]
 	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
-export function metadataNestedStringArray(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode", key: keyof RunnerMetadata & string): string[] | null {
+export function metadataNestedStringArray(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode" | "hapi", key: keyof RunnerMetadata & string): string[] | null {
 	const object = metadata[objectKey]
 	if (object === undefined) return null
 	const value = object[key]
@@ -423,6 +479,10 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 		...extra.schedulerSpawnError,
 		attribution: { ...extra.schedulerSpawnError.attribution },
 	})
+	assignJson(result, "externalTerminalHold", extra.externalTerminalHold === undefined ? undefined : externalTerminalHoldToJsonObject(extra.externalTerminalHold))
+	assignJson(result, "externalTerminalLoss", extra.externalTerminalLoss === undefined ? undefined : { ...extra.externalTerminalLoss })
+	assignJson(result, "externalTerminalCurrent", extra.externalTerminalCurrent === undefined ? undefined : { ...extra.externalTerminalCurrent, availability: { ...extra.externalTerminalCurrent.availability } })
+	assignJson(result, "schedulerRunOrigin", extra.schedulerRunOrigin)
 	assignJson(result, "slotKey", extra.slotKey)
 	assignJson(result, "itemId", extra.itemId)
 	assignJson(result, "repoCwd", extra.repoCwd)
@@ -430,6 +490,7 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "startStatus", extra.startStatus)
 	assignJson(result, "startStatusUpdatedAt", extra.startStatusUpdatedAt)
 	assignJson(result, "startPhase", extra.startPhase)
+	assignJson(result, "startAttempts", extra.startAttempts)
 	assignJson(result, "pid", extra.pid)
 	assignJson(result, "processGroupLeader", extra.processGroupLeader)
 	return result
@@ -484,6 +545,33 @@ export function clearSchedulerSpawnError(extra: ItemExtra): ItemExtra {
 	const next = itemExtraToJsonObject(extra)
 	delete next.schedulerSpawnError
 	return storedItemExtra(next)
+}
+
+export function externalTerminalHold(extra: ItemExtra): ExternalTerminalHoldFact | null {
+	return extra.externalTerminalHold === undefined ? null : copyExternalTerminalHold(extra.externalTerminalHold)
+}
+
+export function withExternalTerminalHold(extra: ItemExtra, fact: ExternalTerminalHoldFact): ItemExtra {
+	return storedItemExtra({ ...itemExtraToJsonObject(extra), externalTerminalHold: externalTerminalHoldToJsonObject(fact) })
+}
+
+export function clearExternalTerminalHold(extra: ItemExtra): ItemExtra {
+	if (extra.externalTerminalHold === undefined) return extra
+	const next = itemExtraToJsonObject(extra)
+	delete next.externalTerminalHold
+	return storedItemExtra(next)
+}
+
+export function externalTerminalLoss(extra: ItemExtra): ExternalTerminalLossFact | null {
+	return extra.externalTerminalLoss === undefined ? null : { ...extra.externalTerminalLoss }
+}
+
+export function externalTerminalCurrent(extra: ItemExtra): ExternalTerminalCurrentFact | null {
+	return extra.externalTerminalCurrent === undefined ? null : { ...extra.externalTerminalCurrent, availability: { ...extra.externalTerminalCurrent.availability } }
+}
+
+export function withExternalTerminalLoss(extra: ItemExtra, fact: ExternalTerminalLossFact): ItemExtra {
+	return storedItemExtra({ ...itemExtraToJsonObject(extra), externalTerminalLoss: { ...fact } })
 }
 
 export function chainCompleteTriggerState(metadata: ChainMetadata): ChainCompleteTriggerState | null {
@@ -547,6 +635,8 @@ function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 	if (codex !== undefined) input.codex = codex
 	const opencode = optionalRunnerMetadataField(value, "opencode", `${field}.opencode`)
 	if (opencode !== undefined) input.opencode = opencode
+	const hapi = optionalRunnerMetadataField(value, "hapi", `${field}.hapi`)
+	if (hapi !== undefined) input.hapi = hapi
 	const maxItemAttempts = optionalPositiveIntegerField(value, "maxItemAttempts", `${field}.maxItemAttempts`)
 	if (maxItemAttempts !== undefined) input.maxItemAttempts = maxItemAttempts
 	const trigger = optionalChainCompleteTriggerStateField(value, "coderLoopChainCompleteTrigger", `${field}.coderLoopChainCompleteTrigger`)
@@ -563,6 +653,14 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (schedulerBackoff !== undefined) input.schedulerBackoff = schedulerBackoff
 	const schedulerSpawnError = optionalSchedulerSpawnErrorField(value, "schedulerSpawnError", `${field}.schedulerSpawnError`)
 	if (schedulerSpawnError !== undefined) input.schedulerSpawnError = schedulerSpawnError
+	const externalTerminalHold = optionalExternalTerminalHoldField(value, "externalTerminalHold", `${field}.externalTerminalHold`)
+	if (externalTerminalHold !== undefined) input.externalTerminalHold = externalTerminalHold
+	const externalTerminalLoss = optionalExternalTerminalLossField(value, "externalTerminalLoss", `${field}.externalTerminalLoss`)
+	if (externalTerminalLoss !== undefined) input.externalTerminalLoss = externalTerminalLoss
+	const externalTerminalCurrent = optionalExternalTerminalCurrentField(value, "externalTerminalCurrent", `${field}.externalTerminalCurrent`)
+	if (externalTerminalCurrent !== undefined) input.externalTerminalCurrent = externalTerminalCurrent
+	const schedulerRunOrigin = arkField(OptionalSchedulerRunOriginBoundary, value.schedulerRunOrigin, `${field}.schedulerRunOrigin`, `${field}.schedulerRunOrigin must be item or chain-complete when provided`)
+	if (schedulerRunOrigin !== undefined) input.schedulerRunOrigin = schedulerRunOrigin
 	const slotKey = optionalStringField(value, "slotKey", `${field}.slotKey`)
 	if (slotKey !== undefined) input.slotKey = slotKey
 	const itemId = optionalPositiveIntegerField(value, "itemId", `${field}.itemId`)
@@ -577,6 +675,8 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (startStatusUpdatedAt !== undefined) input.startStatusUpdatedAt = startStatusUpdatedAt
 	const startPhase = optionalStringField(value, "startPhase", `${field}.startPhase`)
 	if (startPhase !== undefined) input.startPhase = startPhase
+	const startAttempts = optionalNonNegativeIntegerField(value, "startAttempts", `${field}.startAttempts`)
+	if (startAttempts !== undefined) input.startAttempts = startAttempts
 	const pid = optionalPositiveIntegerField(value, "pid", `${field}.pid`)
 	if (pid !== undefined) input.pid = pid
 	const processGroupLeader = optionalBooleanField(value, "processGroupLeader", `${field}.processGroupLeader`)
@@ -647,6 +747,91 @@ function optionalSchedulerSpawnErrorField(record: JsonObject, key: string, field
 	}
 }
 
+function optionalExternalTerminalHoldField(record: JsonObject, key: string, field: string): ExternalTerminalHoldFact | undefined {
+	const value = record[key]
+	if (value === undefined) return undefined
+	const object = jsonObjectFieldValue(value, field)
+	const kind = requiredStringField(object, "kind", `${field}.kind`)
+	if (kind !== "external-terminal-unavailable") throw runtimeDataError(`${field}.kind`, kind, `${field}.kind must be external-terminal-unavailable`)
+	const runner = agentRunnerKindField(object, "runner", `${field}.runner`)
+	const phase = requiredStringField(object, "phase", `${field}.phase`)
+	const binary = requiredStringField(object, "binary", `${field}.binary`)
+	const probeArgvValue = object.probeArgv
+	if (!Array.isArray(probeArgvValue) || probeArgvValue.length !== 1 || probeArgvValue[0] !== "probe") {
+		throw runtimeDataError(`${field}.probeArgv`, probeArgvValue, `${field}.probeArgv must be ["probe"]`)
+	}
+	return { kind, runner, phase, binary, probeArgv: ["probe"], availability: externalTerminalHoldAvailability(object.availability, `${field}.availability`) }
+}
+
+function optionalExternalTerminalLossField(record: JsonObject, key: string, field: string): ExternalTerminalLossFact | undefined {
+	const value = record[key]
+	if (value === undefined) return undefined
+	const object = jsonObjectFieldValue(value, field)
+	const kind = requiredStringField(object, "kind", `${field}.kind`)
+	const detectedAt = requiredStringField(object, "detectedAt", `${field}.detectedAt`)
+	const reason = requiredStringField(object, "reason", `${field}.reason`)
+	const terminationPhase = requiredStringField(object, "terminationPhase", `${field}.terminationPhase`)
+	if (kind !== "lost") throw runtimeDataError(`${field}.kind`, kind, `${field}.kind must be lost`)
+	if (reason !== "binary-missing" && reason !== "endpoint-unavailable" && reason !== "unexpected-exit" && reason !== "signal" && reason !== "deadline-exceeded") {
+		throw runtimeDataError(`${field}.reason`, reason, `${field}.reason is invalid`)
+	}
+	if (terminationPhase !== "term" && terminationPhase !== "kill" && terminationPhase !== "closed") {
+		throw runtimeDataError(`${field}.terminationPhase`, terminationPhase, `${field}.terminationPhase is invalid`)
+	}
+	return { kind, detectedAt, reason, terminationPhase }
+}
+
+function optionalExternalTerminalCurrentField(record: JsonObject, key: string, field: string): ExternalTerminalCurrentFact | undefined {
+	const value = record[key]
+	if (value === undefined) return undefined
+	const object = jsonObjectFieldValue(value, field)
+	const runner = agentRunnerKindField(object, "runner", `${field}.runner`)
+	const binary = requiredStringField(object, "binary", `${field}.binary`)
+	const availability = jsonObjectFieldValue(object.availability, `${field}.availability`)
+	const kind = requiredStringField(availability, "kind", `${field}.availability.kind`)
+	if (kind !== "available") throw runtimeDataError(`${field}.availability.kind`, kind, `${field}.availability.kind must be available`)
+	return {
+		runner,
+		binary,
+		availability: { kind, checkedAt: requiredStringField(availability, "checkedAt", `${field}.availability.checkedAt`) },
+	}
+}
+
+function externalTerminalHoldAvailability(value: JsonValue | undefined, field: string): ExternalTerminalHoldAvailability {
+	const object = jsonObjectFieldValue(value, field)
+	const kind = requiredStringField(object, "kind", `${field}.kind`)
+	const reason = requiredStringField(object, "reason", `${field}.reason`)
+	const exitCode = nullableNumberField(object, "exitCode", `${field}.exitCode`)
+	const signal = nullableStringField(object, "signal", `${field}.signal`)
+	const checkedAt = requiredStringField(object, "checkedAt", `${field}.checkedAt`)
+	const since = requiredStringField(object, "since", `${field}.since`)
+	if (kind === "unavailable" && (reason === "binary-missing" || reason === "endpoint-unavailable")) {
+		return { kind, reason, exitCode, signal, checkedAt, since }
+	}
+	if (kind === "probe-failed" && (reason === "unexpected-exit" || reason === "signal" || reason === "deadline-exceeded")) {
+		return { kind, reason, exitCode, signal, checkedAt, since }
+	}
+	throw runtimeDataError(field, value, `${field} must be a typed unavailable or probe-failed availability`)
+}
+
+function agentRunnerKindField(record: JsonObject, key: string, field: string): AgentRunnerKind {
+	const value = requiredStringField(record, key, field)
+	if (value === "claude" || value === "codex" || value === "opencode" || value === "hapi") return value
+	throw runtimeDataError(field, value, `${field} must be claude, codex, opencode, or hapi`)
+}
+
+function nullableNumberField(record: JsonObject, key: string, field: string): number | null {
+	const value = record[key]
+	if (value === null || typeof value === "number") return value
+	throw runtimeDataError(field, value, `${field} must be a number or null`)
+}
+
+function nullableStringField(record: JsonObject, key: string, field: string): string | null {
+	const value = record[key]
+	if (value === null || typeof value === "string") return value
+	throw runtimeDataError(field, value, `${field} must be a string or null`)
+}
+
 function schedulerSpawnErrorAttribution(value: JsonValue | undefined, field: string): SchedulerSpawnErrorAttribution {
 	const object = jsonObjectFieldValue(value, field)
 	const kind = requiredStringField(object, "kind", `${field}.kind`)
@@ -688,6 +873,10 @@ function optionalBooleanField(record: JsonObject, key: string, field: string): b
 
 function optionalPositiveIntegerField(record: JsonObject, key: string, field: string): number | undefined {
 	return arkField(OptionalPositiveIntegerBoundary, record[key], field, `${field} must be a positive integer when provided`)
+}
+
+function optionalNonNegativeIntegerField(record: JsonObject, key: string, field: string): number | undefined {
+	return arkField(OptionalNonNegativeIntegerBoundary, record[key], field, `${field} must be a non-negative integer when provided`)
 }
 
 function requiredPositiveIntegerField(record: JsonObject, key: string, field: string): number {
@@ -741,6 +930,21 @@ function chainCompleteTriggerStateToJsonObject(state: ChainCompleteTriggerState)
 	assignJson(result, "reason", state.reason)
 	assignJson(result, "runId", state.runId)
 	return result
+}
+
+function externalTerminalHoldToJsonObject(fact: ExternalTerminalHoldFact): JsonObject {
+	return {
+		kind: fact.kind,
+		runner: fact.runner,
+		phase: fact.phase,
+		binary: fact.binary,
+		probeArgv: [...fact.probeArgv],
+		availability: { ...fact.availability },
+	}
+}
+
+function copyExternalTerminalHold(fact: ExternalTerminalHoldFact): ExternalTerminalHoldFact {
+	return { ...fact, probeArgv: ["probe"], availability: { ...fact.availability } }
 }
 
 function assignJson(target: JsonObject, key: string, value: JsonValue | undefined): void {

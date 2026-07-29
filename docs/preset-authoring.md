@@ -17,7 +17,7 @@
 | **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
 | **加载 target runtime** | 从 centralized SQLite loop-data store 解析 active chain / queue / current；每个 item 自带 preset（`item.add --preset <name>` 或 `--preset-path <abs>`），chain-level `preset` 只是 legacy default seed。target 目录不需要任何 config / workflow 文件——项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
-| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` / `codex` / `opencode`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
+| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`。`claude` / `codex` / `opencode` 接收渲染后的 prompt 并走完整 stdout/stderr 与 `status.json` 接线；`hapi` 当前只具备通用 runner 词表、availability probe 与 generic spawn seam，真实 prompt / worktree / status / session 接线归 #603。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
 | **daemon / chain 控制** | 新版运行期由 centralized daemon socket + chain/item state 控制；target start/stop/restart 通过 daemon API 解析 chain，而不是依赖 target-local sentinel 文件。 |
 | **runtime 状态快照** | `coder-loop status <target> --json` 不 spawn agent，读取 preset、target 文件、central chain layout、queue、current、runner 与 process snapshot，供 operator / supervisor 做结构化判断。 |
@@ -130,7 +130,7 @@ rm -rf "$TARGET"
 | `[statuses].retry` | string | 否 | continuable status，表示"上一轮被打回需重跑"。声明后 `retryStatusDoc` doc builder 把它注入到 md 中需要引用 retry 概念的位置，preset prose 不再硬编码 status 字面量 |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
-| `[[phases]].runner` | `"claude"|"codex"|"opencode"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
+| `[[phases]].runner` | `"claude"|"codex"|"opencode"|"hapi"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
 | `[[phases]].model` | string | 否 | phase 默认 model。只在解析出的 runner kind 与本 phase 声明的 runner 一致时生效（item override 切换 runner 后不继承） |
 | `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
@@ -139,7 +139,7 @@ rm -rf "$TARGET"
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/steps/implement`），entry prompt 通过该 id 引用 |
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`）。该字段参与 `[[phases]].roles` 切片：当前 phase 渲染的 fragment 索引仅含 role 出现在该 phase `roles` 数组里的条目。fragment 文件完整性校验（`assertReadable`）仍覆盖全量。 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
-| `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期无条件对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL`（事件流写 `attempt.timeout`）。与 attempt timeout 并行运行的机制：startup idle watchdog（#462，前 10 分钟 stdout < 200B 判挂死 → SIGKILL + `run.startup_idle_kill`）与 recycle zone（#452，agent 写完 admissible status 后给 500 秒自然退出，超时直接 SIGKILL + `recycle.timeout_kill`）——这两者不读 stdout marker，触发条件在引擎侧。`[agent]` 目前只支持 `attemptTimeoutSeconds`；`binary` / `extraArgs` 在 preset.toml 中出现会在加载期报错——runner binary 由 phase runner kind 决定（PATH 上的 `claude` / `codex` / `opencode`）。 |
+| `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期无条件对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL`（事件流写 `attempt.timeout`）。与 attempt timeout 并行运行的机制：startup idle watchdog（#462，前 10 分钟 stdout < 200B 判挂死 → SIGKILL + `run.startup_idle_kill`）与 recycle zone（#452，agent 写完 admissible status 后给 500 秒自然退出，超时直接 SIGKILL + `recycle.timeout_kill`）——这两者不读 stdout marker，触发条件在引擎侧。`[agent]` 目前只支持 `attemptTimeoutSeconds`；`binary` / `extraArgs` 在 preset.toml 中出现会在加载期报错——runner binary 由 phase runner kind 决定（PATH 上的 `claude` / `codex` / `opencode` / `hapi-remote-session`）。 |
 
 引擎在加载时强制：
 
@@ -351,9 +351,9 @@ runner = "claude"
 model  = "claude-opus-4-7"
 ```
 
-`runner` ∈ `{"claude", "codex", "opencode"}`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=preset`。`model` 是该 phase 的默认模型，可省略（缺省即让 runner CLI 用自身默认）。Runner binary 直接是 PATH 上的 `claude` / `codex` / `opencode`，没有 target 级覆盖通道；chain 级覆盖走 `coder-loop chain set-runner-model <chain> --kind <k> --model <m>`。
+`runner` ∈ `{"claude", "codex", "opencode", "hapi"}`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=preset`。`model` 是该 phase 的默认模型，可省略（缺省即让 runner CLI 用自身默认）。Runner binary 直接是 PATH 上的 `claude` / `codex` / `opencode` / `hapi-remote-session`，没有 target 级覆盖通道；chain 级覆盖走 `coder-loop chain set-runner-model <chain> --kind <k> --model <m>`。
 
-Queue item 可加 `"runner": "claude"|"codex"|"opencode"` 覆盖所有非 trigger phase；trigger phase（声明了 `trigger = { afterPhase, whenStatus }` 或 `trigger = { on = "chain-complete" }` 的 phase）使用自己的 phase runner 声明，不受 item override 影响。Item override 把 runner 切到与 phase 声明不同的 kind 时，不继承该 phase 的 `model` 声明（phase model 绑定在它声明的 runner kind 上）。Preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README 或 target 自有的 `CLAUDE.md` / `AGENTS.md`，并用 `doctor` / `status` 验证 preset runner 是否符合预期。
+Queue item 可加 `"runner": "claude"|"codex"|"opencode"|"hapi"` 覆盖所有非 trigger phase；trigger phase（声明了 `trigger = { afterPhase, whenStatus }` 或 `trigger = { on = "chain-complete" }` 的 phase）使用自己的 phase runner 声明，不受 item override 影响。Item override 把 runner 切到与 phase 声明不同的 kind 时，不继承该 phase 的 `model` 声明（phase model 绑定在它声明的 runner kind 上）。Preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README 或 target 自有的 `CLAUDE.md` / `AGENTS.md`，并用 `doctor` / `status` 验证 preset runner 是否符合预期。
 
 ---
 

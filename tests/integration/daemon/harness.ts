@@ -477,6 +477,7 @@ type FixtureOptions = {
 	useDefaultChainCompleteTrigger?: boolean
 	schedulerRunnerKind?: AgentRunnerKind
 	schedulerBinaryIsFakeRunner?: boolean
+	schedulerUsePresetRunner?: boolean
 	schedulerConfig?: Partial<CoderLoopDaemonSchedulerConfig>
 	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string; defaultItemPresetPath: string | null }) => Promise<void> | void
 }
@@ -521,8 +522,8 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			...(options.schedulerConfig ?? {}),
 			enabled: schedulerEnabled,
 			intervalMs: options.schedulerIntervalMs ?? 20,
-			runner: scheduler,
-			...(options.schedulerPresetDir === null ? {} : { presetDir: defaultItemPresetPath ?? PRESET_DIR }),
+			...(options.schedulerUsePresetRunner ? {} : { runner: scheduler }),
+			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? defaultItemPresetPath ?? PRESET_DIR }),
 			worktreeManager,
 			prompt: ({ chain, item, runId, phase }) => {
 				const extra = itemExtraToJsonObject(item.extra)
@@ -530,6 +531,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
+					phase,
 					eventLog: typeof extra.eventLog === "string"
 						? extra.eventLog
 						: resolve(resolveChainRuntimePaths(chain.name, { loopDataRoot }).runsDir, "events.jsonl"),
@@ -748,7 +750,7 @@ async function readChain(loopDataRoot: string, chainId: number) {
 	}
 }
 
-async function readItem(loopDataRoot: string, chainId: number, issueNumber: number) {
+async function readItem(loopDataRoot: string, chainId: number, issueNumber: string | number) {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		return store.getItemById(chainId, String(issueNumber))
