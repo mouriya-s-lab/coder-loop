@@ -14,7 +14,7 @@
 
 - `bun` 已安装（`bun --version` 能跑）。
 - `gh` CLI 已 auth（`gh auth status` 不报错），有目标 repo 的 issue / PR 写权限。
-- runner CLI 在 PATH：每个 phase 的 runner 由 preset 声明；bundled `gh-issue-pr-iteration` 与 `real-e2e-minimal` 目前都把 phase 声明为 `codex`。目标是覆盖 preset 里出现过的所有 runner kind（`claude` / `codex` / `opencode` / `hapi`）。
+- runner CLI 在 PATH：每个 phase 的 runner 由 preset 声明；bundled `gh-issue-pr-iteration` 与 `real-e2e-minimal` 目前都把 phase 声明为 `codex`。目标是覆盖 preset 里出现过的所有 runner kind（`claude` / `codex` / `opencode`）。
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
 
 第一次安装本 repo：
@@ -56,9 +56,9 @@ coder-loop status /path/to/your-target-repo --json
 
 ### Runner 默认值与覆盖
 
-Runner 与 model 默认值写在 `preset.toml` 的 `[[phases]].runner` 与 `[[phases]].model`，允许值是 `claude` / `codex` / `opencode` / `hapi`。未声明 runner 的 phase 走 engine-builtin fallback；`status --json` 的 `target.runner.phases.<phase>.source` 会显示 `preset` 还是 `engine-builtin`。没有 per-target 的 runtime override 通道——改 phase 默认模型直接改 preset.toml 的 `model` 字段。
+Runner 与 model 默认值写在 `preset.toml` 的 `[[phases]].runner` 与 `[[phases]].model`，允许值是 `claude` / `codex` / `opencode`。未声明 runner 的 phase 走 engine-builtin fallback；`status --json` 的 `target.runner.phases.<phase>.source` 会显示 `preset` 还是 `engine-builtin`。没有 per-target 的 runtime override 通道——改 phase 默认模型直接改 preset.toml 的 `model` 字段。
 
-`coder-loop chain set-runner-model <chain> --kind <k> --model <m>` 提供 chain 级 model 覆盖：patch `chain.metadata.<kind>.model`，只对 kind 匹配的 phase 生效。单个 queue item 可加 `"runner": "claude"|"codex"|"opencode"|"hapi"` 覆盖非 trigger phase（bundled 中是 `iteration` 与 `review`）；trigger phase（`blocked-responder` / `umbrella-finalizer`）用自己的 phase runner 声明，不受 item override 影响。`doctor` 按 preset 声明的所有 phase runner 检查 binary 是否在 PATH；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
+`coder-loop chain set-runner-model <chain> --kind <k> --model <m>` 提供 chain 级 model 覆盖：patch `chain.metadata.<kind>.model`，只对 kind 匹配的 phase 生效。单个 queue item 可加 `"runner": "claude"|"codex"|"opencode"` 覆盖非 trigger phase（bundled 中是 `iteration` 与 `review`）；trigger phase（`blocked-responder` / `umbrella-finalizer`）用自己的 phase runner 声明，不受 item override 影响。`doctor` 按 preset 声明的所有 phase runner 检查 binary 是否在 PATH；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
 
 ### 项目命令与运行期文件
 

@@ -1,4 +1,4 @@
-import { DaemonError, DecisionFingerprintState, FAKE_RUNNER_STATUS_WRITE_SNIPPET, PRESET_DIR, REPO_ROOT, StatusArtifactBoundary, StatusSnapshotBoundary, TEST_ROOT, buildCoderLoopStatusSnapshot, daemonDecisionFingerprintState, daemonRequest, describe, emptyObservabilityExcerpt, expect, expectOk, itemExtraToJsonObject, makeObservabilityEvent, mkdir, numberValue, observabilityTaskIdentity, openSqliteStateStore, pathExists, present, queryObservabilityEvents, readFile, readItem, readRun, readdir, record, request, resolve, resolveChainRuntimePaths, resolveLoopDataPaths, rm, runtimeStatus, sendDaemonRequest, staleRecoveryRunExtra, startChainBasedRunnerFixture, startCoderLoopDaemon, startFixture, startPhaseAdvancementFixture, test, waitFor, waitForItemPhaseEnd, waitForItemQueueTerminal, writeCredentialedFakeRunner, writeCredentialedFixturePreset, writeFile, writePromptCaptureRunner } from "./harness"
+import { DaemonError, DecisionFingerprintState, FAKE_RUNNER_STATUS_WRITE_SNIPPET, PRESET_DIR, REPO_ROOT, StatusArtifactBoundary, StatusSnapshotBoundary, TEST_ROOT, buildCoderLoopStatusSnapshot, daemonDecisionFingerprintState, daemonRequest, describe, emptyObservabilityExcerpt, expect, expectOk, itemExtraToJsonObject, makeObservabilityEvent, mkdir, numberValue, observabilityTaskIdentity, openSqliteStateStore, pathExists, present, queryObservabilityEvents, readFile, readItem, readRun, readdir, record, rename, request, resolve, resolveChainRuntimePaths, resolveLoopDataPaths, rm, runtimeStatus, sendDaemonRequest, staleRecoveryRunExtra, startChainBasedRunnerFixture, startCoderLoopDaemon, startFixture, startPhaseAdvancementFixture, symlink, test, waitFor, waitForItemPhaseEnd, waitForItemQueueTerminal, writeCredentialedFakeRunner, writeCredentialedFixturePreset, writeFile, writePromptCaptureRunner } from "./harness"
 import type { SchedulerEvent, SchedulerOptions, SchedulerWorktreeManager } from "./harness"
 let nextFixtureId = 0
 
@@ -1190,16 +1190,16 @@ process.exitCode = 0
 				extra: { sleepMs: 2_000, writeStatus: null },
 			}))
 			await waitFor(
-				// `agent.spawn` is followed immediately by `phase.start` and `slot.busy`. The daemon
-				// persists each event before forwarding it to this fixture, so waiting for the final
-				// immediate event closes those writers before the test replaces the file with a
-				// directory. Otherwise a pending append can recreate the file between rm and mkdir.
-				async () => fixture.schedulerEvents.some((event) => event.type === "slot.busy"),
-				(busy) => busy,
+				async () => fixture.schedulerEvents.some((event) => event.type === "agent.spawn"),
+				(spawned) => spawned,
 			)
 			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
-			await rm(eventsFile, { force: true })
-			await mkdir(eventsFile)
+			const eventsFailureDir = resolve(eventsFile, "..", "events-write-failure")
+			const stagedEventsLink = resolve(eventsFile, "..", "events-write-failure-link")
+			// Stage the failure target before atomically replacing the live file so daemon append cannot race setup.
+			await mkdir(eventsFailureDir)
+			await symlink(eventsFailureDir, stagedEventsLink)
+			await rename(stagedEventsLink, eventsFile)
 			await waitFor(
 				async () => fixture.daemon.snapshot().lifecycleEventPersistenceFailure,
 				(failure) => failure !== null,

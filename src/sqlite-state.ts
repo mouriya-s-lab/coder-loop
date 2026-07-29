@@ -310,7 +310,6 @@ export type SqliteStateStore = {
 	recordRun: (input: RecordRunInput) => RunRecord
 	getRunByRunId: (runId: string) => RunRecord | null
 	listRuns: (chainId: number) => RunRecord[]
-	updateRunExtra: (runId: string, extra: ItemExtra) => RunRecord
 	completeRun: (runId: string, input: CompleteRunInput) => RunRecord
 	setCurrentRun: (input: SetCurrentRunInput) => CurrentRunRecord
 	getCurrentRun: (chainId: number) => CurrentRunRecord | null
@@ -419,7 +418,7 @@ const ClosureRowBoundary = arkType({
 	base_commit: "string>0", source_par_node_id: "string|null",
 	"+": "reject",
 })
-const ClosureSessionRowBoundary = arkType({ runner_kind: "'claude'|'codex'|'opencode'|'hapi'", session_id: "string>0", "+": "reject" })
+const ClosureSessionRowBoundary = arkType({ runner_kind: "'claude'|'codex'|'opencode'", session_id: "string>0", "+": "reject" })
 const ActiveRunRowBoundary = arkType({ closure_id: "string>0", run_id: "string>0", phase: "string>0", started_at: "number", "+": "reject" })
 const TaskTreeRootRowBoundary = arkType({ root_node_id: "string>0", "+": "reject" })
 const SeqNodeRowBoundary = arkType({ next_child_node_id: "string|null", "+": "reject" })
@@ -508,7 +507,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
-	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode', 'hapi') OR runner IS NULL),
+	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
 	phase TEXT,
 	preset TEXT,
 	preset_path TEXT,
@@ -536,7 +535,7 @@ const V13_ITEMS_TABLE_SCHEMA_SQL = `
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
-	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode', 'hapi') OR runner IS NULL),
+	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
 	phase TEXT,
 	preset TEXT,
 	preset_path TEXT,
@@ -685,7 +684,7 @@ CREATE TABLE IF NOT EXISTS task_join_evaluation_bindings (
 );
 CREATE TABLE IF NOT EXISTS closure_sessions (
 	closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
-	runner_kind TEXT NOT NULL CHECK (runner_kind IN ('claude','codex','opencode','hapi')),
+	runner_kind TEXT NOT NULL CHECK (runner_kind IN ('claude','codex','opencode')),
 	session_id TEXT NOT NULL,
 	PRIMARY KEY (closure_id, runner_kind)
 );
@@ -856,12 +855,7 @@ function chainsTableHasNotNullPreset(db: Database): boolean {
 function itemsTableRunnerCheckAllowsOpencode(db: Database): boolean {
 	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'").get()?.sql ?? ""
 	if (sql === "") return false
-	return /runner\s+TEXT\s+CHECK[^)]*['"]opencode['"][^)]*['"]hapi['"]/i.test(sql)
-}
-
-function closureSessionsRunnerCheckAllowsHapi(db: Database): boolean {
-	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'closure_sessions'").get()?.sql ?? ""
-	return /runner_kind\s+TEXT\s+NOT\s+NULL\s+CHECK[^)]*['"]hapi['"]/i.test(sql)
+	return /runner\s+TEXT\s+CHECK[^)]*['"]opencode['"]/i.test(sql)
 }
 
 function itemsTableHasColumn(db: Database, columnName: string): boolean {
@@ -900,7 +894,6 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 	const needsLegacyRuntimeMigration = stateSchemaExists(db) && !v3RuntimeSchemaExists(db)
 	const needsV14ItemSourceRetire = stateSchemaExists(db) && itemsTableHasColumn(db, "session_ids")
 	const needsRunIdentityMigration = stateSchemaExists(db) && (!runsTableHasColumn(db, "closure_id") || !runsTableHasColumn(db, "runtime_node_id"))
-	const needsClosureSessionsHapiMigration = v3RuntimeSchemaExists(db) && !closureSessionsRunnerCheckAllowsHapi(db)
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
@@ -909,7 +902,6 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& !needsItemTableRebuildForOpencodeCheck
-		&& !needsClosureSessionsHapiMigration
 		&& itemsTableHasColumn(db, "phase")
 		&& !itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
@@ -921,14 +913,13 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 		&& runsTableHasColumn(db, "closure_id")
 		&& runsTableHasColumn(db, "runtime_node_id")
 	) return
-	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration || needsClosureSessionsHapiMigration) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
 			if (!runsTableHasColumn(db, "closure_id")) db.exec("ALTER TABLE runs ADD COLUMN closure_id TEXT")
 			if (!runsTableHasColumn(db, "runtime_node_id")) db.exec("ALTER TABLE runs ADD COLUMN runtime_node_id TEXT")
 			db.exec(V3_RUNTIME_SCHEMA_SQL)
-			if (needsClosureSessionsHapiMigration) rebuildClosureSessionsForHapi(db)
 			if (needsChainTableRebuild) {
 				// v10 → v11 (#457): copy any non-null `chains.umbrella_issue` / `umbrella_repo` values
 				// into the chain's metadata.bindings (umbrellaIssue / umbrellaRepo) before the rebuild
@@ -1011,20 +1002,8 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration || needsClosureSessionsHapiMigration) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration) db.exec("PRAGMA foreign_keys = ON")
 	}
-}
-
-function rebuildClosureSessionsForHapi(db: Database): void {
-	db.exec(`CREATE TABLE closure_sessions_new (
-		closure_id TEXT NOT NULL REFERENCES task_closures(closure_id) ON DELETE CASCADE,
-		runner_kind TEXT NOT NULL CHECK (runner_kind IN ('claude','codex','opencode','hapi')),
-		session_id TEXT NOT NULL,
-		PRIMARY KEY (closure_id, runner_kind)
-	)`)
-	db.exec("INSERT INTO closure_sessions_new (closure_id, runner_kind, session_id) SELECT closure_id, runner_kind, session_id FROM closure_sessions")
-	db.exec("DROP TABLE closure_sessions")
-	db.exec("ALTER TABLE closure_sessions_new RENAME TO closure_sessions")
 }
 
 function migrateRunIdentity(db: Database): void {
@@ -1504,7 +1483,7 @@ function rebuildItemsTableForV6(db: Database): void {
 		issue_file TEXT,
 		evidence_dir TEXT,
 		agent_cwd TEXT,
-		runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode', 'hapi') OR runner IS NULL),
+		runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
 		phase TEXT,
 		preset TEXT,
 		preset_path TEXT,
@@ -1837,16 +1816,6 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				queryPersistedAll(db, "SELECT * FROM runs WHERE chain_id = $chainId ORDER BY id ASC", { chainId }, RunRowBoundary, `runs for chain ${chainId}`).map((row) => requireRun(row, row.id)),
 			),
 
-		updateRunExtra: (runId, extra) =>
-			write("update run extra", () => {
-				requireRun(getRunRowByRunId(runId), runId)
-				db.query<unknown, SqlParams>("UPDATE runs SET extra = $extra WHERE run_id = $runId").run({
-					runId,
-					extra: stringifyJsonObject(itemExtraToJsonObject(extra)),
-				})
-				return requireRun(getRunRowByRunId(runId), runId)
-			}),
-
 		completeRun: (runId, input) =>
 			write("complete run", () => {
 				const current = requireRun(getRunRowByRunId(runId), runId)
@@ -2022,7 +1991,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 
 function rowToItem(row: ItemRow | null): ItemRecord | null {
 	if (row === null) return null
-	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex" && row.runner !== "opencode" && row.runner !== "hapi") {
+	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex" && row.runner !== "opencode") {
 		throw new SqliteStateError("invalid_json", `invalid item runner in DB row: ${row.runner}`, { id: row.id })
 	}
 	return {
@@ -2547,7 +2516,7 @@ function normalizeSessionPhase(phase: string, code: SqliteStateErrorCode): strin
 }
 
 function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
-	return value === "claude" || value === "codex" || value === "opencode" || value === "hapi"
+	return value === "claude" || value === "codex" || value === "opencode"
 }
 
 function stringifyJsonObject(value: JsonObject): string {

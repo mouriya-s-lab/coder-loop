@@ -380,10 +380,10 @@ test("exhausts on the declared attempt budget", async () => {
 	}
 })
 
-type PromptSessionRunnerKind = "claude" | "codex" | "opencode"
+type RunnerKind = "claude" | "codex" | "opencode"
 
 type FakeRunnerResponse = {
-	runner: PromptSessionRunnerKind
+	runner: RunnerKind
 	phase: string
 	exitCode?: number
 	sessionId?: string | null
@@ -397,7 +397,7 @@ type FakeRunnerResponse = {
 type FakeRunnerEvent = {
 	type: "spawn"
 	responseIndex: number
-	runner: PromptSessionRunnerKind
+	runner: RunnerKind
 	phase: string
 	runId: string
 	issueNumber: number | null
@@ -491,7 +491,7 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	}
 }
 
-async function writeRunnerWrapper(path: string, planPath: string, eventLog: string, runner: PromptSessionRunnerKind, loopDataRoot: string): Promise<void> {
+async function writeRunnerWrapper(path: string, planPath: string, eventLog: string, runner: RunnerKind, loopDataRoot: string): Promise<void> {
 	await writeFile(
 		path,
 		[

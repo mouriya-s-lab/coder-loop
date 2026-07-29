@@ -11,7 +11,7 @@ export type TaskNodeIdentity = {
 }
 
 export type ClosureLifecycle = "active" | "suspended" | "consumed"
-export type ClosureSession = { runner: "claude" | "codex" | "opencode" | "hapi"; sessionId: string }
+export type ClosureSession = { runner: "claude" | "codex" | "opencode"; sessionId: string }
 export type ClosureSnapshot = {
 	closureId: string
 	itemRowId: number
@@ -68,7 +68,7 @@ const IdentityBoundary = arkType({
 	definitionNodeId: NonEmptyStringBoundary,
 })
 const SessionBoundary = arkType({
-	runner: arkType("'claude'|'codex'|'opencode'|'hapi'"),
+	runner: arkType("'claude'|'codex'|'opencode'"),
 	sessionId: NonEmptyStringBoundary,
 })
 const ClosureBoundary = arkType({

@@ -33,46 +33,6 @@ describe("observability", () => {
 		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
 	})
 
-	test("external-terminal availability transitions use structured diagnostic payloads", () => {
-		const warning = makeObservabilityEvent({
-			kind: "diagnostic",
-			type: "daemon.warning",
-			chain: "chain-a",
-			item: 2,
-			phase: "iteration",
-			subject: { kind: "engine" },
-			payload: {
-				code: "external_terminal_unavailable",
-				runner: "hapi",
-				binary: "hapi-remote-session",
-				probeArgv: ["probe"],
-				availability: { kind: "unavailable", reason: "binary-missing", exitCode: null, signal: null, checkedAt: "2026-07-13T00:00:00.000Z", since: "2026-07-13T00:00:00.000Z" },
-				affected: [{ chainId: 1, rowId: 2, itemId: "602", phase: "iteration" }],
-			},
-		})
-		const restored = makeObservabilityEvent({
-			kind: "diagnostic",
-			type: "runner.availability_restored",
-			chain: "chain-a",
-			item: 2,
-			phase: "iteration",
-			subject: { kind: "engine" },
-			payload: { runner: "hapi", binary: "hapi-remote-session", probeArgv: ["probe"], checkedAt: "2026-07-13T00:01:00.000Z", affected: [{ chainId: 1, rowId: 2, itemId: "602", phase: "iteration" }] },
-		})
-		const pending = makeObservabilityEvent({
-			kind: "diagnostic",
-			type: "runner.invocation_pending",
-			chain: "chain-a",
-			item: 2,
-			phase: "iteration",
-			subject: { kind: "engine" },
-			payload: { runner: "hapi", binary: "hapi-remote-session", capability: { kind: "probe-only", outcome: "invocation-pending" } },
-		})
-		expect(warning.payload).toHaveProperty("code", "external_terminal_unavailable")
-		expect(restored.type).toBe("runner.availability_restored")
-		expect(pending.type).toBe("runner.invocation_pending")
-	})
-
 	test("task event identity is an exact all-or-none triple", () => {
 		const event = makeObservabilityEvent({ kind: "lifecycle", type: "daemon.stop", subject: { kind: "engine" }, payload: { pid: 10 } })
 		expect(parseObservabilityEvent({ ...event, runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event" }, definitionNodeId: "definition-leaf" }).runtimeNodeId).toBe("runtime-leaf")
