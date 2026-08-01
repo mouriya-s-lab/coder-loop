@@ -1,6 +1,6 @@
-# v3 RFC 新划分方案（主 session 起草，v3.2，经四轮对抗修订）
+# v3 RFC 新划分方案（主 session 起草，v3.3，经五轮对抗修订）
 
-状态：v3.2。历经四轮对抗（22+6+3+5 组发现逐条裁决，记录见文末与 git 历史）。待第五轮复核通过后定稿。定稿前不据此改 A.md 正文。
+状态：v3.3。历经五轮对抗（22+6+3+5+7 组发现逐条裁决）。待第六轮复核通过后定稿。定稿前不据此改 A.md 正文。
 
 ## 权威标注纪律（本文件自身即遵守）
 
@@ -33,10 +33,10 @@
 
 ## 面 1：定义态——preset 定义资产、代码生成与编译面
 
-- 三面一体定义资产、map 骨架生成、注释枚举 context、map 不写完=preset 没写完、staleness 即失配【操作员原话 | record-3 第 4/5 轮 | 已裁决】
+- 三面一体定义资产、map 骨架生成、注释枚举 context、map 不写完=preset 没写完【操作员原话 | record-3 第 4/5 轮 | 已裁决】；staleness 即失配【旧 RFC 候选 | A.md 旧 547 §4.2 | 待复核】
 - 两层交接契约的声明位（运行语义归面 2/面 3）【主 session 裁决 | — | 待复核】
 - 双面闭合检查、警告/严格两档【操作员原话 | record-3 第 4 轮 | 已裁决】；谓词槽语法在此、语义面 2、概念面 0【主 session 裁决 | — | 未反驳】
-- 定义冻结与取回（CompileEnvelope、identity 分域、publish、pin、resolver、corrupt/GC、legacy-unproven、H1/H2 restart）【旧 RFC 候选 | A.md 旧 547 §2/§3/§8 | 待复核】
+- 定义冻结与取回（CompileEnvelope、identity 分域、publish、pin、resolver、corrupt/GC、legacy-unproven、H1/H2 restart）【旧 RFC 候选 | A.md 旧 547 §2/§6/§8 | 待复核】
 - 两个保证：编译面正常工作=可达性证明；运行时有对应内容=map 资产随 pin+resolver 取回【主 session 裁决 | record-3 第 19 轮 goal 原文 | 未反驳】
 - 非目标：脚本扫描/发现/注入=纯 TS 工程事务【操作员原话 | goal 原文 | 已裁决】
 
@@ -52,18 +52,18 @@
 
 ## 面 3：对象域——任务代数与调度
 
-- 三域切分与任务链设计自述【操作员原话 | record-1 2:28 段 | 已裁决】
+- 任务链设计自述（task 对象、内部步骤不透明、task 级并行、两个增长源）【操作员原话 | record-1 2:28 段 | 已裁决】；三域切分（对象/函数/值）【record 收敛 | record-1 assistant 评价段 | 未反驳】【旧 RFC 候选 | A.md 旧 546 §3 | 待复核】
 - dependsOn 布尔门与群组消费之别【操作员原话 | record-1 2:30 段 | 已裁决】
 - 前向单调、异常作为落定值、seq=群组大小 1 退化【record 收敛 | record-1 2:31-2:35 段 | 未反驳】
-- 动词表（spawn/commit/admit/release/await）【record 收敛 | record-1 2:35 段 | 待复核】【旧 RFC 候选 | A.md 旧 546 §7 | 待复核】
+- 动词表（spawn/commit/admit/release/await）【record 收敛 | record-1 2:35 段 | 待复核】；其中 await 与 dependsOn 另有【旧 RFC 候选 | A.md 旧 546 §7 | 待复核】
 - 位置+时机入链【操作员原话 | record-1 2:48 段 | 已裁决】；重新锚定=提议方重新声称、引擎只判不选【操作员原话 | record-2 3:09 段 | 已裁决】
-- admit 协议（开放前沿查询、typed 拒绝、重新声称提交；面 2/面 4 两类调用者）【record 收敛 | record-2 3:03 段、record-1 2:28 段 | 未反驳】；协议 owner 落此面【主 session 裁决 | — | 待复核】
+- admit 协议：开放前沿查询与 typed 拒绝【record 收敛 | record-2 3:03 段 | 未反驳】；位置合法性检查与重新声称提交【record 收敛 | record-2 3:09 段 | 未反驳】；同一端口两类调用者【record 收敛 | record-1 2:28 段 | 未反驳】；两类调用者到面 2/面 4 的 owner 映射与协议 owner 落此面【主 session 裁决 | — | 待复核】
 - 群组结束=消费+可选等待窗口：可选等待时间（如六十秒）【操作员原话 | record-2 3:06 段 | 已裁决】；期满入日志【record 收敛 | record-2 3:07 段 | 未反驳】；窗口重置/固定为声明参数【record 收敛 | record-2 3:07 段 | 待复核】
-- committed transition/锁/crash replay/唯一活 run【record 收敛 | record-1 2:35 段前后 | 未反驳】【旧 RFC 候选 | A.md 旧 546 §10 | 待复核】
+- committed transition/锁/crash replay【record 收敛 | record-1 2:35 段前后 | 未反驳】；每 task 至多一个活 run【旧 RFC 候选 | A.md 旧 546 §10 | 待复核】
 - 闭包资源合同、GC/publication、residue 对账【旧 RFC 候选 | A.md 旧 546 §11-12 | 待复核】
 - fail 级联 policy owner：配置 schema、policy ADT、evaluator、任务/组/item 层动作执行归本面，消费面 2 escalation【主 session 裁决 | — | 待复核】；级联层级枚举【操作员原话 | record-3 第 10 轮 | 已裁决】
 - 消费面 5 封闭事实 ADT（映射见面 5）【主 session 裁决 | — | 待复核】
-- 升层消费；await 不构成第二跨域通道【主 session 裁决 | record-2 3:24 段 | 未反驳】
+- 升层消费【主 session 裁决 | — | 未反驳】；await 不构成第二跨域通道【主 session 裁决（record-3 未载，现文本见 A.md 第 0 篇 0.3 草稿）| — | 未反驳】
 - 迁移：v2 slot 串行是资源限制非业务 seq【旧 RFC 候选 | A.md 旧 546 §15 | 未反驳】
 
 ## 面 4：外部工作注入（入站边界）
@@ -110,3 +110,7 @@
 | 5 | active loss"重写轮定"形成双 owner 悬置 | 接受并裁决：检测与 winner 判定归面 5，loss 胜出由面 3 消费为 exception 落定 |
 
 v1→v2、v2→v3、v3→v3.1 见 git 历史（3695a61、5d7fe65、6f40820）。
+
+## v3.2→v3.3 裁决记录（对 codex 第五轮七处标注发现）
+
+全部接受：55 行三域与任务链自述拆标；60 行 admit 协议补 record-2 3:09 并把 owner 映射拆为主 session 裁决；36 行 staleness 改标旧 547 §4.2；39 行 §3 订正为 §6；58 行旧 RFC 锚点限定 await/dependsOn；62 行"唯一活 run"移出 record 锚点仅由旧 546 §10 支持；66 行 await 跨域声明如实改标主 session 裁决（record-3 未载）。
