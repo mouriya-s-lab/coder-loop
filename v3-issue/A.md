@@ -1071,277 +1071,235 @@ publication 验收在采样后 force-push、删除 ref 或制造网络错误。�
 
 <!-- 547 -->
 
-# RFC #547：从类型定义到可恢复的运行时值管道
+# 面 1：定义态——preset 定义资产、代码生成与编译面
 
-## 1. 本文建立的不是“更多类型”，而是一条唯一值链
+## 1. 问题边界：定义态管什么
 
-RFC #547 描述 coder-loop 的目标实现合同，不把 main 已有的局部资产写成已经闭合的能力。全文继续区分四种事实：**current** 是 main 当前真实运行的行为；**target** 是本 RFC 完成后必须成立的合同；**dependency** 是由其他 owner 提供、#547 只消费的边界；**proof** 是合同确定后仍需由真实路径验证的结论。后文中“目标系统会”只表示 target。
+定义态管理的是 preset 在实例执行前能够封闭判定的声明文本闭包。
+它包括类型定义、prompt md、各时态的 map 骨架、交接合同声明、谓词槽与后继闭集，也包括这些资产经过编译、发布、pin 后形成的稳定 definition identity。
+它不提前执行脚本，不替 agent 填值，也不编译对象域在 daemon 运行期间才会生长的完整 task 结构。
 
-本篇的核心责任，是让 preset 从可变源文件变成一个类型闭合、可生成 map 骨架、可不可变发布并能在运行时按 ref 取回的 definition。对象域仍由 #546 管理运行时生长的 task、ready、claim 和 committed transition；函数域内部则沿总纲规定的五时态运行值管道。#547 负责这两域共同依赖的类型权威和 definition identity，不把闭包内的中间时态写进 daemon 账本。
+本篇回答两个保证。
+第一个是“如何保证编译面正常工作”：答案不是预言脚本与 agent 的运行结果，而是让唯一编译判定证明声明闭合、签名匹配和值管道连通。
+第二个是“如何保证运行时有对应的内容”：答案不是在运行时重新扫描当前 preset，而是把严格闭合的定义资产发布为不可变 bundle，由 instance pin exact ref，再由 resolver 按 ref 取回并验证。
 
-main 已有统一 compiler 骨架、真实 source hash、compiled/rejected 结果形状、声明驱动的文档 renderer、tagged ref/FK、unknown-first 边界、SQLite 事务和 outbox 基础。这些资产可以复用，但不能证明 findings 已经同源、definition content 可以按 ref 恢复、ValueType 已贯穿来源面与消费面、map 资产能够生成和 pin，或 runner exit 已经只经一次 TransitionCommit 推进。
+这两个保证必须保持总纲 0.3.1 的边界。
+编译期证明的是可达性，即运行时存在一条类型正确的合法求值路径；脚本是否启动、map 是否得到 `Just<T>`、agent 是否提交合法值以及谓词真假，仍然全部是运行时事实。
+定义态只保证运行所需的定义内容存在且可验证，不保证一次运行必定成功。
+
+本篇沿用总纲中的 `preset` 用法，不处理其历史命名张力。
+函数域运行时如何执行这份定义归面 2，对象域如何物化与消费 task 归面 3；定义态只向两面提供同一份经过判定、发布和 pin 的声明闭包。
+
+来源：division-plan.md“面 1”；A.md 第 0 篇 0.3.1、0.5、0.8；record-3 第 19 轮 goal 原文。
+
+## 2. preset 三面资产与代码生成
+
+preset 的定义资产由三面共同构成：类型定义声明各时态的 context 形状与每个值的来源；prompt md 声明值的文本消费位置；各时态的 map 骨架文件承载外部值向纯值的提升。
+任何一面缺失，preset 都不是一份完成的值管道。
+map 骨架不是编译后的附属缓存，而是会进入后续编译、publish 和 pin 的 definition 资产。
+
+作者先完成类型定义与 prompt md，再由 CLI 从类型定义机械生成每个 map source 所在时态的骨架。
+生成物不是“可直接运行的 TS 文件”，也不替作者猜测业务转换；它给出可检查的输入、输出签名，并在注释中枚举该 map 开始运行前可用的 context 值及其类型。
+注释与函数签名来自同一个类型定义，不能由作者另维护一份易漂移的清单。
+
+context 的枚举遵守五时态的单调累积。
+前置 map 的 context 只包含 item 死值。
+同一时态内多个前置 map 之间是否相互可见、按何种顺序执行仍是待复核的开放项；本篇不自行定义，也不假设有序或无序。
+后置 map 可以读取 item 死值、前置值与已经通过填值校验的 agent 值。
+生成器只为 map source 生成骨架，不为 item source 或 agent source 制造虚假 map，也不让后一个时态覆盖前一时态已经形成的值。
+
+map 的基本形态是 `map(context, bashscript())`。
+外部命令先给出 string 或未经信任的结构，map 再结合当时已有的 typed context 完成解析与检查，把结果提升为 `Just<T>`；只有 `Just<T>` 可以进入 context，并被后续 prompt、检查或路由消费。
+`Nothing` 表示本次运行没有形成声明的 `T`，它是运行时结局，不是编译器可以提前排除的状态，也不能由 default 伪装成成功。
 
 ```mermaid
 flowchart LR
-    S[类型定义与 prompt] --> A[authoring compile]
-    A --> G[CLI 生成 map 骨架]
-    G --> F[作者补完 map]
-    F --> C[严格 CompileEnvelope]
-    C --> P[不可变 definition publish]
-    P --> I[typed admission]
-    I --> T[单事务 instance create]
-    T --> Q[ready 到 claimed]
-    Q --> R[pre-spawn 资源准入]
-    R --> X[闭包五时态执行]
-    X --> K[TransitionCommit]
-    K --> O[outbox 与 effect intent]
-    P --> Z[restart 按 pinned ref 恢复]
-    T --> Z
-    K --> Z
+    T[类型定义] --> G[CLI 机械生成各时态 map 骨架]
+    T --> C[推导该时态可用 context]
+    C --> G
+    G --> M[作者补完 map]
+    B[bashscript 输出] --> M
+    M --> J[Just&lt;T&gt;]
+    M --> N[Nothing]
+    J --> V[进入 context 并供声明位置消费]
+    N --> R[交由面 2 的运行时语义处理]
 ```
 
-## 2. H1 必须只有一个 CompileEnvelope
+因此，“map 不写完 = preset 没写完”是定义态纪律，而不是运行时容错选项。
+类型、来源或时态位置改变后，旧骨架的签名或 context 注释与机械推导结果不一致，staleness 也属于同一个“未完成”检查范畴；缺失、未补完、签名不符和 stale 都必须在严格执行前被看见。
 
-### 2.1 Current 为什么会给出多个答案
+来源：record-3 第 3—5 轮操作员原话；A.md 第 0 篇 0.4、0.5、0.8；旧 547 第 3、4 节。
 
-current compiler 已能把 preset 解析为 canonical model，也有 compiled/rejected 分支、source hash 和公共 projection 函数。然而，成功结果中的 model 与 warnings 会在部分装载边界分离，daemon callback、doctor、status 和 CLI 也未必读取同一份 finding 集合。daemon 的成功 cache 以目录路径为 key 并持续到进程结束，其他入口却可以重新读取当前文件；同一时刻，长寿命 daemon 可能仍解释 H1，另一个入口已经解释 H2。
+## 3. 双面闭合与编译面保证
 
-cache 因而意外成为定义时态的一部分。失败 cache 会被删除并重试，成功 cache 却没有等价的 source identity 与失效事实。仅给某个入口补一个 checker 或 JSON projection，仍会产生第二份判定，不能建立定义权威。
+编译面从来源面与消费面同时检查同一条值管道。
+来源面要求每个声明值唯一来自 item、map 或 agent 三者之一；同名多来源会引入覆盖顺序和来源权威的歧义，因此是编译期非法状态。
+item default 必须与声明类型相容，map 的输入必须在所在时态可达且输出类型匹配，agent source 也只能出现在允许 agent 填值的位置。
 
-### 2.2 Target 的唯一判定与三种 identity
+消费面反向回答值在哪里被读取。
+prompt 占位符、谓词和路由只能读取已经声明、在该时态可达并且类型匹配的值；未来时态的值不能提前消费，`Nothing` 不能作为 `T` 使用，消费位置也不能重新解释来源类型。
+反过来，声明值若没有任何消费位置，会形成未消费 finding，防止类型定义退化成无人负责的值仓库。
 
-目标 compiler 对一次稳定 source snapshot 只产生一个 CompileEnvelope。成功分支包含 normalized compiled product 和结构化 findings；拒绝分支包含非空 diagnostics。CLI、doctor、cache、GUI 和第三方 consumer只能投影或引用这个 envelope，不能重新计算同一静态事实。finding variant 具有稳定 identity 和 typed payload，message 只用于解释，不能成为控制流。
+谓词槽与后继闭集也必须穷尽。
+每个相关值都有谓词槽；没有显式谓词时按恒真处理，不要求生成空代码。
+路由面中的有限后继必须形成闭集，零个、一个或多个候选都有 total 的 compiled product 形状。
+当后继数量 `n ≥ 2` 时，chooser 由 agent 还是脚本担任是 preset 必须给出的声明位；未声明 chooser 属于闭合性 finding。`n = 1` 时由引擎自动填入唯一后继，`n = 0` 时升层，二者都不需要声明 chooser。
+编译器可以证明候选集合与读取它的值类型闭合，但不能证明运行时谓词为真或最终选择某个候选。
 
-三种 identity 必须分域。CompileEnvelope identity 表示一次完整编译判定及其 findings；compiled product identity 表示 normalized 可执行定义；definition content identity 表示已经发布、可供实例 pin 的完整 bundle。修改 finding 规则不应伪装成执行定义变化，执行资产变化也不能沿用旧 content identity，因此三者可以引用，不能压成一个 hash。
+finding 分为警告档与严格档。
+警告档允许作者查看 normalized 结果、缺失项和生成建议，继续补完定义；严格档是 publish、create 与恢复执行的准入条件，任何未闭合 finding 都禁止运行。
+声明内部的结构矛盾直接得到 rejected CompileEnvelope，不能靠关闭严格档放行；能够理解但尚未补完的声明仍可保留 findings，却没有运行资格。
 
-公共 schema 是可分发合同，不是一次 projection instance，也不是源码内部 parser 的别名。compiler 边界拥有 schema producer；独立 consumer 尚未存在，只表示 cross-owner proof 未完成，不授权另一个入口复制 schema 或自行解释 compiled product。
+这些检查本质上只有一个结论：可达性证明。
+它们证明每个消费位置存在一条类型正确、来源唯一、时态合法的路径，并证明谓词槽与有限后继没有未处理分支；它们不把“路径存在”偷换成“运行时必定得到值”。
+因此 CLI、doctor、status 与 GUI 都只能显示 compiled/reachable 的定义事实，不能显示成运行结果已经满足。
 
-## 3. ValueType 与每值唯一来源
+来源：A.md 第 0 篇 0.3.1、0.5、0.6、0.8；record-3 第 4 轮操作员原话；旧 547 第 5 节。
 
-### 3.1 ValueType 只表达值，不承担文档布局
+## 4. 两层交接合同的声明位
 
-目标系统使用封闭递归 ValueType：`string | number | boolean | null | array | record | union`。外部 candidate 以 `unknown` 进入精确 parser，解析成功后才形成 refined value。missing 是独立状态，不等于空串；`null` 只有在声明允许时才是值；`false`、`0` 与空集合都不能被 truthiness 抹成缺失。default 属于值声明，use-site 不得重新解释 source type。
+总纲 0.4.3 已经规定分形交接的共同形状：step 与 task 共用“交付值包—解析/测量—谓词判定—返回结局”这一份交接合同文法，只在两个作用域实例化。
+类型定义、值包形状、谓词槽、正常后继与 fail / NIL 路由的声明位都属于 preset 定义资产，因此由本面给出语法、纳入编译并随 bundle 发布。
 
-ValueType 同时拥有 canonical serialization：标量有唯一文本，structured value 使用 canonical JSON。它不拥有 Markdown label、prefix、suffix、fence 或空行规则；这些仍由版本化的文档渲染声明负责。类型系统决定“值是什么”，renderer 决定“值怎样进入 prompt”，二者不能互相重做对方的解析。
+共享文法不意味着本面拥有两层运行账本。
+step 接缝如何按五时态执行、如何形成 `returned(value) | exception`，归面 2 的函数域运行时；task 接缝如何把折叠结果写成 committed transition、如何物化后继 task，归面 3 的对象域。
+本篇只保证两层读取同一份已编译声明，不展开任一层的运行时语义。
 
-### 3.2 来源声明是一个封闭和类型
+这一边界也阻止编译面越权生成完整运行树。
+定义态可以穷尽有限的合同 variant、后继闭集与类型路径，却不能预知 daemon 运行期间会出现多少 task 实例、何时派生或哪些实例并发存在。
+后者是对象域的运行时生长事实，不是 preset 声明文本闭包的一部分。
 
-每个 context 值在类型定义中恰有一个来源：
+来源：A.md 第 0 篇 0.3、0.4.3、0.8；division-plan.md“面 1”“面 2”“面 3”。
 
-- **item source**：instance 创建前已经存在的死值，经 typed admission 成为初始 context；
-- **map source**：前置或后置脚本产生原始输出，再由声明的 map 结合当时时态已有的 context 提升；
-- **agent source**：agent 在运行时填写，并在 agent 仍在场的时态出口接受填值校验。
+## 5. CompileEnvelope 是唯一编译判定
 
-同一个值名声明多个来源是编译期非法状态，不能留给运行时决定覆盖顺序。context 按五时态单调累积：后继时态保留既有值，只添加本时态唯一来源产生的新值。map 或 agent 不能覆盖 item authority，后置 map 也不能重写前置 map 已经形成的值。
+当前 main 已有 canonical compiler 骨架、compiled/rejected 分支、真实 source hash 与公共 projection，这些是建立唯一判定的地基，却尚不自动保证所有入口读取同一份 findings。
+旧文记录的现状是：成功结果中的 model 与 warnings 会在部分装载边界分离，daemon callback、doctor、status 与 CLI 可能形成不同读面；只给某个入口追加 checker 会产生第二份判定。
 
-### 3.3 map 的签名与 Just/Nothing
+目标边界对一个稳定 source snapshot 只产生一个 `CompileEnvelope`。
+成功分支同时携带 normalized compiled product 与结构化 findings；拒绝分支携带非空 diagnostics。
+CLI、doctor、cache、GUI 与其他 consumer 只能投影或引用这个 envelope，不能重新编译同一静态事实。
+finding variant 必须有稳定 identity 与 typed payload，message 只负责解释，不能成为控制流。
 
-map 的抽象签名是 `map(context, scriptOutput)`。scriptOutput 在外部程序边界仍是 string 或未经信任的结构；map 可以读取该时态开始前已经存在的 typed context，把二者解析为 `T`，再提升为 `Just<T>`。只有 `Just<T>` 能进入 context 并被后续 prompt、检查面或路由面消费。
+三个 identity 必须分域。
+`CompileEnvelope identity` 表示一次完整编译判定及其 findings；`compiled product identity` 表示 normalized 可执行定义；`definition content identity` 表示已经发布、可供 instance pin 的完整 bundle。
+finding 规则变化不应伪装成执行定义变化，定义资产变化也不能沿用旧 content identity，所以三者可以互相引用，却不能压成一个 hash。
 
-`Nothing` 表示这次运行没有形成声明的 `T`，不等同于编译错误，也不能用 default 值伪造成功。它发生在运行时，并按所在时态进入 #545 定义的程序异常或 fail/NIL 路径。编译器能够证明 map 的输入 context 和输出类型可以接入管道，却不能证明脚本一定成功、map 一定返回 `Just`，或最终谓词一定为 true。
+公共 schema 同样是唯一判定的投影合同，不是另一套 parser。
+compiler 边界拥有 schema producer；consumer 缺席只表示相应验证尚未完成，不授权 consumer 复制 schema 或自行解释 compiled product。
+这样，编译面是否正常工作由唯一 envelope 回答，而不是由多个入口的偶然一致回答。
 
-agent source 不通过 map 冒充 measurement。它使用同一 ValueType parser 完成填值校验，但值的信任来源仍是 self-report；运行后 map 则是 measurement。二者最终都形成 typed context 值，来源 provenance 不能被抹平。
+来源：旧 547 第 2 节；division-plan.md“面 1”；A.md 第 0 篇 0.3.1、0.5。
 
-## 4. CLI 生成的是 map 骨架，不是替作者写完程序
+## 6. 不可变 publish 与 pin
 
-### 4.1 生成物属于 preset 的定义态
+严格闭合的 compiled product 必须先发布为完整 bundle，instance 才能写入并 pin 它的 definition ref。
+bundle 至少包含 normalized preset、类型定义与来源声明、prompt md 与 fragments、文档渲染声明、谓词槽与后继闭集、脚本声明、相应 map 骨架文件在补完后的资产、公共 schema 与 manifest。
+相较 current 的短期 materialization，类型定义和 map 资产现在都明确进入闭包，其 bytes、签名与 digest 共同参与 definition content identity。
 
-作者先写 prompt 与类型定义，再由 CLI 根据所有 map source 生成对应时态的 map 文件骨架。骨架不是一个只有函数名的空壳：它包含可检查的输入/输出签名，并用注释枚举该 map 运行前可用的 context 值及其类型。前置 map 只能看到 item source 和此前已经形成的前置值；后置 map 可以看到运行前 context 与已通过填值校验的 agent 值。
+publish 先在同一 filesystem 的 staging 目录写入尚不可解析的 partial bundle，逐个 `fsync` 文件，再 `fsync` 目录。
+写完后按 canonical bytes 计算 content identity，重新打开并验证 manifest、每个 asset digest 与整体 identity；只有全部验证通过，才以原子 `rename` 公布 artifact，并把 metadata 置为 `live`。
 
-生成器不为 item source 或 agent source制造虚假 map。它也不猜业务转换，不自动把 bash string 强转为目标类型。作者必须补完每个声明的 map；未补完表示 preset 仍处于 authoring 状态，而不是运行时再找一个 fallback。
+```mermaid
+stateDiagram-v2
+    [*] --> staging: 写入 partial bundle
+    staging --> verified: fsync 文件与目录，并重开校验
+    staging --> [*]: 写入或校验失败
+    verified --> live: rename 公布 artifact
+    live --> retiring: persisted ref 可达性为零并再次确认
+    retiring --> trash: 移走 artifact
+    trash --> [*]: 删除 metadata
+```
 
-### 4.2 完整性与 staleness 必须可判
+相同 ref 与相同 content 的重复 publish 是幂等成功；相同 ref 对应不同 content 是 identity collision，必须拒绝；不同 ref 不能因“只保留最新版本”互相 prune。
+publish 复用 `CompileEnvelope` 的判定，不重新计算 findings，也不把 envelope、compiled product 与 content identity 合并。
 
-生成骨架的期望签名由类型定义和时态位置机械推导。类型、来源或可用 context 改变后，旧 map 文件若仍对应旧签名，就是 definition 失配。compiler 必须识别缺失、未补完、签名不符和 stale map，并把 finding 放进唯一 CompileEnvelope；不能等到脚本已运行后才以普通异常暴露定义没有写完。
+顺序保证必须是“先发布，后写 ref”。
+若发布后、写 ref 前崩溃，只会留下可由 GC 回收的完整 orphan；若先写 ref 再补 bundle，则会产生已提交却无法解析的 instance。
+current materialize 会在完整 parse/compile 前完成 marker 与 rename，并可能清理旧 sibling，这个现状只能提供临时副本，不能承担 publish 与 pin 的合同。
 
-精确文件布局、命名、import 装配和生成器如何发现已有文件属于 TypeScript 工程实现，不构成本 RFC 的抽象。RFC 只要求生成结果具有稳定 identity、能够和声明一一对账，并在严格执行前成为 definition bundle 的完整资产。
+来源：旧 547 第 6.1—6.3 节与第 8 节；division-plan.md“面 1”。
 
-## 5. 双面闭合决定 definition 是否可执行
+## 7. resolver 兑现“运行时有对应内容”
 
-### 5.1 来源面闭合
+instance 的所有定义消费者都必须经 shared resolver 按 exact tagged ref 取得 verified bundle。
+cold resolve 依次验证 ref kind、schema、`live` metadata、manifest、每个 asset digest 与整体 identity；通过后才允许结果进入 process cache。
+cache 的语义只能是 `definition ref → verified content`，miss 必须重读 immutable store，不能退回 current path。
 
-来源面回答每个声明值从哪里来。compiler 必须穷尽检查：值有且仅有一个 item、map 或 agent source；item default 与 ValueType 相容；map 所在时态能够取得其声明的 context 输入；map 输出与目标值类型一致；agent source 位于允许 agent 填值的步骤；所有 map 骨架均存在、已补完且不 stale。
+这条规则修复 current cache 意外成为定义时态的问题。
+旧文记录的 main 行为是：daemon 的成功 cache 以目录路径为 key 并持续到进程结束，同路径 source 改成 H2 后，进程内仍可能解释 H1；restart 后 cache 消失，又会从当前路径读取 H2。
+source hash 与 tagged ref 因而只能归因，不能单独保证旧 instance 的完整定义内容可取回。
 
-多来源、悬空 source identity 和不可能成立的签名是结构矛盾，直接产生 rejected CompileEnvelope。缺失实现、未补完骨架等 authoring 不完整项进入 typed finding，使作者仍能查看 normalized model 和生成建议，但不能在严格执行路径中被当成完成的 preset。
+pin 与 resolver 合起来才兑现“运行时有对应内容”。
+instance 先 pin H1 的完整 bundle ref；spawn、resume 与 restart 都按该 ref 取回 H1 的类型定义、prompt、map、谓词和后继声明。
+H2 只进入新的编译与发布，不自动 rebind 旧 instance。
+cache hit 返回已验证的 H1，cache miss 从 immutable store 冷解析 H1，任何路径都不尝试用 current H2 代替。
 
-### 5.2 消费面闭合
+missing asset、map digest mismatch、unknown schema 或 kind mismatch 产生 typed `definition corrupt` resolution；新 instance 在任何副作用前拒绝，已经 pin 的 instance 进入可见 hold 并显示 exact ref。
+`retiring` 同样拒绝新 resolve 与 create。
+缺失或损坏不会静默失败，也不会用当前源文件、旧 cache 或兼容 bundle 掩盖。
 
-消费面回答值在何处被读取。prompt 占位符、检查谓词和特殊路由读取都必须引用已声明且在该时态可达的值；引用未来时态的值、把 `Nothing` 当值消费或在 use-site 改写类型都属于编译拒绝。反向地，声明值若没有任何消费位置，compiler 产生未消费 finding；严格模式禁止执行这种未闭合定义，避免类型表逐渐变成无人负责的值仓库。
+GC 只以 persisted ref 的可达性为权威。
+chain、item、task、run 或保留历史中的任何 ref 都阻止退役；零 ref 候选必须在事务中再次确认，才能从 `live` 进入 `retiring`。
+清理器随后把 artifact 移入 trash 并删除 metadata，restart 从持久的 retiring/trash 状态继续；process cache 从来不是 retention authority。
 
-检查面为每个相关值提供谓词槽。未声明自定义检查时，槽位由恒真谓词补齐，因此穷尽性不要求生成无意义代码。路由面使用封闭后继集合：“下一个 preset”的候选数为零、一个或多个，都必须在 compiled product 中形成 total 形状；compiler 能证明候选集合与 chooser 类型闭合，不能证明运行时 chooser 会选择哪个值。
+pre-ref 历史没有可验证的 definition content。
+旧文记录的真实中央数据为 15 个 chain、69 个 item 与 932 个 finished run；现存 repository 字段、materialized 残留、event、status 或 current source 都不能证明当时的 H1。
+这些记录进入 `legacy-definition-unproven`：list、status 与 audit 可读，resume、schedule 与 mutation 停止；只有真实历史 artifact 证据能够解除。
 
-### 5.3 Warning 与严格模式承担不同职责
+来源：旧 547 第 2.1、6.3、6.4、10 节及第 12 节的 v14 数据调查；division-plan.md“面 1”。
 
-authoring compile 允许以 finding 告诉作者“还缺什么”，以便继续生成和补完；严格模式则是 live publish、instance create 和运行恢复的准入条件，任何来源面或消费面未闭合都不得执行。结构上自相矛盾的声明始终 rejected，不因关闭严格模式而放行；可继续编辑但尚未完成的声明可以保留 normalized 结果和 warnings，却没有运行资格。
+## 8. typed admission 的定义态边界
 
-这个分层不是把错误推迟。它区分“编译器能否理解这份半成品”与“这份 definition 是否足以驱动运行”。两档都使用同一 CompileEnvelope 和 finding 词表，不建立第二个 checker。
+类型定义还拥有 item candidate 的 parser。
+create、update 或 batch 的外部值先以 `unknown` 进入 pinned definition，解析成功后才成为 typed item 值并进入初始 context；失败返回精确的 field、path、expected 与 actual，不写入业务对象。
+parser 的权威来自 pinned 类型定义，CLI、renderer 与对象域都不能各自再解释一次输入。
 
-### 5.4 可达性证明不是运行结果
+`missing` 与空字符串是两个独立状态。
+`null` 只有在声明允许时才是值，`false`、`0` 与空集合也不能被 truthiness 抹成 missing；default 只属于值声明，消费位置不得补空串或自行归一。
+这个区分让 admission 判断的是声明类型，而不是某个入口的字符串习惯。
 
-编译面能够判定的范围止于声明闭合、签名匹配、值管道连通、谓词槽穷尽和后继闭集穷尽。这些都是可达性证明。脚本是否启动成功、map 是否产出 `Just`、agent 是否填写合法值、谓词真假和 chooser 选择，全部在运行时求值。任何 status、doctor 或 GUI 都不得把“compiled and reachable”显示成“运行时已经满足”。
+update 必须先把 patch 应用到旧对象，再对完整对象重新执行 parser 与跨字段不变量检查；只验证 patch 中孤立字段会让旧值与新值组合成非法状态。
+batch 中所有元素共享同一 pinned definition 与 admission 规则，任一元素失败，整个 batch 都零写入，不能保留一部分已接纳对象。
 
-## 6. 完整 definition 必须不可变发布
+本面只定义 parser、typed 结果与零部分写合同，因为这些结论由定义资产决定。
+admitted item 值如何进入实例、如何形成初始 task 与 readiness，属于面 3 的 runtime materialization；agent 在场时的 `unknown → T` 填值修正循环属于面 2。
+本篇只要求两者消费同一 pinned parser，不复制定义权威。
 
-### 6.1 H1/H2 是最直接的反例
+来源：旧 547 第 3.1、7.1 节；A.md 第 0 篇 0.4.2、0.8；division-plan.md“面 1”“面 3”。
 
-current 会计算 source hash，也可能持久化 tagged ref，但完整 definition content 不能可靠地按 ref 恢复。scheduler 在 spawn 或 resume 前仍可能根据路径读取 preset；进程内 cache 暂时保留 H1，daemon restart 后 cache 消失，旧 instance 便可能被 H2 重新解释。若 H2 修改类型、map、prompt 或后继，status 仍显示 H1 ref 而实际执行 H2，ref 就只剩归因价值。
+## 9. 定义态的四类失败
 
-current materialize 顺序也存在同源风险：source 先被复制到 staging，完成 marker 和 rename 早于完整 parse/compile，旧 sibling 还可能先被清除。非法 H2 因而可能成为唯一“完成”artifact；并发 materialize 也可能互相 prune，使成功返回的路径最终不存在。
+定义态只保留下列四类失败。
+它们分别回答声明是否可编译、具体输入是否可接纳、pinned 内容是否仍完整、历史记录是否拥有可证明的定义；面 2 的运行时异常、面 3 的调度状态以及出站边界的 provider 事实不在本表中。
 
-### 6.2 Bundle 必须闭合所有运行时消费者
+| 状态 | 判定依据 | 权威结果 | 恢复动作 |
+|---|---|---|---|
+| `compile rejected` | schema、唯一来源、签名、谓词槽或后继闭集存在结构矛盾；或严格档仍有 map 未补完、stale、值未消费等闭合 finding | rejected `CompileEnvelope`，或同一 envelope 中禁止严格执行的 typed findings；不产生 `live` definition | 修正声明或补完 map，以新的稳定 source snapshot 重新编译并 publish |
+| `admission rejected` | create、update 或 batch 的具体 candidate 不满足 pinned parser；update 完整对象不变量失败；batch 任一元素失败 | typed field/path/expected/actual；create 零写，update 与 batch 零部分写 | 调用者修正输入后，继续使用同一 pinned definition 重新提交 |
+| `definition corrupt` | exact ref 的 bundle 或 asset 缺失，digest、schema、kind 或整体 identity 校验失败 | exact ref 与 typed resolution reason；new resolve 拒绝，existing instance 可见 hold | 恢复同一 identity 的真实 artifact 并重新验证；不得从 current source 重编译代替 |
+| `legacy-definition-unproven` | pre-ref 历史没有能够证明当时完整 definition 的 artifact | legacy 标记与只读历史；禁止 resume、schedule 与 mutation | 取得并验证真实历史 artifact；否则保持该状态 |
 
-严格 compiled product 发布为完整 pre-run bundle。bundle 至少包含 normalized preset、ValueType 与来源声明、prompt 与 fragments、文档渲染声明、谓词槽与后继闭集、脚本声明、已补完且签名匹配的 map 资产、公共 schema 和 manifest。对象域 task 声明只以 #546 定义的 typed seam 进入 bundle；#547 不在这里编译一棵完整运行树。
+四类失败不能压成一个字符串。
+`compile rejected` 面向声明文本闭包，`admission rejected` 面向具体 unknown 输入，`definition corrupt` 面向已经 pin 的内容完整性，`legacy-definition-unproven` 面向历史证据缺失；判定依据不同，恢复动作也必须保持各自 identity，不能互相 fallback。
 
-map 文件是 definition 资产，而不是环境中按名字重新发现的程序。其 bytes、签名和 manifest digest 都参与 definition content identity。运行结果不进入 bundle；运行前无法求得的 `Just/Nothing`、agent 值和谓词结果也不能伪装成 definition 字段。
+来源：旧 547 第 11 节中与定义态有关的行；division-plan.md“面 1”。
 
-### 6.3 Publish、resolver 与 cache
+## 10. 非目标
 
-发布先在同一 filesystem 的 staging 目录写入不可解析的 partial bundle，再逐个 fsync 文件并 fsync 目录；随后按 canonical bytes 计算 content identity，重新打开并验证 manifest、每个 asset digest 和整体 identity。全部验证通过后，才以 rename 公布 artifact，并把 metadata 置为 `live`。
+脚本的扫描、发现、import 装配和运行时注入是纯 TypeScript 工程实现细节，不是本篇要建模的设计问题。
+本篇规定 map 的来源、签名、时态、identity、bundle 归属与缺失语义，但不规定目录遍历、glob、barrel import、loader 或自动注入算法。
 
-相同 ref 与相同 content 的重复 publish 是幂等成功；相同 ref 对应不同 content 是 identity collision，必须拒绝；不同 ref 不得因“只保留最新版本”互相 prune。CompileEnvelope 保留原 findings，publish 不重新计算第二份判定，也不把 envelope、product 和 content identity 混为一个。
+preset 也不会因此整体变成代码载体。
+类型定义与 prompt md 仍是声明资产，CLI 生成的 TypeScript 文件只承载各时态的 map 骨架及作者补完后的值提升函数；内部使用哪一种 TypeScript 类型库，不成为公共类型语言。
 
-所有 instance consumer 通过 shared resolver 按 tagged ref 取得 verified bundle。cold resolve 依次验证 kind、schema、`live` metadata、manifest、每个 asset digest 和整体 identity；通过后才可进入 process cache。cache 只保存 `definition ref → verified content`，miss 必须重读 immutable store，不能退回 current path。
+本篇不定义五时态的运行时求值、脚本异常、agent 填值循环、谓词真假与 fail / NIL 消费，它们属于面 2；也不定义 task 图物化、committed transition、调度或对象域派生，它们属于面 3。
+两面只能消费本篇发布的 typed 合同，不能把自己的运行事实反写成第二份定义。
 
-### 6.4 Corrupt、retiring、GC 与 legacy
+tool/gate 协议已经从 v3 设计中整体删除；这部分需求由 context 类型系统的来源面、消费面、填值校验与流转校验承载。
+本篇不保留相应 journal、decision point、dependency 或 proof gap。
 
-missing asset、map digest mismatch、unknown schema、kind mismatch或 retiring 都产生 typed definition resolution 状态。新 instance 在副作用前拒绝；已经 pinned 的 instance 进入可见 hold，并显示 exact ref。系统不得用 H2、旧 cache 或兼容 bundle“修复”H1。
-
-GC 只以 persisted ref 可达性为权威。任何 chain、item、task、run 或保留历史中的 ref 都阻止退役；零 ref 候选在事务中再次确认后从 `live` 进入 `retiring`，此后新 resolve 与 create 立即拒绝。清理器再把 artifact 移入 trash 并删除 metadata，restart 从 retiring/trash 状态继续。cache 不是 retention authority。
-
-真实中央数据中的 15 个 chain、69 个 item 和 932 个 finished run 都属于 pre-ref legacy，没有可验证的历史 definition content。repository 字段、materialized 残留、event、status 或 current source 都不能证明当时的 H1。此类记录标记 `legacy-definition-unproven`：list、status 和 audit 可读，resume、schedule 和 mutation 停止；只有真实历史 artifact 证据可以解除。
-
-## 7. Typed admission 把值管道接到实例与闭包
-
-### 7.1 Item source 在最早拥有信息的边界解析
-
-具体 chain/item candidate 在 create 前以 unknown 进入 pinned definition 的 parser。成功后形成 admitted item values，保留 owner、source、definition ref、provenance 和 refined value；失败返回精确 field/path/expected/actual，不写 business row。missing、default 和 null 的语义只由 source declaration 决定，renderer 不补空串，CLI 也不私自归一。
-
-update 必须把 patch 应用到旧对象后验证完整对象不变量，不能只看 patch 中的孤立字段。batch 中所有元素共享同一 pinned definition 和 admission 规则，任一元素失败则整个 batch 零写。agent 运行时只能填写声明为 agent source 的值，不能覆盖 item 或 map authority；其填值修正循环由 #545 定义。
-
-### 7.2 运行时必须只使用 pinned map
-
-前置脚本、prompt 组装、agent 填值、后置脚本和流转判定都从同一 verified bundle 取得类型与 map 资产。pre-run map 的 context 从 admitted item values 开始；post-run map 在此基础上还能读取已验证的 agent 值。相同 definition ref、context 与脚本输出必须进入同一 map 实现，不能在 resume 或 restart 时扫描当前目录找到另一个版本。
-
-若 resolver 发现 map asset 缺失或损坏，沿既有 definition corrupt 语义拒绝或 hold；若 asset 完整但脚本启动失败、map 返回 Nothing 或谓词为 false，那是运行时结果，分别进入 #545 规定的异常或 fail/NIL 流程。两者不能都压成“map failed”。
-
-闭包内 context、填值驳回、map 中间结果与谓词求值属于函数域，不进入 daemon 的 ToolOutcome 或 GateEvaluation journal。对象域最终只观察 `returned(value) | exception`。
-
-### 7.3 Canonical value 与 prompt bytes 的 owner 链
-
-ValueType owner 输出 canonical value text；文档 renderer 读取 pinned DocRenderDeclaration，把文本放入声明的 label、prefix、suffix、style 与 blankBefore 结构。renderer 不重新解析 raw JSON，ValueType 也不携带任意 Markdown 布局。相同 ref、步骤、context 和 typed value 在 create、resume 与 restart 必须生成逐字节相同的 prompt 输入。
-
-unknown render declaration version、corrupt declaration或 unsupported style 在任何 worktree/process 副作用前产生 typed failure。多类型 item 经过 create、map、prompt、agent 填值和后置 map 的真实路径仍是 proof gap，不能由现有 renderer 的存在替代。
-
-## 8. Publish 与 create 分相，create 自身保持单事务
-
-artifact 必须先完整 publish，instance 才能引用它。先 publish、后写 DB ref，崩溃最多留下可由 GC 回收的完整 orphan；先写 DB 再补 bundle，会产生已经 committed 却无法解析的 instance。
-
-create 前，typed admission 已经得到 admitted item values，shared resolver 也已经证明 exact definition 可用。#546 提供对象域所需的合法初始 task/readiness 计划；该计划是运行时实例化输入，不是 #547 对完整未来任务树的编译结果。目标系统在一个 `BEGIN IMMEDIATE` 事务中写入 chain/item business row、tagged definition ref、admitted item values、初始对象域事实与 readiness，以及 transactional outbox row。commit 前 scheduler、status 和 dispatcher 都看不到半实例；commit 后 dispatcher 才能处理已经提交的 intent。
-
-create 前任何错误都导致零 business row。客户端若无法确认 commit 结果，恢复顺序是按 instance identity 查询 business row 与 outbox，再决定返回既有结果或安全重试，不能盲目再造一份对象结构或外部资源。
-
-## 9. Attempt 与 TransitionCommit 只持久化对象域事实
-
-### 9.1 ready、claimed 与 pre-spawn 资源准入
-
-事务提交后，scheduler 只从 #546 的 runtime readiness 选择 task。`ready` 经 revision/epoch 约束的 CAS 变为 `claimed`，并在同一权威步骤分配稳定 RunIntent 和 RunId。claim 是调度租约与身份分配，不是业务完成。
-
-只有依赖明确 run host 的资源准入留在 claim 之后、任何 worktree、closure 或 process 副作用之前。它检查 exact definition、runner provider 和本次资源前置条件是否能够兑现；它不是函数域检查面，不执行 preset 谓词，也不建立 GateEvaluation journal。暂时不可用时，instance 以同一 intent 进入 typed hold并释放 scheduler capacity；恢复后重用同一 identity 重新准入。
-
-### 9.2 Runner exit 是事实，TransitionCommit 才推进业务
-
-允许 spawn 后，process exit 先写成不可变 fact。闭包 runtime 按 pinned definition 完成五时态，并把最终结果收窄为 `returned(value) | exception`；该结果在 exact ValueType 边界验证后，才可构造 transition request。runner exit 本身不改写业务 readiness。
-
-TransitionCommit 是唯一业务推进 authority。它记录 from/to readiness、host identity、RunIntent/RunId、validated closure outcome 和幂等 identity；stale revision、foreign credential、错误host或重复提交在写入前得到穷尽结果。事务原子写入 transition、#546 派生的下一批对象域事实/readiness、effect intent 与 outbox row。event 只投影 authority，不能反向成为推进依据。
-
-外部 effect 只在 commit 后由 dispatcher 执行。明确结果可以按 TransitionId/effect identity 幂等确认；调用可能已经发生但结果无法证明时，进入 unknown-effect hold，等待外部证据或 operator 裁定，不能从日志猜成功，也不能无条件重试。
-
-### 9.3 Restart 从持久事实继续
-
-`claimed` 但没有 process fact 时，按同一 intent 重新执行 pre-spawn 资源准入；process 已 exit 而 transition 未 commit 时，从 exit fact 和 pinned definition 重建同一 transition request；transition 已 commit 而 outbox 未 dispatch 时，只恢复 dispatcher，不产生第二次 readiness。restart 的问题因此被压缩为“从哪条持久事实继续”，而不是猜测旧进程走到了哪里。
-
-## 10. H2 出现后，旧 instance 仍然只属于 H1
-
-item 创建时，business row、admitted item values、初始对象域事实和 readiness 在同一事务中引用 H1 definition ref。daemon restart 后，shared resolver 读取 H1 verified bundle；prompt renderer、map runtime、填值 parser、谓词与后继声明都来自 H1。H2 只进入 current compile 接口，并只影响随后创建且显式 pin H2 的 instance。
-
-status 分别展示 pinned ref 的完整性健康和 current source 的编译健康。operator 可以看见“current 已是 H2，旧 instance 仍 pin H1”，系统不因此自动 rebind。cache hit 返回 H1 verified content，cache miss 从 immutable store 重读 H1；digest mismatch 进入 corrupt hold；任何分支都不得尝试 current H2。
-
-pre-ref legacy 的边界更严格：没有证据证明历史 instance 使用哪个完整 definition，就永久不能声称可恢复。保留只读历史和明确 hold，比用当前 source 构造一份可运行但虚假的 definition 更可靠。
-
-## 11. Reject、Hold、Unsupported、Exception 与 Unknown 必须分开
-
-| 状态 | 发生条件 | 权威结果 | 对 instance / capacity 的影响 | 恢复条件 | 明确禁止 |
-|---|---|---|---|---|---|
-| Compile rejected | schema、唯一来源、签名或闭集存在结构矛盾 | rejected CompileEnvelope 与 diagnostics | 不产生 live definition | 修正 source 后以新 snapshot 编译 | 关闭严格模式放行结构矛盾 |
-| Strict-definition rejected | map 未补完/stale、值未消费等闭合 finding 尚存 | 同一 CompileEnvelope 的 findings | live create 零写 | 补完 definition 并重新编译/publish | 把 authoring 半成品投入运行 |
-| Admission rejected | create/update/batch 的具体 item 值不满足 pinned definition | typed field/path/expected/actual | create 零写；update/batch 零部分写 | caller 修正输入 | 先写 row、render 时补判 |
-| Dependency unsupported | ChainDefinition、对象域 runtime 等必需 provider 未交付或版本不兼容 | dependency identity 与 reason | new instance 拒绝；已有 instance 可见 hold | provider 提供兼容版本 | fallback、stub success、silent inert |
-| Definition corrupt / retiring | pinned bundle missing、digest/schema/kind 不匹配或正在退役 | exact ref 与 resolution reason | new resolve 拒绝；existing hold | 同一 identity 的 artifact 恢复可验证 | current source 重编译替代 |
-| Resource held | claimed 后的 runner/host/资源前置条件暂不可用 | RunIntent、reason 与持久 hold | 保留同一 intent，释放 capacity | 条件恢复后重新准入 | 分配第二 RunId、伪装 spawn failure |
-| Runtime exception | 脚本异常、map Nothing 未被 fail/NIL 消费、runner 崩溃等 | 闭包 `exception` | 由 #546 的对象结构消费或停止 | 按声明产生新的前向处理 | 伪造成业务返回 tag |
-| Unknown effect held | 外部调用可能发生但结果不可证明 | Transition/effect identity 与 unknown fact | 不重复业务推进 | 可验证外部事实或 operator 裁定 | 从 event 猜成功、无条件 retry |
-| Legacy-definition-unproven | 历史 instance 没有可验证 definition | legacy 标记与只读历史 | 禁止 resume/schedule/mutation | 取得真实历史 artifact | 用 repository/current source 伪造 ref |
-
-统一判据是：当前边界信息充分且输入无效时 reject；合法 existing instance 被可恢复的完整性、provider 或资源条件阻断时 hold；声明所需实现根本不存在时 unsupported；闭包运行已经发生且没有正常返回时 exception；外部 effect 的事实无法确定时 unknown。它们不能共享一个“失败”字符串。
-
-## 12. 单一类型权威同时移除隐藏业务原语
-
-current engine 仍包含多套 GitHub 语义：CLI 使用 `--issue`，部分 wire 归一化 `owner/repo#id`，batch 兼容路径回填 issue/issueNumber，repository 物理列与 forge 格式参与 chain 身份，省略 preset 还可能触发内置 default。不同入口对同一字符串应用不同转换，typed admission 就不可能成为唯一权威。
-
-目标在一个可消费 breaking checkpoint 中移除 engine-owned GitHub notation、alias、normalize、repository selector、git inference 与 default preset fallback。合法 preset 仍可拥有名为 issue 或 repository 的业务值；清理必须按 ownership 与 API surface 区分 engine 原语和 preset domain，不能用全文字符串删除业务模型。
-
-repository 迁入 typed business binding 后，不参与 chain selector、definition content identity 或 local worktree identity。明确需要远端 repository 的 adapter 按需读取该值；缺失只阻断该 operation。baseBranch 继续作为引擎真实消费的 typed ChainDefinition 输入，不是 repository 物理列的替身。
-
-新 item 显式 pin PresetDefinitionRef；省略或 null 不落到 default，legacy null 不隐式 rebind，empty chain 不需要虚构代表 preset，mixed chain 不能任选一个 item 的 preset 解释全链。真实 v14 数据中 15 个 chain 均为 repository column-only，未发现 column/binding 冲突，因此值可以迁入 business binding并保留 69 个 item、932 个 run、baseBranch 和资源关联；这项 shape migration仍不能制造 historical definition 证据。
-
-## 13. #547 明确不实现什么
-
-#547 不把整个 preset 改写为代码载体，也不把内部 ArkType 表达式当作公共类型语言。prompt、类型与路由声明仍是 declarative assets；生成的 TypeScript map 文件只是 definition 中承载外部值提升的函数资产。
-
-脚本的扫描、发现、import 装配和运行时注入属于纯 TypeScript 工程事务，不是 RFC 抽象面。RFC 规定 map 的来源、签名、时态、identity、bundle 归属与缺失语义，不规定目录遍历算法、glob、barrel import 或 loader 实现。
-
-#547 不定义 task algebra、await、join、异常传播或对象域派生规则；这些属于 #546。它不定义 agent 填值交互、fail/NIL 配置级联的完整 ADT 或五时态 executor；这些属于 #545。它不实现 hook、GUI 或 remote adapter；#543、#544、#548 只消费本篇发布的 typed projection 与 definition ref。
-
-worktree 起点、branch 命名、resource pin、回收和 publication sampling仍是 engine 原生机制，不进入 preset 值语言。历史 pre-ref instance 也不会被“兼容修复”；没有真实 definition 证据时，永久 hold 是事实边界。
-
-## 14. Current、Target、Dependency 与 Proof 对账
-
-### 14.1 Current 可复用资产及其证明边界
-
-| Current 资产 | 可以复用 | 不能据此证明 |
-|---|---|---|
-| canonical compiler、compiled/rejected 骨架、source hash、projection | 单一编译入口与 identity 素材 | findings 同源、双面闭合、严格执行资格 |
-| source/binding tagged union、unknown-first boundary、JSON-safe store | candidate parsing 与 provenance 形状 | recursive ValueType、唯一来源、Just/Nothing 管道 |
-| doc declaration 与 production renderer | prompt 布局的单一 consumer 基础 | typed context 输入、map 生成、resume 字节一致 |
-| tagged definition ref/FK、source hash | attribution 与引用形状 | definition content、shared resolver、H1 restart |
-| WAL、BEGIN IMMEDIATE、migration/outbox 基础 | 原子 create 与 TransitionCommit 的工程地基 | 当前业务动作已单 commit、effect 已可恢复 |
-| runtime leaf/seq/par/join ADT 与 SQLite 约束 | #546 对象域持久化素材 | 编译期完整运行树、production scheduler 已以它为权威 |
-| opaque item 主体、per-item preset、baseBranch/closure 资源 | 去隐藏原语与资源恢复素材 | typed business binding 已贯穿所有入口 |
-
-### 14.2 Target 保证
-
-目标完成后，同一 source snapshot 与 contract version只有一个 CompileEnvelope；每个值有唯一 item、map 或 agent source；CLI 能从类型定义生成并校验对应时态的 map 骨架；来源面、消费面、谓词槽与后继闭集在严格执行前闭合；完整 definition 连同 map 资产不可变 publish并按 ref resolve；item 值在 create/update/batch 最早边界准入；运行时五时态只消费 pinned 类型与 map；create 和 TransitionCommit 各自在自己的事务中形成唯一 authority；restart 不读取 H2；engine 不再通过 GitHub notation、repository selector 或 default preset 猜业务含义。
-
-这些保证可以分阶段交付，但任何启用路径都不能绕过 CompileEnvelope、definition ref、typed boundary 或 committed fact。旧 R12 的 unit 数量与零批次结论建立在已经删除的 tool/gate 划分上，不再作为当前 source-ready 判断；新的 implementation split 必须按本篇重写后的 producer、consumer 和 proof 重新建立。
-
-### 14.3 具名 Dependency
-
-- **independent schema consumer**：在本仓之外真实消费公共 schema；缺席不阻断 producer，但保留 cross-owner proof gap。
-- **typed ChainDefinition provider**：唯一拥有 ChainDefinition ADT、parser、version 与 error；#547 只消费 verified ref/payload，不复制 parser。
-- **#546 对象域 runtime**：提供合法初始 task/readiness 计划、ready/claimed 语义与 TransitionCommit 后的对象域派生；#547 不编译完整运行树。
-- **#545 函数域 context runtime**：执行五时态、agent 填值修正、map 调用、谓词与 fail/NIL；#547 提供其唯一类型和 pinned definition 输入。
-
-### 14.4 Proof Gap
-
-仍需真实路径证明：CompileEnvelope 的 findings 在 CLI、doctor、status 与 GUI projection 中同源；map 骨架生成确定、上下文注释正确、类型变化能识别 staleness；普通与严格模式对同一 finding 给出规定结果；多种 ValueType 经过 create、pre-map、prompt、agent、post-map 和 transition；H1/H2 restart/resume 不漂移；publish 每个崩溃窗口、GC竞争和 map asset corrupt 都按 ref 收敛；create reply-loss 与 batch/update 零写成立；pre-spawn 资源 hold 重用同一 RunIntent；TransitionCommit、outbox 和 unknown effect 在 fault injection 下不重复推进；repository present/missing 与 v14 migration 保持边界；冻结候选 SHA 上的 integration 与 compatibility real E2E 仍需单独执行。
-
-proof 未完成不自动说明 producer 不存在；反过来，存在 schema、表、renderer 或生成文件也不能证明整条值管道已经运行。每项实现 issue 必须直接触发自己新增的 producer 与 consumer，不能用静态类型检查替代运行结果。
-
-## 15. 结论
-
-沿一个 H1 item 的生命周期重新看，类型定义与 prompt 先产生可生成的 map 需求；作者补完骨架后，严格 CompileEnvelope 证明声明闭合、签名匹配和管道可达；compiled product 连同 map 资产发布为 immutable definition；item source 在 create 前准入，单事务写入 pinned ref 与初始对象域事实；closure 运行时只使用 H1 的类型、prompt 和 map，把五时态最终折叠成 `returned(value) | exception`；TransitionCommit 再成为唯一业务推进；restart 只从 verified H1 和持久对象域事实继续。
-
-这条链保留了旧 RFC 最可靠的定义冻结、事务和恢复纪律，同时删除了把函数域时态写入 daemon journal 的补偿机制。#547 的价值不在于声称运行必定成功，而在于让系统能够在运行前证明一条合法值路径存在，并在运行时确保所有实际值都只能沿这条被 pin 的路径产生、提升、消费和交付。
+来源：record-3 第 12、19 轮；division-plan.md“面 1—3”；旧 547 第 13 节中仍符合新边界的非目标。
 <!-- 548 -->
 
 # RFC #548：外部调用与执行终端的能力、现状与设计理由
