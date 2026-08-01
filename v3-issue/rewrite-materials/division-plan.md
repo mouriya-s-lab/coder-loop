@@ -1,104 +1,104 @@
-# v3 RFC 新划分方案（主 session 起草，v2，经第一轮对抗修订）
+# v3 RFC 新划分方案（主 session 起草，v3，经两轮对抗修订）
 
-状态：v2。v1 经 codex 对抗审读后由主 session 逐条裁决修订而成（裁决记录见文末）。仍需至少一轮对抗后才定稿。定稿前不据此改 A.md 正文。
+状态：v3。v1→v2 经第一轮对抗裁决，v2→v3 经第二轮对抗裁决（六条残余异议全部接受，记录见文末）。待第三轮轻量复核后定稿。定稿前不据此改 A.md 正文。
+
+## 权威标注纪律（本文件自身即遵守）
+
+每条规范性陈述标注四元组【等级 | 位置 | 状态】：
+- 等级：`操作员原话` / `record 收敛`（assistant 推导未被反驳）/ `主 session 裁决`（重写过程中的新决定）/ `旧 RFC 候选`（保留自 A.md 旧文、未经新模型重审）
+- 位置：record-N 段落或 A.md 章节
+- 状态：`已裁决`（操作员明确说过）/ `未反驳`（推导且操作员未反对）/ `待复核`（进入对应面的重写对抗轮清单）
+混合来源必须拆开标注。`旧 RFC 候选` 只是 provenance，不自成权威。
 
 ## 划分依据
 
-划分取设计模型自身的接缝，不沿袭旧 543-548 六篇：
+1. **定义态 / 运行态**【record 收敛 | record-3 第 13/15 轮 | 未反驳】
+2. **函数域 / 对象域**，只经针眼相接【操作员语义 + record 收敛 | record-3 第 15 轮"所有机制都是闭包内的，和任务调度完全无关" | 已裁决】
+3. **入站 / 出站**：外部工作注入与外部执行终端方向相反、状态机不同，各自成面【主 session 裁决（采纳 codex 第一轮异议）| — | 未反驳】
+4. **主流转 / 旁路**：hook、GUI 不拥有主流转裁决权【操作员原话 | record-3 第 18 轮 | 已裁决】
 
-1. **定义态 / 运行态**：编译期可判的声明文本与运行时才存在的事实。
-2. **函数域 / 对象域**：闭包内严格串行五时态与任务间真并发代数，只经针眼相接。
-3. **入站 / 出站**：外部工作注入引擎（入站）与引擎调用外部执行终端（出站）方向相反、状态机不同，各自成面。
-4. **主流转 / 旁路**：拥有流转裁决权的机制与不拥有的观测/旁路（hook、GUI），后者不与前者同面。
-
-核心纪律（取代 v1 的线性依赖链）：**每个事实和决策只有一个 owner 面；其他面只能消费其 typed 合同，不得复制 parser、状态机或权威记录。** 权威方向单向；需求流向可以双向（设计某面时考虑消费方场景不构成权威反向）。
+核心纪律：**每个事实和决策只有一个 owner 面；其他面只消费其 typed 合同，不得复制 parser、状态机或权威记录。权威方向单向；需求流向可以双向。**【主 session 裁决（采纳 codex 第一轮替代案表述）】
 
 ## 面 0：公共设计模型（总纲）
 
-- **管**：纯函数化公理（两提升口、self-report/measurement 信任压缩、副作用丢弃语义）；双域对偶与针眼；五时态与 context 单调累积**概览**；两层校验的**形态区分**（parser vs 带异常 map 的子函数——公理级，执行协议归面 2）；异常时态归属**规则**（逐时态展开表归面 2）；编译期/运行时精确边界；**分形交接形状**（步骤与 task 共用同一交接合同形状、一份文法两个作用域、持久性差异：任务层日志承诺可恢复 / 步骤层现场可蒸发——record-2 收敛，v1 重大遗漏，本版补入）；公共词汇。
-- **不管**：任何面的完整机制细节与执行协议。
-- **权威标注纪律**：总纲中凡非操作员原话的内容（如 preset 术语张力观察、同名值唯一来源推导）逐条标注"主 session 推导"。
-- **现状**：草稿已 commit（c35d44b），欠至少一轮修订；已知问题：四点审读意见 + 0.9 节整节删除（重写约束移入本文件，见裁决 16）+ 分形形状补入。
+- 纯函数化公理（两提升口、信任压缩、副作用丢弃）【操作员原话 | record-3 第 16 轮 | 已裁决】
+- 双域对偶与针眼【操作员语义 | record-3 第 15/16 轮 | 已裁决】
+- 五时态与 context 单调累积**概览**【操作员原话 | record-3 第 6/11 轮 | 已裁决；"概览归总纲、执行协议归面 2"为主 session 裁决】
+- 两层校验**形态区分**（parser vs 带异常 map 子函数）【操作员原话 | record-3 第 11 轮 | 已裁决】
+- 异常时态归属**规则**【操作员原话 | record-3 第 14 轮 | 已裁决；逐时态展开表归面 2】
+- 编译期/运行时精确边界（可达性证明 ≠ 运行结果）【record 收敛 | record-1 末段 + record-3 第 3 轮 | 未反驳】
+- 分形交接形状：步骤与 task 共用交接合同形状【操作员原话 | record-2 末轮"leaf和步骤都存在交接……只是打包的值不同" | 已裁决】；"一份文法两个作用域"与持久性差异（任务层日志承诺/步骤层可蒸发）【record 收敛 | record-2 末轮 assistant 推导 | 未反驳】
+- 公共词汇；preset 术语张力【主 session 推导（对操作员用法的观察）| record-3 第 7 轮 | 待操作员裁决】
+- 现状：草稿 c35d44b 欠修订轮；修订输入=四点审读意见 + 0.9 整节删除 + 分形形状补入 + 本标注纪律。
 
 ## 面 1：定义态——preset 定义资产、代码生成与编译面
 
-- **管**：
-  - preset 三面一体定义资产：类型定义、prompt md、各时态 map 骨架文件；"map 不写完 = preset 没写完"；CLI 生成骨架、注释枚举该时态可用 context、staleness 即失配。
-  - **两层交接契约的声明位**（分形之下，步骤交接与 task 交接同一文法、两个作用域，声明位都在此面；运行语义分别归面 2 与面 3）。
-  - 双面闭合检查：来源面（每值唯一来源 item|map|agent）、消费面（占位符/谓词/路由读取）、谓词槽与后继闭集穷尽；finding 警告/严格两档。谓词槽在此面只有**语法形状**，求值语义归面 2（概念定义共同来自面 0）。
-  - 定义冻结与取回：CompileEnvelope、identity 分域、不可变 publish、pin、resolver、corrupt/retiring/GC、legacy-unproven、H1/H2 restart。【权威等级：旧 547 保留内容，操作员未点名批评；细节形状（三 identity、GC 状态机）非新模型推导，保留时标注】
-  - 两个保证："编译面正常工作"= 双面闭合+穷尽检查是编译期可判的可达性证明；"运行时有对应内容"= map 资产随 pin 进 bundle、resolver 取回、缺失/损坏走 corrupt/hold。
-- **非目标节点名**：脚本的扫描、发现、注入是纯 TS 工程事务（操作员原话）。
-- **对应旧篇**：547 主体改写；删 tool/gate 协议与 journal；543 具名 gate 绑定随 gate 概念删除。
+- 三面一体定义资产、map 骨架生成、注释枚举 context、"map 不写完=preset 没写完"、staleness 即失配【操作员原话 | record-3 第 4/5 轮 | 已裁决】
+- 两层交接契约的**声明位**（步骤/任务同一文法，声明位在此；运行语义归面 2/面 3）【主 session 裁决（承接分形公理）| — | 待复核】
+- 双面闭合检查、警告/严格两档【操作员原话 | record-3 第 4 轮 | 已裁决】；谓词槽语法形状在此、求值语义面 2、概念面 0【主 session 裁决 | — | 未反驳】
+- 定义冻结与取回（CompileEnvelope、identity 分域、publish、pin、resolver、corrupt/GC、legacy-unproven、H1/H2 restart）【旧 RFC 候选 | A.md 旧 547 §2/§3/§8 | 待复核——goal"保留没问题部分"覆盖，细节形状面 1 重写对抗轮复核】
+- 两个保证的正面表述（编译面正常工作=可达性证明；运行时有对应内容=map 资产随 pin+resolver 取回）【主 session 归纳（操作员点名的两个待设计面的落点）| record-3 第 19 轮 goal 原文 | 未反驳】
+- 非目标：脚本扫描/发现/注入=纯 TS 工程事务【操作员原话 | goal 原文 | 已裁决】
 
 ## 面 2：函数域运行时——闭包执行语义
 
-- **管**：
-  - 五时态执行协议：前置脚本 map 求值（Just/Nothing）、prompt 组装、agent 时态填值循环与出口校验（CLI 驳回报错）、后置脚本、流转判定（纯谓词一次求值）。
-  - 两层校验的执行协议（形态区分在面 0）。
-  - 检查面/路由面正交；特殊 context 值与引擎可接管判据；"下一个 preset"n 三分；n=0 即闭包交付（交付物如何被消费归面 3——针眼两侧分工，非循环依赖）。
-  - fail/NIL 的**闭包内机制**：fail 特殊步骤、NIL 默认实现、级联**查询协议**（查 operator 全局配置）。级联中涉及任务/组/item 层的**策略执行**归面 3（裁决 2：级联跨域拆分）。纯程序节点（与 agent 节点共用合同）。
-  - 异常时态归属的逐时态展开表。
-  - runner provider：仅一节，陈述其为纯函数调用的实现细节（操作员原话"这并不重要"）+ v2 四漏气孔（epilogue 常量、地址代值、隐式 env、session 身份错位）的封堵方向；provider 合同本体归面 5，adapter 工程设计是纯 TS 事务不入 RFC。
-- **对应旧篇**：545 重写为 typed 提升口（旧 opaque append/read 通道**从核心删除**，不再占用 context 一词——裁决 11/悬置 3，codex 立场被采纳）；547 的 D2/D6 值渲染收编；543 的 post-exit gate 判定由流转校验取代。
+- 五时态执行协议、两层校验执行协议、检查/路由正交、特殊 context 值与 n 三分、纯程序节点、异常归属展开表【操作员原话 | record-3 第 6-11/14 轮 | 已裁决】
+- n=0 即闭包交付；交付的消费归面 3（针眼两侧分工）【主 session 裁决 | — | 经 codex 第二轮验证通过】
+- fail 的闭包内机制：fail 特殊步骤、NIL 默认实现【操作员原话 | record-3 第 10 轮 | 已裁决】；**步骤级动作执行 + 无法在步骤层消化时发出 typed escalation**，级联的 policy ADT/evaluator 归面 3【主 session 裁决（采纳 codex 第二轮方案，消除闭包退出后查询真空）| — | 待复核】
+- 漏气孔归属拆分【主 session 裁决（codex 第二轮异议 2）】：epilogue 常量、地址代值 → 本面（函数输入与值管道）；隐式 env/sandbox、session 身份 → 面 5（provider 合同）。四漏气孔事实本身【record 收敛 | record-3 第 17 轮 subagent 对 v2 代码的调查 | 未反驳】
+- provider 仅一节：纯函数调用实现细节的陈述【操作员原话"这并不重要" | record-3 第 17 轮 | 已裁决】，合同本体归面 5
+- 旧 545 opaque append/read 通道从核心删除、不占 context 词【主 session 裁决（采纳 codex 第一轮悬置 3 立场）| — | 待复核】；agent 填值=typed 提升口【操作员原话 | record-3 第 3 轮 | 已裁决】
 
 ## 面 3：对象域——任务代数与调度
 
-- **管**：
-  - 三域切分、动词表（spawn/commit/admit/release/await）、节点消费群组（seq=大小 1 退化）、前向单调、异常作为落定值、dependsOn 布尔门、动态追加（位置+时机入链；**重新锚定=提议方对开放前沿的重新声称、引擎只判不选**，不是引擎自动搬动——裁决 13 表述修正）、群组结束=消费+可选等待窗口（出处：record-2 操作员原话"可以用可选的等待时间例如六十秒主动等待"；期满入日志）、finalizer 是普通 task。【权威等级：动词表与 await 是 record-1 讨论产物+旧 546 保留，非操作员逐字批准；作为草稿内容进入，重写对抗轮列为开放项复核】
-  - committed transition/锁/crash replay、事件前缀重建 frontier、唯一活 run。
-  - 闭包资源合同、GC 消费谓词、publication 四值证据、residue 对账。
-  - fail 级联中任务/组/item 层的**策略执行语义**（承接面 2 的查询协议）。
-  - 升层消费：n=0 步骤耗尽的交付如何进入任务层交接；await 不构成第二跨域通道的论证。
-  - 通用 held 消费规则：面 5 产生的 endpoint 缺席等事实以 typed held 状态进入本面调度处置（本面不知道 endpoint 细节——裁决 15/悬置 2，codex 立场被采纳）。
-  - 迁移：v2 slot 串行是资源限制非业务 seq。
-- **对应旧篇**：546 主体保留 + record-1/2 增量；删"预编译完整运行树"叙事。
+- 三域、前向单调、异常作为落定值、群组消费（seq=大小 1 退化）、dependsOn 布尔门【操作员语义 + record 收敛 | record-1/record-2 | 部分已裁决部分未反驳，重写轮逐条标】
+- 动词表（spawn/commit/admit/release/await）【record 收敛 + 旧 RFC 候选 | record-1 清单轮 + A.md 旧 546 | 待复核——面 3 重写对抗轮开放项】
+- 动态追加：位置+时机入链【操作员原话 | record-1 末段 | 已裁决】；重新锚定=提议方对开放前沿的重新声称、引擎只判不选【操作员原话 | record-2 3:09 段 | 已裁决，经 codex 第二轮验证】
+- **admit 协议**：含开放前沿查询（判定副产品）、typed 拒绝结果、重新声称的提交方式；内部派生方经面 2 声明通道携带声称、外部调用方经面 4 携带——同一端口两类调用者【操作员语义 + record 收敛 | record-2 3:04 段"当前还开着的合法位置" + record-1"唯一的准入端口,两类调用者" | 未反驳；协议 owner 落此面为主 session 裁决（codex 第二轮异议 5）】
+- 群组结束=消费+可选等待窗口，三级拆标【codex 第二轮异议 1 采纳】：可选等待时间（如六十秒）【操作员原话 | record-2 3:06 段 | 已裁决】；期满作为事件入日志【record 收敛 | record-2 assistant 推导 | 未反驳】；窗口重置/固定为声明参数【record 收敛 | record-2 | 待复核】
+- committed transition/锁/crash replay/唯一活 run、闭包资源合同、GC/publication、residue 对账【操作员语义 + 旧 RFC 候选 | record-1 + A.md 旧 546 §10-12 | 重写轮逐条标】
+- **fail 级联 policy owner**：级联配置 schema、policy ADT、evaluator、任务/组/item 层动作执行全归本面；消费面 2 的 typed escalation【主 session 裁决（codex 第二轮异议 4 方案）| 级联层级本身为操作员原话 record-3 第 10 轮 | 待复核】
+- 消费面 5 的**封闭事实 ADT**（非 generic held）：每 variant 唯一消费路径【主 session 裁决（codex 第二轮异议 3）| — | 待复核】
+- 升层消费、await 不构成第二跨域通道【主 session 推导 | record-2 末轮 + 本 session 裁决 6 | 未反驳】
+- 迁移：v2 slot 串行是资源限制非业务 seq【旧 RFC 候选+record 收敛 | A.md 旧 546 §15 | 未反驳】
 
 ## 面 4：外部工作注入（入站边界）
 
-- **管**：router/consumer/CLI 三层分权、into-chain/new-workspace、delivery/request/work 三 identity、幂等收敛、durable request record/query、CLI typed result ADT；schema 消费面 1 的类型权威；注入走面 3 admit 的位置+时机合同（消费不复制）。
-- **对应旧篇**：548 的入站部分保留；external-terminal 一章移出（归面 5）。
+- router/consumer/CLI 三层、into-chain/new-workspace、三 identity、幂等、durable request record、CLI typed result ADT【旧 RFC 候选 | A.md 旧 548 | 待复核——除 request record 外大部为操作员既有裁决（旧 548 记录的 D1-D11）】
+- schema 消费面 1 类型权威；注入的位置+时机声称经面 3 admit 协议提交（消费不复制）【主 session 裁决 | — | 未反驳】
 
 ## 面 5：runner provider 与执行边界（出站边界）
 
-- **管**：provider 合同（argv builder、model、session resume 方式、沙箱面的合同形状——不含 adapter 工程实现）；endpoint identity 与 probe 契约；缺席/恢复事实的产生（durable hold 事实的 producer，消费归面 3）；terminal 与 loss 的唯一 durable winner 排序。
-- **不管**：调度处置（面 3）；函数调用语义（面 2）。
-- **对应旧篇**：548 external-terminal 章收编改写；v2 runner 三目分派的现状描述。
-- 【裁决 15：与面 4 方向相反（出站 vs 入站）、状态机不同，独立成面——codex 替代案被采纳】
+- provider 合同形状：argv builder、model、session identity 与 resume、env/sandbox 面【主 session 裁决（自面 2/面 4 收编）| provider=实现细节为操作员原话 | 待复核】
+- endpoint identity 与 probe 契约、缺席/恢复事实产生、terminal/loss 唯一 durable winner【旧 RFC 候选 | A.md 旧 548 §9 | 待复核】
+- **输出封闭事实 ADT**：pre-spawn absence / active loss / terminal winner / unknown effect 等 variant 穷尽，每 variant 指定唯一消费者（面 3 调度处置或经正常针眼交付路径）；不输出 generic held【主 session 裁决（codex 第二轮异议 3 方案）| 旧 A.md 三态区分为旧 RFC 候选 | 待复核】
 
 ## 面 6：hook 执行（旁路脚本）
 
-- **管**：时态锚点（枚举来自时态结构）、operator 声明、不参与 context、不影响流转；subprocess primitive（spawn/超时/进程组回收/at-least-once——543 保留链）；触发与结局的审计记录。
-- **定位修正**（裁决 16）：hook 是 effectful subprocess runtime（spawn 进程、写审计），不是"只读"；正确表述是**不拥有主流转裁决权、不产生领域 mutation 权威**。
-- **对应旧篇**：543 收缩（observer 语义并入，gate 全删）。
-- 【悬置 1 裁决：与 GUI 拆分——生命周期与权限模型不同，codex 立场被采纳】
+- 时态锚点、operator 声明、不参与 context、不影响流转【操作员原话 | record-3 第 18 轮 | 已裁决】
+- subprocess primitive（spawn/超时/进程组/at-least-once 恢复）与审计【旧 RFC 候选 | A.md 旧 543 §四/§五 | 待复核】
+- 定位：effectful subprocess runtime，不拥有主流转裁决权、不产生领域 mutation 权威（"只读"表述废除）【主 session 裁决（codex 第一轮异议 16）】
 
 ## 面 7：观测产品（GUI）
 
-- **管**：context 面 + 副作用面二分本体；分栏的有限运维动作面（daemon 生命周期/unblock/decision——观测与控制共享 identity 不共享权威）；544 交付纪律（进程独立、严格只读 reader、单 root、mesh-only、attempt artifact、SSE 生命周期）。
-- **定位**：不拥有主流转裁决权；"严格只读"限定于其 reader 数据面，控制面显式分栏（v1 "5 只读"的错误表述废除）。
-- **对应旧篇**：544 重心调整。
+- context 面+副作用面二分本体【操作员原话 | record-3 第 18 轮 | 已裁决】
+- 分栏有限控制面（生命周期/unblock/decision；共享 identity 不共享权威）【主 session 裁决 + 旧 RFC 候选 | record-3 裁决 5 + A.md 旧 544 §4 | 未反驳】
+- 544 交付纪律（进程独立、严格只读 reader、单 root、mesh-only、attempt artifact、SSE）【旧 RFC 候选 | A.md 旧 544 | 待复核】
+- 边界：只拥有呈现、transport 与交互结果，不拥有 hook 审计、调度状态或 mutation 合法性的解释权【主 session 裁决（codex 第二轮表述）】
 
-## 重写约束（自总纲 0.9 移入，随划分定稿生效）
+## 重写约束（随划分定稿生效）
 
-各面重写时：删除与面 0 冲突的旧机制；保留仍在新边界内成立的证据、资源与恢复合同；旧 543-548 编号与新面的映射表在收尾轮统一落一处；凡非操作员原话的设计内容标注权威等级（操作员原话 / record 收敛 / 主 session 推导 / 旧 RFC 保留）。
+各面重写：删除与面 0 冲突的旧机制；保留新边界内成立的证据/资源/恢复合同；规范性陈述按本文件标注纪律执行四元组；旧 543-548 与新八面的映射表收尾轮统一落一处。
 
-## v1→v2 裁决记录（对 codex 第一轮异议）
+## v2→v3 裁决记录（对 codex 第二轮六条残余异议）
 
-| # | codex 异议 | 裁决 |
+| # | 异议 | 裁决 |
 |---|---|---|
-| 1 | 五时态规则总纲/面2重复 | 接受：总纲概览+公理，面2执行协议 |
-| 2 | fail 级联跨对象层级塞面2 | 接受：面2查询协议、面3策略执行 |
-| 3 | preset 术语开放项无出处 | 接受：标注主 session 推导 |
-| 4 | 遗漏分形交接形状与持久性差异 | 接受：面0补入，声明位面1、两侧语义面2/面3 |
-| 5 | 547 细项无操作员出处 | 部分接受：保留（goal=保留没问题部分），标注权威等级 |
-| 6 | 遗漏 task 交接合同声明位 | 接受：面1补入 |
-| 7 | 谓词槽 1↔2 依赖 | 接受表述修正：语法面1、语义面2、概念面0 |
-| 8 | provider 不应为正面机制 | 部分接受：面2仅一节陈述，合同本体归面5 |
-| 10 | n=0 依赖面3 | 反驳为针眼两侧正常分工，表述已修 |
-| 11 | 545 归属先于存废写死 | 接受：旧通道从核心删除，不占 context 词 |
-| 12 | 五动词/await 无可靠出处 | 部分接受：保留+权威等级标注+列为对抗开放项 |
-| 13 | 重新锚定过宽 | 反驳误读+接受表述修正：提议方声称、引擎只判 |
-| 14 | 等待窗口无出处 | 反驳：record-2 操作员原话"可选的等待时间例如六十秒" |
-| 15 | 入站/出站合并不成立 | 接受：拆面4/面5 |
-| 16 | "面5只读"不成立；hook/GUI 拆分；重写约束移出总纲 | 全部接受 |
+| 1 | 等待窗口权威混标 | 接受：拆三级（原话/推导/待复核参数），面 3 已执行 |
+| 2 | provider 合同双 owner | 接受：漏气孔按归属拆——epilogue/地址代值归面 2，env/sandbox/session 身份归面 5 |
+| 3 | active loss 映射缺失、generic held 过宽 | 接受：面 5 输出封闭事实 ADT、逐 variant 唯一消费者；面 3 消费 ADT 非 generic held |
+| 4 | fail 级联无单一 policy owner | 接受：面 2 执行步骤级动作+发 typed escalation；面 3 拥有配置 schema/policy ADT/evaluator/对象层动作 |
+| 5 | 重新声称协议 owner 未闭合 | 接受：admit 协议（含开放前沿查询/拒绝/重新声称）归面 3，面 2/面 4 为两类调用者的携带通道 |
+| 6 | 权威标注纪律不足且未自身执行 | 接受：升级为四元组【等级\|位置\|状态】，本文件 v3 自身逐条执行 |
+
+第一轮裁决记录（v1→v2）见 git 历史 3695a61。
