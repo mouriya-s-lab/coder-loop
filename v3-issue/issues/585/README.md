@@ -1,0 +1,129 @@
+# #585 docs(v3): GUI 网关收尾对齐——红线审计与文档终态
+
+- state: **closed**  | author: `RiriAgent`  | created: 2026-07-02T12:02:31Z  | updated: 2026-07-17T20:41:41Z
+- closed: 2026-07-17T20:41:41Z  | state_reason: `not_planned`
+- labels: (none)
+- url: https://github.com/mouriya-s-lab/coder-loop/issues/585
+- comments: 2  | timeline events: 19
+
+---
+
+## Body
+
+## 必须先读的关联 issue
+
+#544（RFC: v3 可观测性 API 与 Web GUI）。继承条款逐字快照：
+
+> "引擎红线不破｜grep 引擎与网关代码｜网关无 SQLite 写路径；引擎无 GUI 字面量/反向依赖；#411 禁令措辞对非网关消费者保持" — #544 关闭验证行 10
+
+> "**豁免声明**：#411「消费者从此不刮 runtime 文件」禁令对网关一家豁免（同仓同版本演进的特许消费者），对 supervisor/agent/脚本等其他消费者禁令不变" — #544 裁决记录 B
+
+> "#411 的「消费者不刮 runtime 文件」禁令对网关之外的一切消费者继续有效；events 直读豁免仅限同仓网关。" — #544 约束
+
+## 目标
+
+GUI 网关落地后的文档与红线终态对齐：豁免边界成文、运维路径成文、row 10 三项审计以可复跑形态通过。
+
+## 使用场景
+
+收尾对齐 child，gate 在全部结构性 children（#572–#584）之后：headless 读者（后续 agent/操作员）从 CLAUDE.md 与 docs 拿到的网关事实与代码实态一致，无 drift。
+
+## 上下文
+
+Repo `mouriya-s-lab/coder-loop`，基线 main@b92ddaa（2026-07-02 核实）。
+
+- #411 禁令措辞现存位置（2026-07-02 grep 核实，docs/ 下无其他命中）：`CLAUDE.md:44`（"stable read-only JSON API for supervisor/scripts; do not scrape runtime files first"）与 `CLAUDE.md:115`（"不要把 runtime 文件、events JSONL、agent `status.json`、旧 `.dev-loop` 当作第一层契约来 scrape……"）——两处措辞在网关落地后字面上与「网关直读 events JSONL」矛盾，须按 B 裁决把豁免边界写清（网关一家、同仓同版本演进），其余消费者禁令原文力度不变。
+- 运维文档缺口：网关启动/停止命令、mesh 访问方式、与 `daemon-restart-after-app-update` 规则的关系（GUI 一键重启是该规则的新履约路径）——`.claude/rules/daemon-restart-after-app-update.rule.md` 与 CLAUDE.md Commands 节是承载位。
+- 收尾纪律（writing-complex-issues child 类型定义）："文档 drift 是一等偏离；计数类内容改为从代码派生 + 测试守护——手写计数必然再 drift"——文档中如出现事件类型数、命令数等计数，从代码派生或不写。
+
+## 问题
+
+结构性 children 各自交付代码与局部验证，但三类全局终态没有 owner：(a) row 10 的跨代码库红线审计是全局性质，不属任何单一功能 child；(b) B 裁决豁免只存在于 issue body，CLAUDE.md 禁令原文未更新则每个未来读者都会把网关判为违例（或反向：把豁免误读为普遍放开）；(c) 网关运维路径无文档，`daemon-restart-after-app-update` 的 GUI 履约路径无人知晓。
+
+## 预期结果
+
+性质表述：
+
+1. **row 10 审计通过且可复跑**：三项检查（网关无 SQLite 写路径；引擎无 GUI 字面量/反向依赖——`src/` 不 import 网关代码、无网关概念字面量；#411 禁令措辞对非网关消费者力度不变）各有具体 grep/检查命令记录于 PR body，任何人可逐字重跑。
+2. **豁免边界成文且枚举完整**：CLAUDE.md 禁令处更新为「禁令 + 网关唯一豁免及其条件（同仓同版本演进）」，并枚举网关实际存在的全部文件直读面——events JSONL 直读（B 裁决本体）、run 目录 prompt 快照产物（#572 为 GUI 消费而生的产物，#581 读取）、daemon.pid/daemon.sock 三证探针（#578，#544 架构节明文）；豁免不延伸到 SQLite 直写与其他 runtime 文件。替换式改写（no-legacy），不留新旧并存。
+3. **运维成文**：网关启动/停止/访问在 CLAUDE.md Commands 节登记；`daemon-restart-after-app-update` 规则补 GUI 履约路径。
+4. **文档无 drift**：文档所述命令逐条真实可跑；计数从代码派生或不写。
+
+## 不应残留
+
+- 本 child 范围内：文档中的旧禁令原文与豁免并存的叠层批注；文档描述与代码实态不一致的任何残句。
+- 范围之外不动：任何生产代码行为（本 child 是 docs + 审计，发现代码问题回对应 child 或新 issue，不顺手修）。
+
+## 约束
+
+- 文档改写遵守 no-legacy 纪律：改结论用新内容替换旧内容，版本历史归 git。
+- 本 child gate 在 #572–#584 全部落地之后（审计对象是终态不是中间态）。
+
+## 本 issue 的验证边界
+
+- **验证层级**：文档/残留守护；运行文档中列出的静态一致性检查与相关测试守护。
+- **本 issue 必须证明**：文档只描述已经落地且有 owner 的行为，旧术语/旧路径按正文清单退场，命令与 schema 引用可由当前代码验证。
+- **不在本 issue 内执行**：不运行 v3 整链路 integration，也不运行 bundled preset compatibility real E2E。若审计发现产品行为缺口，回到对应 implementation issue；合流证明分别归 #684/#685。
+- **现有 GitHub real E2E**：本 issue 不运行 `bun scripts/real-e2e.ts`；该 compatibility 验证只由 #685 在冻结发布候选 SHA 上执行。
+## 验收标准
+
+| Dimension | Check | Command | Env | Expect |
+|---|---|---|---|---|
+| function | 网关零 SQLite 写 | PR body 记录的 grep 命令（写 API 调用面盘点） | 本机 | 零命中；命令可复跑 |
+| function | 引擎无反向依赖 | `grep` `src/` 对网关目录的 import 与网关概念字面量 | 本机 | 零命中 |
+| function | 禁令措辞终态 | 阅读 CLAUDE.md 两处禁令 + `grep` 全仓禁令相关表述 | 本机 | 豁免边界成文、仅网关一家、其余消费者力度不变、无叠层批注 |
+| assumption | 文档命令真实 | 逐条执行文档新增的网关命令 | operator Mac | 全部按文档行为工作 |
+| environment | 不回归 | `bun run typecheck && bun test` | 本机 | 全绿 |
+
+## 依赖关系
+
+- Depends on: #575、#581、#582、#583、#584（依赖图各终端 child；经传递闭包覆盖 #572–#584 全部）。
+- Blocks: 无——本 child 是 #544 关闭验证前的最后一环。
+
+
+---
+
+## Comments (2)
+
+### comment #4866585730 by `RiriAgent` — 2026-07-02T14:02:33Z
+
+## 架构切片
+
+1. **系统定位**：收尾对齐件——文档域与代码终态的一致性审计；不产生运行行为。
+2. **全局坐标**：代码实态域 → 文档域（CLAUDE.md / rules）；豁免边界成文是把 issue 裁决投影到文档域。
+3. **类型↔值不漂移**：防值漂移——文档手写计数/命令与代码 drift；从代码派生或可复跑封死。
+4. **消除的错误类别**：「未来读者把网关文件直读判为违例，或把豁免误读为普遍放开」不可表达（豁免面枚举成文）。
+
+## log/观测义务
+
+无运行期义务；审计命令记录于 PR body。
+
+
+### comment #5007302626 by `RiriAgent` — 2026-07-17T20:41:40Z
+
+重新拆分后由 #729 承接冻结 SHA 综合验收。旧 issue 无关联 PR，关闭。
+
+
+---
+
+## Timeline (19)
+
+- 2026-07-02T12:02:31Z `assigned` @RiriAgent
+- 2026-07-02T12:02:50Z `cross-referenced` @RiriAgentsrc=575
+- 2026-07-02T12:02:58Z `cross-referenced` @RiriAgentsrc=581
+- 2026-07-02T12:02:59Z `cross-referenced` @RiriAgentsrc=582
+- 2026-07-02T12:03:01Z `cross-referenced` @RiriAgentsrc=583
+- 2026-07-02T12:03:02Z `cross-referenced` @RiriAgentsrc=584
+- 2026-07-02T14:02:04Z `parent_issue_added` @RiriAgent
+- 2026-07-02T14:02:33Z `commented` @RiriAgent
+- 2026-07-02T14:02:40Z `cross-referenced` @RiriAgentsrc=544
+- 2026-07-17T20:36:31Z `cross-referenced` @RiriAgentsrc=716
+- 2026-07-17T20:36:38Z `cross-referenced` @RiriAgentsrc=719
+- 2026-07-17T20:36:48Z `cross-referenced` @RiriAgentsrc=724
+- 2026-07-17T20:36:51Z `cross-referenced` @RiriAgentsrc=725
+- 2026-07-17T20:36:53Z `cross-referenced` @RiriAgentsrc=726
+- 2026-07-17T20:36:55Z `cross-referenced` @RiriAgentsrc=727
+- 2026-07-17T20:36:57Z `cross-referenced` @RiriAgentsrc=728
+- 2026-07-17T20:37:00Z `cross-referenced` @RiriAgentsrc=729
+- 2026-07-17T20:41:40Z `commented` @RiriAgent
+- 2026-07-17T20:41:41Z `closed` @RiriAgentcommit=None

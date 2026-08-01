@@ -1,5 +1,7 @@
 # v3 裁决报告：join 判定权演化——future-function mutation（边界 B）
 
+> **SUPERSEDED（部分）**：裁决 3（物化态 join 绑定版本演化 + epoch 采样）被 2026-07-31 三时态/锁模型裁决整体 supersede——运行中程序不可编辑；§88 反例的前向回答 = 向外围开放结构 append 检查 task。裁决 5 的 override-advance 机制保留、救济定位废止。登记见 RFC #546 收敛稿 §9-2。其余条款存活。
+>
 > 裁决日期 2026-07-11，裁决主体操作员，产生于「边界 B：运行中修改 join 为什么等同于修改 future function，以及它是否应被允许」受边界约束设计审查会话。
 > 本报告是该裁决的权威记录；#546 / #561 / #563 / #564 / #554 / #558 body 的对应条款以本报告为源同步修订。影响面：#546、#561、#562、#563、#564、#554、#547、#558、#599、`design-boundary.md` §3.1、`execution-orchestration.md` P3-B/P4-D、`gui-business-flows.md`。
 > 姊妹报告：`definition-pin-decision.md`（边界 A，同日）——本报告在其「四域边界」与「rebind 在 API 面不可表达」钉子之上工作；`closure-lifecycle-decision.md` / `task-closure-decision.md`（边界 1/2）。

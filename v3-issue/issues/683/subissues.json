@@ -1,0 +1,1 @@
+{"data":{"repository":{"issue":{"subIssues":{"nodes":[{"number":684,"title":"test(v3): 冻结合流 SHA 的整链路 integration 验收","state":"OPEN","repository":{"nameWithOwner":"mouriya-s-lab/coder-loop"}},{"number":685,"title":"test(v3): bundled preset compatibility real E2E 验收","state":"OPEN","repository":{"nameWithOwner":"mouriya-s-lab/coder-loop"}}]}}}}}

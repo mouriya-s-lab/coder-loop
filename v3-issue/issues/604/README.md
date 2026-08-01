@@ -1,0 +1,123 @@
+# #604 feat(presets): bundled preset v3 化——闭包分支契约落地与 agent 结构性 git 操作退役
+
+- state: **closed**  | author: `RiriAgent`  | created: 2026-07-10T11:17:16Z  | updated: 2026-07-17T20:15:10Z
+- closed: 2026-07-17T20:15:10Z  | state_reason: `not_planned`
+- labels: (none)
+- url: https://github.com/mouriya-s-lab/coder-loop/issues/604
+- comments: 1  | timeline events: 19
+
+---
+
+## Body
+
+## 必须先读的关联 issue
+
+#546（RFC: v3 任务模型）。继承条款逐字快照（2026-07-10 修订，权威记录 `v3/closure-lifecycle-decision.md`）：
+
+> "**闭包分支程序化**：引擎创建 per-闭包工作分支随闭包递出，贯穿闭包全生命周期至完全消费（PR headRef 即闭包分支）；agent 契约 = 在其上 commit、解决冲突、push、开 PR；preset 指示 agent 自建分支退役；push 到 origin 的 ref 属声明通道，未发布的自建 ref 是 escape 类" — #546 body 供给条款 2
+
+> "现在的preset让ai自己建分支是设计错误，应该是程序做，worktree是抽象闭包的边界，可程序化" — 操作员 verbatim（2026-07-10）
+
+> "「零状态重置」指不回滚任何已记账状态，不指丢弃执行现场——target 的任务闭包按持久对象从挂起态原地恢复调度（同 worktree、同分支、同 session；环境自挂起起从未被动过，无任何 checkout/还原步骤），现场完整。" — #546 body「join 策略与验证者判定」
+
+git 操作按闭包边界分类（#546「引擎递出面定理」节）：**结构性**（worktree 创建、分支创建命名、起点解析、pin、终态采样、回收）归引擎，**内容性**（commit、解决冲突、push、PR）归 agent。
+
+## 目标
+
+把 bundled preset（`gh-issue-pr-iteration`、`real-e2e-minimal`）的 git 契约迁移到闭包模型：agent 不再自建工作分支，在引擎递出的闭包分支上工作；retry/打回重入 prompt 按闭包重开形态改写（现场由引擎保证，不再靠 agent 侦查残留）；preset 内制度性指示的 agent 结构性 git 操作（standing worktree、spike 分支、scratch worktree）逐处裁决 v3 兼容形态。
+
+## 使用场景
+
+供给条款 2 的 preset 侧对应物。引擎侧（#560）递出闭包分支后，preset prompt 若仍指示 `git switch -c`，agent 会在闭包分支之上再建一层自建分支——引擎终态采样谓词（供给条款 5）恒假阳性、PR headRef 脱离闭包分支、blame 语义空转。preset 侧不迁移，引擎侧供给条款等于没落地。
+
+## 上下文（逐处清单，行号实施前自行核对）
+
+引擎递出面（v3 后 preset 可假设）：worktree cwd 已 checkout 闭包分支（引擎建）；cwd/index/HEAD/WIP/session/scratch 是闭包私有现场；对象库、`origin/*`、refs 物理存储、repo config/hooks 与 linked-worktree metadata 仍是 repo 级共享 Git 协调面。稳定输入取引擎持久化 base SHA/par pin，`origin/*` 只表达带新鲜度的当前远端观察。`ISSUE_BRANCH` 类变量语义从「agent 上轮自建并写回 item.branch」变为「引擎递出的闭包分支」（`presets/gh-issue-pr-iteration/preset.toml:115/218`，`item.branch` 写回义务与 `writableFields`（preset.toml:156）需重议——分支名引擎已知，agent 写回退化为冗余或校验）。
+
+待改写/裁决点：
+
+1. **自建分支指示（退役）**：`iter/steps/implement.md:22` `git switch -c "issue-<ISSUE>-<RUN_ID>"`（fresh 路径）；`presets/real-e2e-minimal/iteration-entry.md:18` `git switch -c e2e/issue-{{ISSUE}}-{{RUN_ID}}`。改为「你已在工作分支上（引擎创建），直接工作」。
+2. **retry 契约改闭包重开形态**：`iter/steps/implement.md:17`——现文案要求 agent 侦查 `git log <BASE_BRANCH>..HEAD` / `git status --short` 分辨上轮残留，前提是「现场碰巧还在」（v2 slot 共享的偶然副产品）；v3 下闭包挂起期间环境原地保留、重开即原地恢复（同路径、同分支尖端、WIP 从未被动过），文案改为消费该引擎保证，侦查降级为确认而非考古。`Restart from base` 仍是闭包所有者的内容性动作：只在 workflow 已明确判定上一轮工作不可复用时，针对引擎保存的 base SHA 在当前闭包分支执行显式 reset/clean；不要求引擎重建闭包，也不得换 worktree、分支或 session。该破坏性动作必须在报告中记录被丢弃内容与依据。
+3. **retry 路径识别**：`real-e2e-minimal/iteration-entry.md:18` 以「有无 open PR」判定 retry 并 checkout its head branch——v3 下 headRef 即闭包分支且 cwd 已就位，判定与 checkout 均退役。
+4. **spike 分支**：退役 `git switch -c "spike/issue-<ISSUE>-<RUN_ID>"`。source-spike 直接使用引擎递出的闭包分支；PoC commit/push 发生在该分支，issue comment 记录 head SHA，仍不开放 PR。闭包消费后由引擎回收本地 namespace；远端证据分支的保留/删除按 spike 结果合同显式记录。
+5. **standing e2e worktree**：退役 `git worktree add --detach "$E2E_WT"`。phase 任务树中的 verify 与 e2e 本来就是不同任务闭包，各自由引擎递出独立 worktree；e2e 直接在自己的 `AGENT_CWD` 构建并留下 standing runtime，review 通过 manifest 操作该闭包环境，不再创建或删除第二层 worktree。
+6. **scratch 基线 checkout**：退役 `git worktree add/remove`。verify 从引擎保存的 base SHA 用 `git archive <base-sha> | tar -x -C <closure-private-scratch>` 物化只读测量副本，在该目录安装依赖、运行基线测试，完成后删除 closure-private scratch。它只读对象库、不创建 refs/linked-worktree metadata，不进入结构性 worktree 管理面。
+7. **merge 动作**：`review/actions/accept-pr.md:40` `gh pr merge --squash --delete-branch`——`--delete-branch` 删的是 origin 侧闭包分支；引擎仅在闭包 consumed 后删本地闭包分支。两者分工写明（远端归 preset merge 动作、本地归消费后 GC），并确认 squash 语义与供给条款 5 谓词（「已发布」判定在 merge 前采样不受 squash 影响）无冲突。
+8. **submit retry 路径**：`iter/steps/submit.md:20/25`——push 与「同分支再 push + PR comment」路径在闭包分支语义下核对（预期兼容：同闭包同分支，改动极小）。
+9. **共享 Git 协调协议**：逐处审计 preset 的 fetch/rebase/merge/worktree/config/hooks/gc/prune 指示。依赖稳定底座的比较改读保存的 base SHA/par pin；依赖当前远端事实的检查显式要求新鲜度。任务不得修改 repo config/hooks、他闭包 refs/pin，或执行破坏性 `git gc/repack/prune`、`git worktree remove/prune/repair`。
+
+## 问题
+
+preset 与引擎的 git 契约在 v3 引擎侧落地后互相矛盾：引擎建了闭包分支，preset 指示 agent 再自建分支；引擎保证重开现场，preset 教 agent 考古残留；agent 结构性 git 操作（standing worktree）违反闭包边界程序化且 blame 语义空转（引擎无法区分「escape」与「preset 制度性指示」）。此外，per-closure worktree 只隔离闭包现场、不隔离 repo Git state；若 preset 把共享 `origin/*` 当稳定输入，或制度性指示修改 repo config/hooks、他闭包 refs/pin、执行 repo-wide GC/prune/worktree 管理，同样不能把跨任务影响归为 agent escape。
+
+## 预期结果
+
+- 两个 bundled preset 中 agent 自建**工作**分支的指示为零；agent 契约全部表述为「在引擎递出的闭包分支上 commit/解决冲突/push/开 PR」。
+- retry/打回重入 prompt 按闭包重开形态改写：消费「环境原地保留、从未被动过」保证，不再指示按残留侦查重建认知。
+- 上下文清单 4-8 的结论已在本 body 固定：spike 用闭包分支；e2e 用自己的闭包 worktree；基线测量用 base SHA archive 到闭包私有 scratch；远端 merge 可删远端闭包分支，本地回收只归引擎；submit retry 在同一闭包分支/PR 上继续。
+- `item.branch` 的 agent 写回义务退役；`ISSUE_BRANCH` 直接绑定 #560 暴露的 engine-owned closure branch runtime fact。preset 不再把分支名列入 agent `writableFields`。
+- preset 内依赖稳定输入的 Git 比较只使用保存的 base SHA/par pin；依赖当前远端状态的判断显式消费带新鲜度的 `origin/*`。repo config/hooks、他闭包 refs/pin 与 repo-wide GC/prune/worktree 管理零制度性指示。
+
+## 不应残留
+
+- 本 issue 范围内：`git switch -c` 作为工作分支创建指示；「checkout PR head branch」类 retry 就位动作；把 v2 偶然现场留存当作契约前提的文案；把 `origin/*` 当稳定计算输入的文案；任务修改 repo config/hooks、他闭包 refs/pin，或执行破坏性 `git gc/repack/prune`、`git worktree remove/prune/repair` 的制度性指示。
+- 本 issue 范围之外不应改动：引擎侧闭包分支机制（归 #560）；preset 之外的引擎变量绑定面（`ISSUE_BRANCH` 的 source 若需改绑引擎 runtime fact，登记到引擎侧 issue，本 issue 只消费）；review/accept 语义本体。
+
+## 约束
+
+- preset 层允许 GitHub 字面量与业务语义（L2），本 issue 不受引擎字面量红线约束；但 preset 不得反向要求引擎理解 GitHub 字段。
+- 调度者类 prompt 写成 workflow 不写散文（操作员既有反馈）；改写保持各 step 文件现有体裁。
+
+## 本 issue 的验证边界
+
+- **验证层级**：preset compile/render contract、受影响 fragment/CLI 的目标测试，以及使用确定性 runner 的最小调度 integration。
+- **本 issue 必须证明**：修改后的声明或 prompt 能被当前引擎装载并进入预期分支，旧制度性指示/旧词表按正文清单消失；不得只靠 grep，也不得要求真实 agent 替代确定性断言。
+- **不在本 issue 内执行**：本 issue 不自行运行完整 GitHub issue→PR→merge→close。改动合流后的 `real-e2e-minimal`/`gh-issue-pr-iteration` compatibility 由 #685 在冻结发布候选 SHA 上统一证明；涉及 v3 新运行态的接缝由 #684 证明。
+- **现有 GitHub real E2E**：本 issue 不运行 `bun scripts/real-e2e.ts`；该 compatibility 验证只由 #685 在冻结发布候选 SHA 上执行。
+## 验收标准
+
+| Dimension | Check | Command | Env | Expect |
+|---|---|---|---|---|
+| assumption | 自建工作分支指示为零 | `grep -rn "switch -c" presets/` | local | 工作分支创建零命中；无临时 ref 例外 |
+| function | retry 重开形态 | e2e 触发 changes_requested 打回，观察第二轮 run 的 cwd/分支/PR | local | 同 worktree 路径、同分支、同 PR 第二轮 comment；prompt 无考古指示残留 |
+| function | 结构性 Git 操作退役 | `rg -n "git (switch -c|worktree add|worktree remove|worktree prune|worktree repair)" presets/`，并检查 `ISSUE_BRANCH`/`writableFields` | local | agent 工作分支与 worktree 结构操作零制度性指示；spike/e2e/verify 分别采用 body 固定形态；branch 由 engine runtime fact 提供且不可由 agent 写回 |
+| integration | 共享 Git 协调协议 | `rg -n "git (fetch|rebase|merge|worktree|config|gc|repack|prune)|origin/" presets/`，逐命中对照 #546/#560 合同；在全保真 e2e 的 retry/review 路径记录所用 base SHA/pin 与 origin 新鲜度 | local | 稳定比较只读保存 SHA/pin；当前远端判断有新鲜度；无 repo config/hooks、他闭包 refs/pin、破坏性 GC/prune/worktree 管理指示 |
+
+## 依赖关系
+
+- Depends on: #560（引擎递出闭包分支与挂起/重开机制）、#554（bundled preset 的 phase tree 声明语法与编译产物）、#567（phase tree 接入真实 scheduler；verify/e2e 不同任务闭包的前提）。
+- Relates to: #546（供给条款 2 的 preset 侧对应物）、#562（打回重入的闭包连续性——retry prompt 形态与其验收共用场景）。
+
+
+---
+
+## Comments (1)
+
+### comment #5007119314 by `RiriAgent` — 2026-07-17T20:15:09Z
+
+重新拆分后由 #707 承接 bundled preset 闭包 Git 契约迁移。旧 issue 没有关联 PR，按 #546 重拆结果关闭。
+
+
+---
+
+## Timeline (19)
+
+- 2026-07-10T11:17:17Z `assigned` @RiriAgent
+- 2026-07-10T11:17:33Z `parent_issue_added` @RiriAgent
+- 2026-07-10T11:55:45Z `cross-referenced` @RiriAgentsrc=546
+- 2026-07-10T17:03:17Z `referenced` @RiriAgentcommit=4ce8712c6fa62c4e86ddbb1e1a69af16c756a1ec
+- 2026-07-11T00:50:17Z `cross-referenced` @RiriAgentsrc=547
+- 2026-07-11T00:50:22Z `cross-referenced` @RiriAgentsrc=554
+- 2026-07-11T00:50:25Z `cross-referenced` @RiriAgentsrc=560
+- 2026-07-11T00:50:28Z `cross-referenced` @RiriAgentsrc=568
+- 2026-07-11T08:33:36Z `referenced` @RiriAgentcommit=6bad6fcea488533dd230d4a26548957ddf0eec69
+- 2026-07-11T09:08:08Z `cross-referenced` @RiriAgentsrc=567
+- 2026-07-15T10:22:31Z `cross-referenced` @RiriAgentsrc=674
+- 2026-07-15T10:53:43Z `cross-referenced` @RiriAgentsrc=685
+- 2026-07-16T08:23:00Z `cross-referenced` @RiriAgentsrc=690
+- 2026-07-17T20:13:16Z `cross-referenced` @RiriAgentsrc=699
+- 2026-07-17T20:13:36Z `cross-referenced` @RiriAgentsrc=707
+- 2026-07-17T20:15:09Z `commented` @RiriAgent
+- 2026-07-17T20:15:10Z `closed` @RiriAgentcommit=None
+- 2026-07-17T20:37:23Z `cross-referenced` @RiriAgentsrc=739
+- 2026-07-18T01:17:08Z `cross-referenced` @RiriAgentsrc=749

@@ -1,0 +1,49 @@
+[
+  {
+    "url": "https://api.github.com/repos/mouriya-s-lab/coder-loop/issues/comments/5055603359",
+    "html_url": "https://github.com/mouriya-s-lab/coder-loop/issues/701#issuecomment-5055603359",
+    "issue_url": "https://api.github.com/repos/mouriya-s-lab/coder-loop/issues/701",
+    "id": 5055603359,
+    "node_id": "IC_kwDOR1v4Gc8AAAABLVZinw",
+    "user": {
+      "login": "RiriAgent",
+      "id": 39219425,
+      "node_id": "MDQ6VXNlcjM5MjE5NDI1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/39219425?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/RiriAgent",
+      "html_url": "https://github.com/RiriAgent",
+      "followers_url": "https://api.github.com/users/RiriAgent/followers",
+      "following_url": "https://api.github.com/users/RiriAgent/following{/other_user}",
+      "gists_url": "https://api.github.com/users/RiriAgent/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/RiriAgent/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/RiriAgent/subscriptions",
+      "organizations_url": "https://api.github.com/users/RiriAgent/orgs",
+      "repos_url": "https://api.github.com/users/RiriAgent/repos",
+      "events_url": "https://api.github.com/users/RiriAgent/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/RiriAgent/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-07-23T07:23:36Z",
+    "updated_at": "2026-07-23T07:23:36Z",
+    "body": "## Chain `v3-546-v2` 起手：baseline 相对本 issue 的实现快照\n\n**新 chain**: `v3-546-v2`（preset=gh-issue-pr-iteration, baseBranch=`coder-loop/v3-546-baseline`）。\n**baseline**: `coder-loop/v3-546-baseline` @ `d67fec5`（相对 `main` ahead 49 commit，源自旧 chain `v3-546` 9 轮迭代）。\n**旧现场**（stopped, 勿动）: 旧 chain `v3-546` / 旧 iteration branch `coder-loop/v3-546-94cd3a68e245` / 旧 PR #749 (`changes_requested`, OPEN) / #560 (承接方 = #699, OPEN)。\n\n### 本 issue（#701 承接 #562 reopen 执行语义）相对 baseline 的进度\n\n- **已落地（间接底座）**: closure suspend/reopen 生命周期机制（`src/closure-lifecycle.ts`）已支撑本 issue 依赖的 \"target 内挂起闭包 suspended→active 转移\" 底座；`fix: preserve closure reopen and reconciliation invariants` (6babc2d) 与 `fix: preserve migrated closure resources on reopen` (ba4a421) 落定了闭包重开的 invariant，本 issue 可直接消费。\n- **半成品**: 无 — 有底座但无本 issue 层的 reopen 执行语义（六步事务、correction ID 认领、seq 游标回退、级联再验证、reopen 预算、原子性）。\n- **未开始**: reopen 完整行为（correction append → target 重开 → seq 游标回退 → 级联再验证）、target 运行期校验（拒绝跨 seq / 未跑节点）、reopen 预算耗尽落容器级 exhausted、reopen 执行原子性单事务、`queue.unblock` 与 dependsOn 满足恢复的树调度语义归并（#559 未回复的范围补充）。\n\n### 依赖\n\n本 issue depends on **#699**（承接完成，底座已在 baseline）+ **#700**（validator 侧写 reopen decision）。#700 未落地前，本 issue 的 reopen 执行没有触发源。\n\n### iteration agent\n\n从 baseline checkout，利用已在 tree 的 closure suspend/reopen 底座实现 reopen 执行语义。PR base = `coder-loop/v3-546-baseline`。\n",
+    "author_association": "MEMBER",
+    "pin": null,
+    "reactions": {
+      "url": "https://api.github.com/repos/mouriya-s-lab/coder-loop/issues/comments/5055603359/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

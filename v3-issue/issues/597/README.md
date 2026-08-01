@@ -1,0 +1,135 @@
+# #597 feat(engine): context 共享「必须调用」执法——run 收尾 required|expected 判定
+
+- state: **closed**  | author: `RiriAgent`  | created: 2026-07-02T14:04:27Z  | updated: 2026-07-17T20:41:48Z
+- closed: 2026-07-17T20:41:47Z  | state_reason: `not_planned`
+- labels: (none)
+- url: https://github.com/mouriya-s-lab/coder-loop/issues/597
+- comments: 1  | timeline events: 18
+
+---
+
+## Body
+
+## 必须先读的关联 issue
+
+#545（RFC: v3 context 共享 CLI——无状态 agent 的受控上下文传递）。继承条款逐字快照：
+
+> "**「必须调用」两档执法**：执法对象是工具的确定性输出条件（outcome，#547 裁决 G）——context CLI 的 outcome = 该 run 凭证 author 下存在至少一条 entry。DSL 按 phase 声明 `required`（run 收尾时 outcome 不成立 → 判 run 失败，走现有指数退避重试、耗尽 attempts 落 exhausted 终态）或 `expected`（outcome 不成立只发 validation 事件，不影响调度）。outcome 不成立即未履约——不存在「合规但不可观测」类别。声明语法归 RFC-2。" — #545 设计裁决 4
+
+> "所有写经 socket，daemon 在 run 收尾点（#406 凭证吊销的同一收尾路径）求值 context CLI 的 outcome——该 run 凭证 author 下存在至少一条 entry；凭证收尾吊销使证据窗口与判定窗口闭合于同一点，无迟到证据、无判定后补写。`required` 下 outcome 不成立 = 该 run 判失败（与现有「phase 未履约 → 退避重试」语义同构，如 review 退出未写 status——同为 run 收尾的确定性输出条件执法）；`expected` 下 outcome 不成立 = 发 validation 事件。执法点是 run 收尾，与 phase 种类无关——对一切 run（含 trigger phase、#546 validator 判定器的 run）一视同仁，preset 对该类 phase 声明 required 即生效。引擎只求值输出条件，不验证内容质量、不追问调用动作——判断力归 LLM（CLAUDE.md preset 前提），引擎只做可计算判定。" — #545「必须调用」执法机制
+
+> "经现有 doc-binding 机制注入一段「CLI 用法 + 本 run 的 scope 标识」说明（`phaseExitsEpilogue` 同款先例），注入的是用法文档，不是内容。" — #545「读取形态：拉取制」
+
+#547/#553 侧分工（逐字快照）：
+
+> "本 RFC 拥有声明语法、provider/availability/outcome/enforcement ADT、可执法性编译检查（判据双向：不可伪造 + 构造性完备）与 `toolRequirementsDoc` doc builder；工具本体、outcome 达成通道与 run-fail 执法机制归 #545" — #547 接口假设·答复 #545
+
+> "provider = engine 工具的第一个真实成员是 #545 的 context 共享 CLI（outcome = entry-existence，条件 = 该 run 凭证 author 下存在至少一条 entry；其工具本体不在本 child 范围）；capability union 的形态须能承接该成员（成员注册与执法消费端归 #597，按 variant 准入纪律一并落地）。" — #553「上下文」
+
+## 目标
+
+消费 #553 的 `[[tools]]` / `toolRequirements` 声明位：把 context CLI 注册为 `provider = engine` capability union 的第一个真实成员（含用法文档内容），其 entries 存在性条件是 outcome（确定性输出条件）的首个 variant（entry-existence）；在 run 收尾点落地对 outcome 求值的 `required | expected` 两档执法。
+
+## 使用场景
+
+preset 作者对某 phase 声明「必须调用 context 共享 CLI」（`required`）：该 phase 的 agent 若整个 run 没写过任何 context entry，run 判失败、按现有退避重试，重试 prompt 仍带用法文档；反复缺写耗尽 attempts 落 exhausted，operator 从事件流看到原因。声明 `expected` 的 phase 缺写只留 validation 事件痕迹，调度不受影响。未声明的 phase 一切照旧。
+
+## 上下文
+
+Repo `mouriya-s-lab/coder-loop`，基线 main@a007fa4（行号实施前自行 grep 核对）。
+
+- **run 收尾点**：`attachRunCloseHandler`（`src/scheduler.ts:1124`）的 close handler——`completeRun` 写 endedAt/exitCode（`1216-1225`），`finally` 块凭证吊销 `options.runCredentials?.revoke(...)`（`1329`）。#545 钉定执法检查挂同一收尾路径。
+- **失败→退避→耗尽的既有机制**：指数退避 `withNextSchedulerBackoff`（`src/scheduler.ts:2000-2014`，initial 60s、上限 480s）；attempts 预算耗尽写终态 `exhaustItemsOverAttemptLimitForRepo`（`717-767`，`engineLifecycleAdmittedItemStatus` 调用于 `746`，`maxItemAttempts` 消费 `724/736`）。required 判失败复用这条链路，不自立通道。
+- **validation 事件先例**：`ObservabilityEventBoundary`（`src/observability.ts:243` 起），validation kind 样例 `daemon.preset_load_failed`（`352-375`）。
+- **声明位（#553，契约输入）**：`[[tools]]` 注册表（provider/availability/outcome/enforcement 四轴正交）+ per-phase `toolRequirements`（词表 `required | expected` 封闭 ADT）+ `toolRequirementsDoc` doc builder；编译期已保证 `required` 仅对定义了 outcome（确定性输出条件）的工具合法。本 child 是其第三消费端（前两个：doctor、prompt 注入，均归 #553）。
+- **doc 注入先例**：`phaseExitsEpilogue`（`src/loop.ts:5320-5350`，静态 markdown 注入 CLI 用法）；doc builder switch `resolvePhaseBinding`（`src/loop.ts:5148-5164`，现有 6 case）。
+- **写入记录事实源**：本树地基 child 的 entries 表——author 含 run 标识，「该 run 有无写入」是一次存在性查询。
+- **与既有失败语义的叠加**：required 判定只对「否则会被视为成功」的 run 改变结局；本就失败的 run（非零退出、超时、#478 限流 exit）维持既有语义。attempts 账目：spawn 时 +1（`src/scheduler.ts:990`），限流 exit 显式回滚该 +1（`src/scheduler.ts:1269`，不消耗 attempt）——执法不改变这套账目。
+
+## 问题
+
+#553 落地后声明位在引擎侧没有执法消费端：`required`/`expected` 声明无运行期判定，缺写不产生任何后果；context CLI 未注册为 engine capability 成员，preset 无法在 `[[tools]]` 引用它；`toolRequirementsDoc` 对 engine 工具没有用法内容可渲染。「可选的 prompt 要求必须调用某种特殊定义的 CLI 工具」（v3 目标 4 verbatim）的执法半边悬空。
+
+## 预期结果
+
+性质表述：
+
+1. **capability 注册**：context CLI 是引擎闭合 capability union 的成员，携带覆盖读写两面的用法文档内容；`toolRequirementsDoc` 渲染声明该工具的 phase 时输出该用法（注入的是用法文档，不是 entry 内容）。成员经穷尽 switch 消费——新增 capability 由编译器暴露全部处置点。
+2. **判定事实唯一且可计算**：判定是对该工具 outcome（确定性输出条件）的求值，provider 不参与判定——context CLI 的 outcome = entry-existence：该 run 的凭证 author 下存在至少一条 entry（entries 表存在性查询），求值的是输出条件，不是调用动作；首波 outcome union 仅 entry-existence 一个 variant。引擎不验内容质量、不看 body。
+3. **required 缺写 = run 判失败**：进入现有指数退避重试链路、消耗 attempt、耗尽落 exhausted 终态——复用 `withNextSchedulerBackoff` / `exhaustItemsOverAttemptLimitForRepo` 既有机制，不自立失败通道；audit/validation 事件写明失败原因（缺 required context 写入）。
+4. **expected 缺写 = 仅 validation 事件**：调度、状态、attempts 零影响。
+5. **执法与 phase 种类无关**：判定逻辑只依赖「run 收尾 + 该 phase 的 toolRequirements 声明」，源码中不存在按 phase 种类（trigger / validator / 普通）豁免或特判的分支——声明即生效，对一切 run 一视同仁。
+6. **未声明零扰动**：未声明 toolRequirements 的 phase，run 收尾路径行为与现状完全一致。
+
+### 显式决策项（落地时裁，裁决留本 thread）
+
+- 「本 run 的 scope 标识」注入形态：#406 凭证已让 daemon 端到端推导 author 与 scope 键，用法文档可能无需携带运行时 id（agent 直接调命令即可正确寻址）。按凭证推导充分性裁决；若裁定不注入具体 id（偏离 #545「CLI 用法 + 本 run 的 scope 标识」的字面），在本 thread 记录理由与 #545 登记 comment 同步。
+
+## 不应残留
+
+- 本 child 范围内：绕过既有退避/exhausted 机制的自立失败通道；按 phase 种类特判的执法分支；对 entry body 的任何读取（判定只做存在性查询）；词表或声明结构在引擎侧的重复定义（#553 是唯一事实源）。
+- 本 issue 范围之外不应改动：声明语法、编译期校验、doctor 消费（归 #553）；内容质量判定（永不做，#545 已钉）；bundled preset 是否声明 toolRequirements（handoff 纪律迁移归 RFC 落地后另立 issue，#545 开放问题 4——本 child 只用 fixture preset 验收，不动 `gh-issue-pr-iteration`）。
+
+## 约束
+
+- 代码红线（操作员裁决 2026-06-12，全仓统一）：必须全链路 ADT，禁止任何类型退化。不引入 `any`/匿名形状；`unknown` 仅限 catch 与边界 parse 入口；禁止真 `as` 断言（`as const` 除外）；外部输入经边界 parse（arktype）为精确类型后流转。违反红线 = changes requested，无例外。依据：#78 / #109、#453 契约 T3/T5。
+- 词表 `required | expected` 是 #545 裁决 4 与 #553 的既定契约，本 child 不改词表；改动需回 RFC 层重裁。
+- 引擎不含 preset 业务字面量（CLAUDE.md 红线）：执法逻辑读声明，不内联任何 preset/phase 名。
+- 与 #534 audit 树排序默认（v3 总控整合裁定，2026-07-02）：触 `src/scheduler.ts` run 收尾路径与 `src/daemon.ts`，#535/#536/#538 默认先合、本 child 其后 rebase；偏离需在本 issue 说明理由。
+
+## 本 issue 的验证边界
+
+- **验证层级**：真实 daemon + 隔离 loop-data + 确定性 runner 的专用进程级 integration。
+- **本 issue 必须证明**：fixture 直接进入本 issue 新增的运行态与转移，观察 SQLite/status/events/进程或资源生命周期的前后值；只跑旧线性 preset而没有进入新状态不算通过。
+- **不在本 issue 内执行**：不负责连接全部 v3 子系统，也不运行 bundled preset compatibility real E2E。跨 issue 场景归 #684；真实 GitHub preset 不回归归 #685。
+- **现有 GitHub real E2E**：本 issue 不运行 `bun scripts/real-e2e.ts`；该 compatibility 验证只由 #685 在冻结发布候选 SHA 上执行。
+## 验收标准
+
+| Dimension | Check | Command | Env | Expect |
+|---|---|---|---|---|
+| function | required 执法（RFC 关闭验证行 5） | fixture preset 声明 required 的 phase 正常退出（exit 0）但未写 context | local | run 判失败进退避重试；耗尽 attempts 落 exhausted；audit/validation 事件可见「缺 required context 写入」原因 |
+| function | expected 执法（RFC 行 6） | fixture 声明 expected 的 phase 未写 context | local | 仅 validation 事件；phase 正常推进，attempts 不受影响 |
+| function | required 满足零干预 | required phase 的 run 写入一条 entry 后正常退出 | local | run 成功、正常推进，无失败标记与退避 |
+| function | 一视同仁（无种类豁免） | fixture 对 trigger phase 声明 required，其 run 未写 context | local | 同样判失败——与普通 phase 行为一致 |
+| function | 用法文档注入 | fixture 声明 required 后渲染该 phase prompt | local | `toolRequirementsDoc` 输出含 context CLI 读写两面用法；不含任何已有 entry 内容 |
+| adversarial | 判定不看 body | `bun test` 含用例：run 写入 body 为空白/控制记号的 entry，required 判定通过；未写任何 entry 时无论其他 run 写了多少，该 run 仍判失败 | local | 断言通过：判定事实仅为「本 run 存在性」，与 body 内容、他 run 写入无关 |
+| type | capability union 穷尽 | `bun run typecheck`；审查 capability 成员消费 switch | local | 通过；穷尽检查在位，无 stringly 工具名分支 |
+| integration | 执法证据闭环（自 #553 移交，编译半边留 #553） | 对 required 工具分别使 outcome 成立与不成立 | local | run finalize 分别通过/失败；provider 不参与判定，outcome 才是判据 |
+
+## 依赖关系
+
+- Depends on: #594（存储与写入面——写入记录事实源）；#595（读取命令面——用法文档覆盖读写两面）；#553（`[[tools]]` 声明位与 `toolRequirementsDoc`，总控简报已钉边）。
+- Blocks: #598（收尾对齐）。
+
+
+---
+
+## Comments (1)
+
+### comment #5007303277 by `RiriAgent` — 2026-07-17T20:41:47Z
+
+重新拆成 ordinary run 执法 #732 与 trigger/validator 集成 #733。旧 issue 无关联 PR，关闭。
+
+
+---
+
+## Timeline (18)
+
+- 2026-07-02T14:04:28Z `assigned` @RiriAgent
+- 2026-07-02T14:04:40Z `cross-referenced` @RiriAgentsrc=598
+- 2026-07-02T14:04:49Z `cross-referenced` @RiriAgentsrc=594
+- 2026-07-02T14:04:59Z `cross-referenced` @RiriAgentsrc=595
+- 2026-07-02T14:05:22Z `parent_issue_added` @RiriAgent
+- 2026-07-02T14:05:39Z `cross-referenced` @RiriAgentsrc=545
+- 2026-07-02T14:06:02Z `cross-referenced` @RiriAgentsrc=553
+- 2026-07-13T06:08:51Z `cross-referenced` @RiriAgentsrc=677
+- 2026-07-15T10:08:15Z `cross-referenced` @RiriAgentsrc=675
+- 2026-07-16T23:17:59Z `referenced` @RiriAgentcommit=1e3e49d7dc91f05e54a2a0f23b9f756741cf6050
+- 2026-07-16T23:23:41Z `referenced` @RiriAgentcommit=8dc9a9a407481f33a0a0fb55386b451335eb8533
+- 2026-07-17T20:37:02Z `cross-referenced` @RiriAgentsrc=730
+- 2026-07-17T20:37:06Z `cross-referenced` @RiriAgentsrc=732
+- 2026-07-17T20:37:08Z `cross-referenced` @RiriAgentsrc=733
+- 2026-07-17T20:37:11Z `cross-referenced` @RiriAgentsrc=734
+- 2026-07-17T20:37:20Z `cross-referenced` @RiriAgentsrc=738
+- 2026-07-17T20:41:47Z `commented` @RiriAgent
+- 2026-07-17T20:41:48Z `closed` @RiriAgentcommit=None

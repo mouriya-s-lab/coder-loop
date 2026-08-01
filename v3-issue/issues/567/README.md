@@ -1,0 +1,124 @@
+# #567 feat(scheduler): item 展开 preset phase 任务树——数组推进退役与 trigger phase 迁移
+
+- state: **closed**  | author: `RiriAgent`  | created: 2026-07-02T11:16:04Z  | updated: 2026-07-17T20:15:06Z
+- closed: 2026-07-17T20:15:06Z  | state_reason: `not_planned`
+- labels: (none)
+- url: https://github.com/mouriya-s-lab/coder-loop/issues/567
+- comments: 1  | timeline events: 17
+
+---
+
+## Body
+
+## 必须先读的关联 issue
+
+#546（RFC: v3 任务模型）。继承条款逐字快照：
+
+> "**preset = 任务函数定义**（phase 上的任务树），**item = 一次调用**：chain 树的叶子是 item，item 展开为其 preset 声明的 phase 任务树，phase 树的叶子才是 agent run。#413 的「链表+容器」与「iter 三阶段两并行」由同一代数在两层实例化，引擎只实现一套调度语义。" — #546 body「任务代数」
+
+> "phase 数组顺序推进（`src/scheduler.ts:604-632`）→ preset 内 seq；「iter 三阶段两并行」= seq 内嵌 par" — #546 body「旧概念 → 新代数映射」
+
+> "trigger phase（`afterPhase`/`whenStatus`）→ 状态条件化动态 spawn；映射细节归实现 children" — #546 body「旧概念 → 新代数映射」
+
+操作员目标源（2026-07-02，`v3/v3-goals.md` 目标 4，经 #546 承接）：
+
+> "iter 实际上是三个不同的阶段，其中两个阶段并行做两个不同的事情。"
+
+## 目标
+
+item 被调度时展开为其 preset 声明的 phase 任务树（消费 #547 编译产物的树结构）：phase 数组推进退役为退化 seq，`afterPhase`/`whenStatus` trigger 迁移为状态条件化动态 spawn，phase 层与 chain 层由同一套树调度语义驱动。
+
+## 使用场景
+
+「iter 三阶段两并行」的表达力落地点：preset 作者在 DSL 声明 `seq(stage1, par(stage2a, stage2b), review)`，引擎按树调度——两并行阶段的 run 真并发（各自独立 worktree），par join 后进入 review。既有线性 preset 零改动照常跑（数组 = 退化 seq）。bundled preset 的实际改写是业务重构，另立 issue（#547 已划出），本 child 只保证表达力可用。
+
+## 上下文
+
+- Repo: `mouriya-s-lab/coder-loop`。基线 main，行号实施前自行 grep 核对。
+- phase 数组推进：`nextNonTriggerPhaseForItem`（`src/scheduler.ts:604`）——上一非 trigger phase run 结束（exitCode===0）后按声明顺序推进；`selectNextItemAndPhase`（`src/scheduler.ts:554`）四级选取。
+- trigger phase 现状：`{afterPhase, whenStatus}`（如 `blocked → blocked_responder`）——状态条件满足时插入的非线性结构；`on = "chain-complete"` 变体已归 #566（chain 层声明位），不在本 child。
+- phase 树声明语法与编译产物归 #547（其「DSL 演进面」第 1 项：phase 任务树声明；第 6 项：编译产物含任务树结构）——本 child 是引擎侧消费者。
+- 树调度语义归 #559（树调度，chain 层已落地同一遍历机制）；**任务闭包粒度**（同一 `(item, phase)` 的 attempt 链）下 phase 间状态只经声明通道流动（git 产物 + context CLI），**phase 推进离开 ≠ 闭包销毁——是闭包挂起**（只改变调度状态，完整 worktree/session 原地保留；重开只恢复调度），#546 供给条款 2/5 与 #560 消费。
+- `item.phase` 物理列与 `runs.phase`：现状 phase 是 item 上的单值游标——phase 层 par 需要多 phase 同时活跃的表示（#558 已消解「单活 run」，本 child 消费其形态）。
+
+## 问题
+
+phase 推进是数组顺序硬编码的严格线性 pipeline——「iter 三阶段两并行」（#546 两层并行中的 phase 层）无法表达；trigger phase 是游离于树外的第二套非线性机制；chain 层与 phase 层将出现两套调度语义（树遍历 vs 数组推进），违反「引擎只实现一套调度语义」。
+
+## 预期结果
+
+- item 展开：item 被调度时按其 preset 编译产物中的 phase 任务树展开，树的 leaf 才是 agent run；phase 层树与 chain 层树走同一套遍历/join/reopen 语义（性质：引擎调度代码无 phase 层专属的第二套推进机制）。
+- 线性 preset 零回归：无树声明的 `[[phases]]` 数组编译为退化 seq，调度行为与现状一致（含退避、attempts、状态准入）。
+- phase 层 par 真并发：声明 `seq(s1, par(s2a, s2b), s3)` 的 fixture preset 真跑时 s2a/s2b 执行区间重叠，join 后 s3 开始。
+- trigger phase 迁移：`afterPhase`/`whenStatus` 语义映射为状态条件化动态 spawn——条件满足时向树内动态追加对应 phase 节点；`blocked → blocked_responder` 先例行为保持；映射细节（触发时点、追加位置、重复触发语义）为本 child 显式决策项，落地时裁并登记在本 issue。
+- `nextNonTriggerPhaseForItem` 数组推进路径退役（被树遍历吸收）。
+- **缺口③扩围处置**（2026-07-10 登记，源 #546 body「引擎递出面定理」节修订）：`evidenceDir` / `currentIssueFile`（item 级面）与 `SHARED_CONTEXT_FILE`（chain 级面）寿命长于任务，**纯 seq 下已是「生命周期 ⊆ 任务」反例**（同 item 先后 phase 两任务共享同一 evidenceDir——两任务，不止 phase 级 par 下）。#546 body 逐字快照：
+
+  > "**缺口③（扩围）**：`evidenceDir`/`currentIssueFile`（item 级面）与 `SHARED_CONTEXT_FILE`（chain 级面）寿命都长于任务（`src/scheduler.ts:2205-2221`）——不止 phase 级 par 下共享，纯 seq 下已是「生命周期 ⊆ 任务」反例（同 item 先后 phase 两个任务共享同一 evidenceDir）。按定理口径逐面作用域化，归 #567 落地时处置。"
+
+  处置口径：按递出面定理（每个引擎递出面「任务私有 or 声明通道」）逐面作用域化——`evidenceDir` / `currentIssueFile` 作用域收紧至任务（`(item, phase)` 私有），`SHARED_CONTEXT_FILE` binding 随 #545 落地一并退役（缺口②，已归 #545）。具体作用域化机制（是否 per-任务子目录、如何在同 item 跨 phase 隔离而 retry 同任务共享）为本 child 决策项，落地时裁并登记在本 issue。
+
+## 不应残留
+
+- 本 child 范围内：phase 层专属的第二套推进机制（数组游标与树遍历并存的双路径）；trigger phase 作为树外游离结构。
+- 本 issue 范围之外不应改动：不改 bundled preset 的业务结构（「iter 三阶段两并行」实际改写另立 issue，#547 范围外节已划）；不动 chain-complete（已归 #566（chain 层声明位））；不定义 DSL 语法（归 #547，本 child 消费编译产物）。
+
+## 约束
+
+- 代码红线（操作员裁决 2026-06-12，全仓统一）：必须全链路 ADT，禁止任何类型退化。不引入 `any`/匿名形状；`unknown` 仅限 catch 与边界 parse 入口；禁止真 `as` 断言（`as const` 除外）；外部输入经边界 parse（arktype）为精确类型后流转。违反红线 = changes requested，无例外。
+- 与 #534 audit 树排序默认（v3 总控整合裁定，2026-07-02）：#535/#536/#538 默认先合、本 child 其后 rebase；偏离需在本 issue 说明理由。
+
+## 本 issue 的验证边界
+
+- **验证层级**：真实 daemon + 隔离 loop-data + 确定性 runner 的专用进程级 integration。
+- **本 issue 必须证明**：fixture 直接进入本 issue 新增的运行态与转移，观察 SQLite/status/events/进程或资源生命周期的前后值；只跑旧线性 preset而没有进入新状态不算通过。
+- **不在本 issue 内执行**：不负责连接全部 v3 子系统，也不运行 bundled preset compatibility real E2E。跨 issue 场景归 #684；真实 GitHub preset 不回归归 #685。
+- **现有 GitHub real E2E**：本 issue 不运行 `bun scripts/real-e2e.ts`；该 compatibility 验证只由 #685 在冻结发布候选 SHA 上执行。
+## 验收标准
+
+| Dimension | Check | Command | Env | Expect |
+|---|---|---|---|---|
+| function | phase 层 par 真并发（#546 行 1/2 phase 层） | fixture preset 声明 `seq(s1, par(s2a, s2b), s3)` 真跑，查两 run 时间区间与 s3 起点 | local | s2a/s2b 区间重叠；s3 在 par join 之后才 spawn |
+| function | 线性 preset 退化等价 | `single-phase-example` 与线性多 phase fixture 真跑 | local | 推进顺序、退避、attempts、状态准入与迁移前一致 |
+| function | trigger 迁移语义保持 | fixture 触发 `blocked` 状态 | local | `blocked_responder` 对应节点被动态追加并 spawn，行为与现状 trigger 等价 |
+| function | 重复触发语义 | 同一 item 两次进入 whenStatus 条件（决策项裁定后具体化） | local | 行为与本 issue 登记的裁决一致，无未定义状态 |
+| assumption | 单套调度语义 | `grep -n "nextNonTriggerPhaseForItem" src/` | local | 数组推进路径退役（符号删除或仅存迁移代码）；phase 推进由树遍历承载 |
+| function | 缺口③作用域化（evidenceDir / currentIssueFile） | 声明 `seq(s1, s2)` 单 item 跑两 phase；对比两任务闭包看到的 `evidenceDir` 路径与 `currentIssueFile` 路径 | local | 两任务面互相不共享（作用域 ⊆ 任务，与递出面定理一致）；同任务 retry（闭包重开）同一路径可见 |
+| type | 全链路 ADT | `bun run typecheck` | local | 通过 |
+
+## 依赖关系
+
+- Depends on: #559（树调度，同一遍历语义）、#561（join 评估，phase 层 par join）、#554（phase 任务树声明面——DSL 演进面第 1 项 phase 树声明与第 6 项编译产物含任务树结构）、#549（编译管线——产物承载任务树结构）——无声明语法与编译产物则本 child 无输入，硬依赖。
+- Blocks: #604（bundled preset v3 化——其 phase tree 接入真实 scheduler 依赖本 child）。
+
+
+---
+
+## Comments (1)
+
+### comment #5007118850 by `RiriAgent` — 2026-07-17T20:15:05Z
+
+重新拆分后由 #706 承接 preset phase tree 与 trigger 迁移。旧 issue 没有关联 PR，按 #546 重拆结果关闭。
+
+
+---
+
+## Timeline (17)
+
+- 2026-07-02T11:16:05Z `assigned` @RiriAgent
+- 2026-07-02T11:18:22Z `cross-referenced` @RiriAgentsrc=559
+- 2026-07-02T11:18:27Z `cross-referenced` @RiriAgentsrc=566
+- 2026-07-02T11:18:30Z `cross-referenced` @RiriAgentsrc=568
+- 2026-07-02T11:19:13Z `parent_issue_added` @RiriAgent
+- 2026-07-02T11:20:58Z `cross-referenced` @RiriAgentsrc=546
+- 2026-07-05T07:52:45Z `cross-referenced` @RiriAgentsrc=554
+- 2026-07-10T05:26:58Z `cross-referenced` @RiriAgentsrc=601
+- 2026-07-10T05:32:20Z `referenced` @RiriAgentcommit=49d84106d5a3a23d8420278a739d6d4f992758ce
+- 2026-07-11T06:42:47Z `cross-referenced` @RiriAgentsrc=604
+- 2026-07-11T23:23:22Z `cross-referenced` @RiriAgentsrc=653
+- 2026-07-13T12:29:39Z `cross-referenced` @RiriAgentsrc=678
+- 2026-07-17T20:13:32Z `cross-referenced` @RiriAgentsrc=705
+- 2026-07-17T20:13:34Z `cross-referenced` @RiriAgentsrc=706
+- 2026-07-17T20:15:05Z `commented` @RiriAgent
+- 2026-07-17T20:15:06Z `closed` @RiriAgentcommit=None
+- 2026-07-17T20:37:23Z `cross-referenced` @RiriAgentsrc=739
