@@ -4,17 +4,23 @@
 
 ## 0.1 本总纲的地位
 
-v3 的六篇 RFC 分别讨论生命周期扩展、GUI、context、任务代数、类型系统与外部调用，但这些能力不能再各自发明一套“值从哪里来、什么时候有效、失败由谁处理”的答案。此前设计的结构性问题，正是缺少共同的时态与领域边界，导致闭包内部的产值、校验和流转事实上浮为 daemon 的 gate、journal 或 finalize 协议。本文先钉住六篇共享的公共模型；后续 #543—#548 都必须使用这里的词汇和边界。
+v3 正从六篇旧 RFC 重划为八个责任面，但重划不能让各面重新发明一套“值从哪里来、什么时候有效、失败由谁处理”的答案。此前设计的结构性问题，正是缺少共同的时态与领域边界，导致闭包内部的产值、校验和流转事实上浮为 daemon 的 gate、journal 或 finalize 协议。本文先钉住八面共享的公共模型：定义态、函数域运行时、对象域、入站边界、出站边界、hook 与 GUI 都只能消费这里规定的词汇和边界。
 
-本总纲是后续六篇的词汇权威。各篇正文与本总纲冲突时，以本总纲为准；冲突只在对应 RFC 的专属重写轮次中逐篇消解。本轮保留六篇既有正文，不把尚未完成的局部改写伪装成已经统一的规范。
+本总纲是整个八面方案的词汇权威。标记后的六篇旧 RFC 正文仍是待重写材料，其中与本总纲冲突的部分不构成平行权威；冲突只在其余七个责任面的专属重写轮次中逐篇消解。本轮保留旧正文，不把尚未完成的局部改写伪装成已经统一的规范。
+
+来源：record-3 第 12、19 轮操作员原话；八面定位与本总纲权威范围来自 division-plan.md“面 0”。
 
 ## 0.2 纯函数化公理：引擎只推理被提升的值
 
 AI agent 不是没有副作用的函数。它会修改 worktree、调用外部程序、形成 session 内判断，也可能留下日志、进程和 Git 残迹。v3 所谓“纯函数化”，不是消灭这些 effect，而是收窄引擎承认的观察面：只有被明确提升为值的 effect 才能参与 prompt、检查与流转，其余副作用对本次交接语义一律丢弃。
 
-针对 agent 执行及其副作用的提升口只有两个。第一，agent 在运行时向 context 填入声明允许的值，这是 self-report；第二，agent 运行结束后，由声明的脚本测量外部状态并把结果映射为 context 值，这是 measurement。前者承载意图、判断和无法机械测量的结论，后者接走可以通过程序测量的事实。除此之外的副作用并未被物理清除，只是不进入本次交接；以后若要消费，必须重新通过一个声明过的采样与 map 入口提升为值。agent 出生前的前置脚本负责准备函数输入，不构成观察 agent 副作用的第三个提升口。
+针对 agent 执行及其副作用的提升口只有两个。第一，agent 在运行时向 context 填入声明允许的值，这是 self-report；第二，agent 运行结束后，由声明的脚本测量外部状态并把结果映射为 context 值，这是 measurement。除此之外的副作用并未被物理清除，只是不进入本次交接；以后若要消费，必须重新通过一个声明过的采样与 map 入口提升为值。agent 出生前的前置脚本负责准备函数输入，不构成观察 agent 副作用的第三个提升口。
+
+两口并列不表示二者承受相同的信任。最初由 agent 自陈的“测试已通过”“文件已存在”等信息，只要能够被脚本计算，就应迁移到 measurement；能用测量承载的信息，不再用 agent 断言承载。measurement 接管可计算事实之后，self-report 才收缩到真正不可测量的意图、判断与后继选择。论证顺序不是先信任 agent 再用脚本复核，而是先把可计算边界尽量推远，最后只在测量无法覆盖之处消耗信任。因此，v3 没有让 agent 本身变得可信，而是把信任的消耗压缩到了测量不了的地方。
 
 因此，引擎不根据未提升的文件变化、stdout 文本或 session 内部状态猜测业务结论。它能保证的是值从声明的来源产生、按声明的类型进入 context、在声明的消费位置被读取，并在交接边界得到确定结果；它不能从副作用本身推断 agent “实际上做了什么”。
+
+来源：record-3 第 16、17 轮操作员原话；measurement 接管 self-report 的论证顺序由两轮收敛结论展开。
 
 ## 0.3 双域对偶与针眼通道
 
@@ -26,11 +32,15 @@ v3 同时包含两个方向相反的抽象目标。对象域处理 task 之间�
 
 `await` 不构成第二条跨域通道。被等待的 B-check 是对象域中的独立 task，其结果通过 committed transition 在对象域账本内回注；函数域被保留的只是 B 闭包现场这一资源事实。步骤层的中间事实仍未上浮为 daemon 状态。
 
+来源：record-3 第 15 轮操作员原话；针眼两端与 `await` 不构成第二通道为主 session 推导。
+
 ### 0.3.1 编译期与运行时的精确边界
 
 编译期能够证明的是声明闭合、签名匹配以及值管道的连通性，也就是可达性：每个声明值有唯一来源，map 的输入输出类型能够拼接，消费位置所需的值存在一条类型正确的来源路径，有限后继和谓词槽得到穷尽处理。这些证明只说明运行时存在合法求值路径，不说明那条路径一定成功。
 
 脚本是否启动成功、是否产出可提升的 `Just<T>`、agent 是否填入合法值、谓词最终为真还是为假，全部是运行时事实。运行时通过边界解析、填值校验和纯谓词求值获得具体结果。全文不得把“某值在类型图中可达”写成“运行时必定得到该值”，也不得因为运行结果仍需求值，就否认声明闭合可以在编译期判定。
+
+来源：record-3 第 3—5 轮操作员原话；“编译期证明可达、运行时产生结果”的精确边界为对这些原话的收敛推导。
 
 ## 0.4 五时态与 context 的单调累积
 
@@ -38,44 +48,112 @@ v3 同时包含两个方向相反的抽象目标。对象域处理 task 之间�
 
 ```mermaid
 sequenceDiagram
-    participant I as Item 死值
-    participant P as 前置脚本
-    participant R as Prompt 组装
-    participant A as Agent 运行
-    participant O as 后置脚本
-    participant T as 流转判定
-    I->>P: context₀
-    P->>R: context₁ = context₀ + 前置脚本值
-    R->>A: 仅以 Just 值组装的 prompt
-    loop 填值未完整或类型错误
-        A->>A: 出口校验驳回并修正
+    participant D as 引擎 daemon
+    participant M as map 函数（脚本时态，非驻留）
+    participant A as agent
+    participant C as 交互 CLI
+    rect rgb(239, 246, 255)
+        Note over D,M: 时态一：前置脚本；context₀ 仅含 item 死值
+        D->>M: 执行前置 map
+        alt 脚本输出成功提升
+            M-->>D: 返回 typed 前置值
+            Note over D,M: context₀ → context₁（加入前置脚本值）
+        else 启动失败、超时或输出无法映射
+            M-->>D: 程序面异常
+            D->>D: 按配置级联消费；未消费则升层为 exception
+        end
     end
-    A->>O: context₂ = context₁ + agent 值
-    O->>T: context₃ = context₂ + 后置脚本值
-    alt 谓词全部通过
-        T-->>I: 选择声明的后继或升层
-    else 任一谓词不通过
-        T-->>I: 进入 fail / NIL 路径
+    rect rgb(240, 253, 244)
+        Note over D,C: 时态二：prompt 组装
+        D->>D: 仅用 context₁ 中的 Just 值组装 prompt
+        alt 组装成功
+            D->>D: 固化本次 agent 输入
+        else 编译期消费面闭合、时态一放行后仍发生运行时残余失败（如 IO 失败；不含声明级缺值）
+            D->>D: 程序面按配置级联消费；未消费则升层为 exception
+        end
+    end
+    rect rgb(255, 251, 235)
+        Note over D,C: 时态三：agent 运行与填值校验
+        D->>A: 启动 agent 并交付 prompt
+        alt agent 在场并完成提交—校验循环
+            loop 提交—校验，直至接纳
+                A->>C: 提交声明值
+                C->>C: 校验 unknown → T
+                alt 通过：接纳 typed agent 值并跳出循环
+                    C-->>D: 接纳 typed agent 值
+                    Note over D,C: context₁ → context₂（加入 agent 值）
+                else 不通过：驳回并继续循环
+                    C-->>A: 驳回并返回结构化校验错误
+                end
+            end
+        else agent 进程在任一次迭代中崩溃或在场者消失
+            A-->>D: runner 异常退出
+            D->>D: 程序面按配置级联消费；未消费则升层为 exception
+        end
+    end
+    rect rgb(253, 242, 248)
+        Note over D,M: 时态四：后置脚本
+        D->>M: 执行后置 map
+        alt 测量结果成功提升
+            M-->>D: 返回 typed measurement 值
+            Note over D,M: context₂ → context₃（加入后置脚本值，形成完整 context）
+        else 启动失败、超时或输出无法映射
+            M-->>D: 程序面异常
+            D->>D: 按配置级联消费；未消费则升层为 exception
+        end
+    end
+    rect rgb(245, 243, 255)
+        Note over D,C: 时态五：在 context₃ 上求纯谓词
+        D->>D: 穷尽求值声明谓词
+        alt 谓词为 true
+            D->>D: 选择正常后继或执行 n=0 升层
+        else 谓词为 false
+            D->>D: 进入 fail / NIL 分支
+        end
     end
 ```
 
 context 单调累积意味着后一个时态保留前一个时态已经形成的全部值，只增加新值，不靠删除或改写旧值改变历史。类型定义为每个值声明唯一来源：item、某个 map 或 agent 三者只能取其一。同名多来源在编译期就是非法声明，不留到运行时决定覆盖顺序。这一结论由主 session 从来源面闭合要求推导，后续类型系统 RFC 应把它落实为明确诊断。
 
-### 0.4.1 异常属于能够触及其副作用面的在场者
+来源：record-3 第 6、11、13、14 轮操作员原话；唯一来源约束为主 session 从来源面闭合要求推导。
+
+### 0.4.1 五个时态的结局归属
 
 异常不按一个全局“失败处理器”分发，而由异常发生时能够触及相应副作用面的在场者消费。程序脚本运行时 agent 尚未出生或已经退出，脚本异常只能由程序面处理；agent 填值错误发生在 agent 仍在场的时态，先驳回给 agent 修正；纯流转判定只对已经存在的值求纯谓词，不再保留“判定不可得”这一额外状态。
 
-| 时态 | 失败或异常 | 当时的消费者 | 对象域最终可观察结果 |
+| 时态 | 结局 | 当时的消费者 | 对象域最终可观察结果 |
 |---|---|---|---|
-| 前置脚本 | 启动失败、超时、输出无法映射 | 程序面，按 fail/NIL 与全局配置处理 | 不观察脚本内部状态；若程序面未在闭包内消化，出口为 `exception` |
-| prompt 组装 | 缺少可拼接值或组装失败 | 程序面 | 不产生 agent run；未被程序面消化时出口为 `exception` |
+| 前置脚本 | 启动失败、超时、输出无法映射 | 程序面，按配置级联处理 | 不观察脚本内部状态；若程序面未在闭包内消化，出口为 `exception` |
+| prompt 组装 | 缺少可拼接值或组装失败 | 程序面，按配置级联处理 | 不产生 agent run；未被程序面消化时出口为 `exception` |
 | agent 运行 | 值缺失、类型错误 | 在场 agent | 不产生对象域 transition；CLI 驳回，agent 在同一时态修正后再提交 |
 | agent 运行 | runner 崩溃或在场者消失 | 程序面升层 | 闭包出口为 `exception`，不得伪造成业务返回 tag |
-| 后置脚本 | 启动失败、超时、输出无法映射 | 程序面，按 fail/NIL 与全局配置处理 | 不观察脚本内部状态；若程序面未在闭包内消化，出口为 `exception` |
+| 后置脚本 | 启动失败、超时、输出无法映射 | 程序面，按配置级联处理 | 不观察脚本内部状态；若程序面未在闭包内消化，出口为 `exception` |
 | 流转判定 | 谓词为 false | 声明的 fail 路由 | 产生确定的 fail 流转；只有 NIL 级联最终未消费时才升为 `exception` |
 | 流转判定 | 谓词为 true | 声明的正常路由 | 交付 `returned(value)`，由对象域 committed transition 消费 |
 
 这张表描述时态归属，不提前规定每一种程序异常的完整策略 ADT。程序面可以按声明或 operator 全局配置消费异常；只有最终越过针眼的结果才成为对象域事实。
+
+来源：record-3 第 14 轮操作员原话与该轮异常消费者收敛；完整配置 ADT 仍属开放项。
+
+### 0.4.2 两层校验：解析型填值与谓词型流转
+
+填值校验位于时态三，其输入来自 agent，因此信任级别是未经验证的 `unknown`。它的形状是 parser：尝试完成 `unknown → T`，成功才把 typed 值加入 context。zod 或 arktype 在表单校验中的行为是准确类比：字段漏填或格式错误不会废弃整次注册流程，而是把结构化错误返回给仍在场的填写者，允许其原地修正后再次提交。交互 CLI 承担驳回与反馈通道；它不把错误记成对象域失败，也不替 agent 生成值。
+
+流转校验位于时态五，面对的已经是由各边界解析完成的完整 `context₃`，因此信任的是值的类型与来源已成立，而不是 agent 的自陈为真。按操作员原话，它在形状上是“带异常的 map 函数中决定何时抛异常的子函数”；落实到五时态后，这个子函数自身只做纯谓词求值，不再执行脚本。谓词为 false 表示本次流转不能成立，直接进入 fail / NIL 分支，而不是把表单重新退给原 agent。
+
+两层校验因此不能合并。填值校验防止不可信输入进入 typed context，失败后的修复者是仍在场的 agent，当前流程保持存活；流转校验判断完整 context 是否满足声明的交接条件，失败后的去向由 preset 的 fail 路由或 NIL 级联裁定，本次正常流转已经终止。前者回答“这个值能否成为 `T`”，后者回答“这些已成形的值能否共同支持这次流转”。
+
+来源：record-3 第 11 轮操作员原话；纯谓词与异常时态的拆分同时采用第 14 轮收敛。
+
+### 0.4.3 分形交接：一份文法，两个作用域
+
+step 与 task 都存在“执行结束后把结果交给下一段”的动作，因而共享同一个交接合同形状：交付值包，完成必写值解析与声明测量，在完整 context 上求流转谓词，然后得到正常路由或 fail / NIL 结局。两层的抽象对象不同，打包的值也不同，但合同不应因此分裂成两种方言。preset 只需提供一份交接文法，在 task 接缝与 step 接缝两个作用域实例化；同一交接内部仍按五时态串行，而彼此无关的交接只依赖前向、单调与可交换的结果，因此合同本身不要求把可并发实例强行串行化。
+
+共享形状不意味着共享持久性。task 层的前向推进经过 committed transition 写入 daemon 日志，是已经发生、不可撤销且崩溃后必须恢复的历史事实。step 层的前向只是一条执行纪律：现场可以随 worktree 或 session 一起蒸发，也可以整体丢弃并重放；恢复单位是 attempt，不是某一个 step。打包值所在的记账位置不同，决定了同一句“仅前向”在 task 层是历史承诺，在 step 层只是禁止写回退逻辑。
+
+这一区分还要求可见性严格单向。step 粒度的进度、校验与失败不得进入 daemon 账本，否则分形会退化为两层共用一个执法者，重新制造 item/phase 上浮。step 层无论经历多少内部事实，对 task 层只折叠为 `returned(value) | exception`；task 层消费折叠结果，不反向解释或恢复某个 step。正因为合同形状可复用而事实账本不复用，两层才能各自保持前向并发而不互相泄漏调度语义。
+
+来源：record-2 3:23 操作员原话；一份文法、两个作用域以及持久性与可见性差异来自 3:24 的收敛推导。
 
 ## 0.5 值管道：定义、提升与双面闭合
 
@@ -84,6 +162,8 @@ context 单调累积意味着后一个时态保留前一个时态已经形成的
 编译面进行两侧闭合。来源面要求每个声明值恰有一个来源，并要求所有运行时来源都有签名完整的 map 或 agent 填值声明；消费面要求 prompt 占位符、检查谓词和特殊路由读取都引用已声明且可达的值。没有消费位置的声明值、没有来源的消费值或未补完的 map 骨架都产生 finding；严格模式禁止执行不闭合的 preset。
 
 本总纲只规定值管道的责任分界，不展开 ValueType 的完整递归 ADT、代码生成文件布局、finding schema、publish/pin 或 runtime resolver。这些细节由 #547 的专属重写轮次定义，但不得改变“编译期证明可达，运行时产生结果”的边界。
+
+来源：record-3 第 3—5 轮操作员原话；唯一来源与双面 finding 的精确诊断为主 session 推导。
 
 ## 0.6 检查面、路由面与 fail 的 total 语义
 
@@ -97,36 +177,39 @@ fail 是一个特殊步骤，而不是引擎硬编码的业务失败枚举。pre
 
 因为 context 可以完全由 item 与脚本形成，步骤不必包含 agent。纯程序节点与 agent 节点使用同一套时态和流转合同；差别只是 agent 时态是否实际实例化，而不是另开一种任务代数。
 
+来源：record-3 第 6—10 轮操作员原话；配置 ADT 尚未裁决的边界沿用 division-plan.md 面 0 与面 2 的责任划分。
+
 ## 0.7 Hook 与 GUI 是公共模型的投影
 
-hook 是独立于既定行为的旁路脚本，挂在五时态自然产生的转换点上。它与值管道中的 map 可以复用 subprocess 执行机制，但所有权和语义不同：map 由 preset 声明，是主流转的一部分，产值进入 context；hook 由 operator 声明，只观察时态事实，不产值进入 context，也不改变检查或路由结果。#543 后续只需围绕这些锚点、进程所有权和旁路观测展开，不再用 hook 承担 gate 状态机。
+hook 是挂在五时态转换点上的 **effectful subprocess runtime**，独立于既定主流转。它可以执行带外部副作用的脚本，因此“只读”不是它的能力边界；真正的边界是权威。map 由 preset 声明，产值进入 context，并参与主流转；hook 由 operator 声明，执行结果不进入 context，不拥有检查或路由的裁决权，也不产生领域 mutation 的权威。hook 即使改变了外部世界，该副作用也不能自行改写 daemon 账本或冒充 committed transition。后续 hook 责任面只围绕时态锚点、subprocess primitive、进程所有权与审计展开，不再承担 gate 状态机。
 
 GUI 的本体是 context 与副作用的可观测手段。context 面展示被提升并参与交接的值、各时态快照、谓词结果、正常/fail 路径和对象域值账本；副作用面展示未进入交接语义但对人仍有诊断价值的 worktree、进程三证、events、日志和 Git 残迹。GUI 读取这些事实，不重建或美化它们。
 
 观测本体并不禁止 #544 已经定义的有限运维动作。daemon 生命周期操作、unblock 和具备 authority 的 decision 作为附属动作面保留，并与观察面分栏；二者共享稳定 identity，却不共享权威，所有 mutation 仍由 daemon 裁决并回到权威读面核验。
 
+来源：record-3 第 18 轮操作员原话；hook 的 effectful runtime 定位、无领域 mutation 权威与 GUI 分栏控制面来自 division-plan.md 面 6、面 7 的主 session 裁决。
+
 ## 0.8 公共词汇
 
 - **对象域**：task、群组、锁、committed transition、消费与运行时生长结构所在的领域；以交换、单调和幂等消除无关调度顺序的可见性。
-- **函数域**：单个 task 的闭包内部；以五时态刻画严格串行的值生产、agent 调用和流转判定。
-- **context**：闭包在当前时态已经拥有的 typed 值集合，从 item 死值开始单调累积；不是 opaque 文本库，也不等同于全部副作用。
+- **函数域**：单个 task 的闭包内部；以五时态刻画单次交接实例内严格串行的值生产、agent 调用和流转判定。
+- **context**：闭包在当前时态已经拥有的 typed 值集合，从 item 死值开始单调累积；不是 opaque 文本库，也不等同于全部副作用。仅供 append/read 的不透明传输通道若不经过声明的解析、提升与消费，就不成为 context，也不占用这个术语。
 - **针眼通道**：两域唯一的正式交接边界；入口是 item 值形成的初始 context，出口是 `returned(value) | exception`。
 - **时态**：闭包内事实获得有效性的顺序位置；本模型固定为前置脚本、prompt 组装、agent 运行、后置脚本和流转判定。
+- **交接合同**：step 与 task 共用的“交付值包—解析/测量—谓词判定—返回结局”文法；在两个作用域实例化，但不共享持久账本。
 - **值管道**：类型定义、map 骨架、运行时提升和声明消费共同形成的 typed 数据路径。
 - **来源面**：回答每个值由 item、唯一 map 或 agent 中的哪一个产生，并检查其签名与可达性。
 - **消费面**：回答声明值在 prompt、检查或路由的哪个位置被读取，并拒绝无来源或不可达的消费。
-- **检查面**：对完整 context 中的值求谓词；默认恒真，显式 false 统一进入 fail，不选择正常后继。
+- **填值校验**：agent 时态内的 `unknown → T` parser；失败驳回给在场 agent 修正，不废弃当前流程。
+- **流转校验**：在完整 context 上运行的纯谓词；默认恒真，显式 false 统一进入 fail / NIL，不选择正常后继。
 - **路由面**：在检查通过后决定下一 preset 或升层的正交流程；“下一个 preset”是引擎可接管的特殊 context 值。
 - **fail / NIL**：fail 是 preset 可声明的特殊处理步骤；NIL 是未声明 fail 时仍然存在的专用缺省值，承接 operator 全局配置级联与最终硬默认停机。
-- **hook**：operator 声明的时态旁路脚本锚点；不参与 context，不改变流转。
-- **GUI**：context 面与副作用面的读器，并附带与观察分权的有限运维动作面。
+- **self-report / measurement**：agent 自填值与程序测量值两个提升口；可计算事实归 measurement，self-report 只承载不可测量部分。
+- **hook**：operator 声明、挂在时态锚点上的 effectful subprocess runtime；有副作用能力，但不参与 context、不裁决主流转、不产生领域 mutation 权威。
+- **GUI**：context 面与副作用面的可观测产品，并附带与观察分权、分栏呈现的有限运维动作面。
 - **preset（开放项）**：v2 指完整工作流；当前 v3 讨论中也可能指任务内部的步骤级定义单元。本文保留操作员用法，最终命名待操作员裁决。
 
-## 0.9 后续六篇的重写约束
-
-#543 必须把 hook 收缩到时态锚点上的旁路观察；#544 必须以 context 面和副作用面重组 GUI 的观察本体，并把有限控制面分栏；#545 必须把 agent 自填值实现为 typed 提升口，并区分填值校验与流转校验；#546 必须只在对象域定义并发代数、await、资源和 committed transition，不把步骤时态写入 daemon 账本；#547 必须实现值管道、代码生成、双面闭合以及不可变 definition 的编译与运行接缝；#548 必须让外部入口和 runner provider 消费同一 typed 合同，而不建立平行类型权威。
-
-这些约束只确定各篇的共同地基，不替各篇提前选择完整 schema、存储形状或执行协议。后续每一轮都应删除与本总纲冲突的旧机制，同时保留仍能在新边界内成立的证据、资源与恢复合同。
+来源：公共词汇汇总自 record-3 第 6—18 轮、record-2 3:23—3:24 与 division-plan.md 面 0、面 6、面 7；`preset` 命名张力保持开放，未作新裁决。
 
 <!-- 543 -->
 
@@ -988,294 +1071,277 @@ publication 验收在采样后 force-push、删除 ref 或制造网络错误。�
 
 <!-- 547 -->
 
-# RFC #547 的目标实现：它改变什么，以及这些改变为何不可省
+# RFC #547：从类型定义到可恢复的运行时值管道
 
-## 1. 先说明本文所说的“实现”
+## 1. 本文建立的不是“更多类型”，而是一条唯一值链
 
-RFC #547 描述的是 coder-loop 的目标实现合同，不是 main 当前已经具备的功能清单。当前一轮调查的结论是：R12 中十个 capability unit 没有任何一个满足 source-ready 条件，因此本批实现 issue 为零，十个单元全部保持 not-yet。这不是因为 RFC 缺少目标，也不是因为工作流被阻塞，而是因为它拒绝把设计图上的预期输入误写成 main 已经提供的产物。
+RFC #547 描述 coder-loop 的目标实现合同，不把 main 已有的局部资产写成已经闭合的能力。全文继续区分四种事实：**current** 是 main 当前真实运行的行为；**target** 是本 RFC 完成后必须成立的合同；**dependency** 是由其他 owner 提供、#547 只消费的边界；**proof** 是合同确定后仍需由真实路径验证的结论。后文中“目标系统会”只表示 target。
 
-main 目前拥有一批重要但不闭合的资产：统一 compiler 的骨架、真实 source hash、compiled/rejected 结果类型、公共 projection 的位置、声明驱动的文档 renderer、runtime tree 的 SQLite ADT 与约束、hook declaration carrier、opaque item 存储主体、事务与 migration 框架、baseBranch 和 closure/worktree 资源机制。这些资产决定了目标实现不需要推倒重来。然而，资产存在并不等于能力已经形成：runtime tree 表存在，不代表 production scheduler 以它为权威；hook 能被持久化，不代表 gate 会执行；tagged ref 和 source hash 存在，不代表 definition content 可以在重启后按 ref 取回；generic JSON 能落库，也不代表输入经过了 source schema 的类型准入。
+本篇的核心责任，是让 preset 从可变源文件变成一个类型闭合、可生成 map 骨架、可不可变发布并能在运行时按 ref 取回的 definition。对象域仍由 #546 管理运行时生长的 task、ready、claim 和 committed transition；函数域内部则沿总纲规定的五时态运行值管道。#547 负责这两域共同依赖的类型权威和 definition identity，不把闭包内的中间时态写进 daemon 账本。
 
-因此，本文始终区分四种事实：**current** 是 main 今天真实运行的行为；**target** 是 RFC 完成后必须成立的合同；**dependency** 是由具名外部能力提供、#547 只消费的边界；**proof** 是能力定义或实现后仍需由真实路径验证的结论。后文中所有“目标系统会……”都属于 target，不表示 current 已经如此运行。
-
-RFC 的核心并非“增加更多类型”。它要建立一条从可变定义到不可变执行实例的单一权威链。任何已经启用的能力都必须沿这条链取得定义、身份、状态和恢复证据；尚未交付的能力必须在明确边界上 reject、hold 或报告 unsupported，不能依赖 default、current source、字符串约定或兼容 fallback 半启用。
+main 已有统一 compiler 骨架、真实 source hash、compiled/rejected 结果形状、声明驱动的文档 renderer、tagged ref/FK、unknown-first 边界、SQLite 事务和 outbox 基础。这些资产可以复用，但不能证明 findings 已经同源、definition content 可以按 ref 恢复、ValueType 已贯穿来源面与消费面、map 资产能够生成和 pin，或 runner exit 已经只经一次 TransitionCommit 推进。
 
 ```mermaid
 flowchart LR
-  S[H1 source snapshot] --> C[CompileEnvelope]
-  C --> P[immutable definition publish]
-  P --> H[create capability admission]
-  H --> A[typed admission plan]
-  P --> M[runtime materialization plan]
-  A --> T[atomic instance creation]
-  M --> T
-  T --> R[runtime readiness]
-  R --> Q[ready to claimed plus RunIntent]
-  Q --> G[pre-spawn gate evaluation]
-  G -->|advance| X[runner exit fact]
-  G -->|hold| Y[claimed to held and capacity release]
-  X --> K[typed transition commit]
-  K --> O[committed effect intents and outbox rows]
-  O --> D[after-commit dispatcher]
-  D --> E[external effect and event delivery]
-  P --> Z[restart and resume by pinned ref]
-  T --> Z
-  K --> Z
+    S[类型定义与 prompt] --> A[authoring compile]
+    A --> G[CLI 生成 map 骨架]
+    G --> F[作者补完 map]
+    F --> C[严格 CompileEnvelope]
+    C --> P[不可变 definition publish]
+    P --> I[typed admission]
+    I --> T[单事务 instance create]
+    T --> Q[ready 到 claimed]
+    Q --> R[pre-spawn 资源准入]
+    R --> X[闭包五时态执行]
+    X --> K[TransitionCommit]
+    K --> O[outbox 与 effect intent]
+    P --> Z[restart 按 pinned ref 恢复]
+    T --> Z
+    K --> Z
 ```
 
-全文以一个 item 的完整生命周期检验这条链，而不是按旧问题编号逐项罗列。操作者编写 H1 preset：其中有递归任务结构、typed item/chain 输入、一个 structured JSON 值、required tool 和 pre-spawn gate。chain 与 item 在 H1 下创建，runner 得到 prompt 并退出；随后 source 被修改为 H2，daemon 重启。每个阶段都要回答同一组问题：谁拥有事实，产物是什么，何时可以失败，失败前哪些副作用尚未发生，什么被持久化，以及重启后依据什么继续。
-
-## 2. H1 首先必须得到唯一编译判定
+## 2. H1 必须只有一个 CompileEnvelope
 
 ### 2.1 Current 为什么会给出多个答案
 
-current compiler 已经能把 preset 解析成 canonical model，也有 compiled/rejected 分支、source hash 和公共 projection 函数。但是，完整判定并未沿所有消费者保持为同一个对象。成功结果中的 model 与 warnings 会在 `loadPreset` 一类边界上分离；daemon 还能通过 callback 把 finding 写成另一种 observability event；doctor 和 status 并不读取同一份 warning 集合。与此同时，daemon 的成功 cache 以目录路径为 key 并持续到进程结束，direct loader 或 CLI 却可以重新读取当前文件。
+current compiler 已能把 preset 解析为 canonical model，也有 compiled/rejected 分支、source hash 和公共 projection 函数。然而，成功结果中的 model 与 warnings 会在部分装载边界分离，daemon callback、doctor、status 和 CLI 也未必读取同一份 finding 集合。daemon 的成功 cache 以目录路径为 key 并持续到进程结束，其他入口却可以重新读取当前文件；同一时刻，长寿命 daemon 可能仍解释 H1，另一个入口已经解释 H2。
 
-结果是，同一时刻的 H1/H2 可能产生两种可见事实：长寿命 daemon 继续使用首次成功装载的 H1，另一个入口已经编译 H2。失败 cache 会被删除并重试，成功 cache 却没有相应的 source identity 或失效事件。cache 在这里不只是性能层，它意外成为定义时间语义的一部分。
+cache 因而意外成为定义时态的一部分。失败 cache 会被删除并重试，成功 cache 却没有等价的 source identity 与失效事实。仅给某个入口补一个 checker 或 JSON projection，仍会产生第二份判定，不能建立定义权威。
 
-dead-fragment 检查暴露了另一个同源问题。current 只有 fragment 的 id、role、path 以及 phase role 验证，没有 versioned typed fragment reference graph；current finding carrier 也只有较窄的 verdict/rule/message 形状。直接增加一个 reachability checker，会迫使该 checker私自重建 graph，并把结果塞进第二种 finding 格式。这个补丁即使能报出一个 warning，也会制造新的事实源。
+### 2.2 Target 的唯一判定与三种 identity
 
-### 2.2 Target 建立什么
+目标 compiler 对一次稳定 source snapshot 只产生一个 CompileEnvelope。成功分支包含 normalized compiled product 和结构化 findings；拒绝分支包含非空 diagnostics。CLI、doctor、cache、GUI 和第三方 consumer只能投影或引用这个 envelope，不能重新计算同一静态事实。finding variant 具有稳定 identity 和 typed payload，message 只用于解释，不能成为控制流。
 
-目标系统以一次稳定 source snapshot 为输入，只产生一个 `CompileEnvelope`：成功分支包含 normalized compiled product 和结构化 warnings，拒绝分支包含非空 diagnostics。envelope 穷尽承载typed findings；每个 finding variant按自己的schema拥有稳定identity和payload，message不能成为控制流。callback、CLI、doctor、cache、未来 GUI 或第三方 consumer只能投影或引用 envelope，不能重新判断同一静态事实。
+三种 identity 必须分域。CompileEnvelope identity 表示一次完整编译判定及其 findings；compiled product identity 表示 normalized 可执行定义；definition content identity 表示已经发布、可供实例 pin 的完整 bundle。修改 finding 规则不应伪装成执行定义变化，执行资产变化也不能沿用旧 content identity，因此三者可以引用，不能压成一个 hash。
 
-这里必须区分三种 identity。`CompileEnvelope` identity 表示一次完整的编译判定，包括 findings；compiled product identity 只表示可执行的 normalized 产物；后续 definition content identity 表示已经发布、可供实例 pin 的完整内容。它们可以互相引用，但不能被压成一个 hash。否则，修改 warning 规则可能被误判成执行 definition 改变，或者 executable content 改变却沿用旧的完整判定。
+公共 schema 是可分发合同，不是一次 projection instance，也不是源码内部 parser 的别名。compiler 边界拥有 schema producer；独立 consumer 尚未存在，只表示 cross-owner proof 未完成，不授权另一个入口复制 schema 或自行解释 compiled product。
 
-公共 schema 是独立可分发的合同，不是某次 projection instance，也不是源码内部的 ArkType boundary。compiler 边界拥有 schema producer；独立 consumer 的缺席意味着 cross-owner 兼容性尚未证明，不意味着 producer 可以继续只输出一个看似 JSON 的实例。D10只接受D1验证过的compiled-product handoff；envelope、product、schema和definition identity保持分域，definition bundle按自己的canonical content identity发布。current doctor 默认诊断 current definition，展示来自同一 envelope 的 findings；pinned instance 的完整性健康属于 status/ref resolver 或显式 definition-ref 诊断，不与 current source 混成一个真假结论。
+## 3. ValueType 与每值唯一来源
 
-### 2.3 失败与恢复
+### 3.1 ValueType 只表达值，不承担文档布局
 
-compile rejected 时，不允许产生 live definition、成功 cache 或“复制完成”marker。source 在 snapshot 与读取之间变化时，结果必须是具名 race/identity failure，再以新的完整 snapshot 重试；不能把两次读取拼成一个 artifact。cache 只能缓存完整 envelope 或按内容 identity 缓存 verified product，不能继续让 path 充当权威。
+目标系统使用封闭递归 ValueType：`string | number | boolean | null | array | record | union`。外部 candidate 以 `unknown` 进入精确 parser，解析成功后才形成 refined value。missing 是独立状态，不等于空串；`null` 只有在声明允许时才是值；`false`、`0` 与空集合都不能被 truthiness 抹成缺失。default 属于值声明，use-site 不得重新解释 source type。
 
-这一阶段仍有明确边界。independent schema consumer 是验证依赖；它不阻断本仓生成、版本化和 round-trip 验证 schema。dead-fragment analysis 仍不是 source-ready：它所需的 typed graph producer和 typed finding carrier尚未进入 main，因此 #547 不能靠缩减验收或把其他 owner 的实现塞进 checker 来提前开工。
+ValueType 同时拥有 canonical serialization：标量有唯一文本，structured value 使用 canonical JSON。它不拥有 Markdown label、prefix、suffix、fence 或空行规则；这些仍由版本化的文档渲染声明负责。类型系统决定“值是什么”，renderer 决定“值怎样进入 prompt”，二者不能互相重做对方的解析。
 
-## 3. Compile 成功之后，为什么还必须发布不可变 definition
+### 3.2 来源声明是一个封闭和类型
 
-### 3.1 H1/H2 是最直接的反例
+每个 context 值在类型定义中恰有一个来源：
 
-假设 item 在 H1 下首次运行。current 会计算真实 source hash，也可能把 tagged ref 写进 runtime node，但 definition 表中没有可按 ref 恢复的完整内容。scheduler 在每次 spawn 前仍能根据路径加载 preset并重新渲染 prompt。进程内 path cache可能暂时把行为冻结在 H1；daemon 一旦重启，cache 消失，旧 item 会重新读取 H2。
+- **item source**：instance 创建前已经存在的死值，经 typed admission 成为初始 context；
+- **map source**：前置或后置脚本产生原始输出，再由声明的 map 结合当时时态已有的 context 提升；
+- **agent source**：agent 在运行时填写，并在 agent 仍在场的时态出口接受填值校验。
 
-这种行为表面上像“支持热更新”，实际上破坏了实例 identity。status 和 events 可能继续显示 H1 的 ref，runner 行为却来自 H2。若 H2 删除当前 phase，系统可能在已经建立 run/closure 资源后才失败；若 H2 保留 phase但改变 prompt、binding 或工具要求，旧实例会静默改变行为。tagged ref 此时只负责归因，不负责执行同源。
+同一个值名声明多个来源是编译期非法状态，不能留给运行时决定覆盖顺序。context 按五时态单调累积：后继时态保留既有值，只添加本时态唯一来源产生的新值。map 或 agent 不能覆盖 item authority，后置 map 也不能重写前置 map 已经形成的值。
 
-current materialize 顺序还会放大问题：source 被复制到 staging，完成 marker 写入，目录 rename为公开 target，并清除旧 sibling，随后才进行完整 parse/compile。非法 H2 因而可以成为带“完成”marker的唯一 artifact，并在被拒绝之前删除最后一个合法 H1。并发 materialize也可能互相 prune，使所有调用都返回成功、所有返回路径最终都不存在。
+### 3.3 map 的签名与 Just/Nothing
 
-### 3.2 Target 的 publish 合同
+map 的抽象签名是 `map(context, scriptOutput)`。scriptOutput 在外部程序边界仍是 string 或未经信任的结构；map 可以读取该时态开始前已经存在的 typed context，把二者解析为 `T`，再提升为 `Just<T>`。只有 `Just<T>` 能进入 context 并被后续 prompt、检查面或路由面消费。
 
-compile成功的 product必须进入完整 pre-run bundle。这个 bundle 不是任意原文件备份，而是所有运行前 consumer所需字段的闭包：normalized preset、模板与 fragments、typed binding declarations、状态词表、task graph、tool/gate declarations、doc render declarations、相应 schema和manifest。运行结果不进入 definition；创建前无法计算的事实也不能伪装成 definition 字段。
+`Nothing` 表示这次运行没有形成声明的 `T`，不等同于编译错误，也不能用 default 值伪造成功。它发生在运行时，并按所在时态进入 #545 定义的程序异常或 fail/NIL 路径。编译器能够证明 map 的输入 context 和输出类型可以接入管道，却不能证明脚本一定成功、map 一定返回 `Just`，或最终谓词一定为 true。
 
-发布分为可恢复的状态序列。系统先在同一filesystem的staging目录写入尚不可解析的partial bundle，再逐个fsync文件并fsync目录；随后按canonical bytes计算content identity，重新打开并验证manifest、每个asset digest和整体identity；只有全部验证通过，才以rename公布artifact并把metadata置为`live`。相同ref与相同content的重复publish是幂等成功；相同ref却出现不同content是identity collision，必须拒绝；不同ref之间绝不因“只保留最新版本”而互相prune。D10只接受经过验证的compiled-product handoff，并以definition bundle自己的canonical content identity发布`PresetDefinitionRef`。compile envelope保留完整findings；发布过程不重新计算第二份finding集合，也不把envelope、product和definition identity等同。
+agent source 不通过 map 冒充 measurement。它使用同一 ValueType parser 完成填值校验，但值的信任来源仍是 self-report；运行后 map 则是 measurement。二者最终都形成 typed context 值，来源 provenance 不能被抹平。
 
-artifact publish与实例 create必须分相。先发布、后写DB ref的次序意味着崩溃最多留下一个完整但无人引用的 orphan artifact，后续GC可以安全清理；反过来先写DB再补文件，会产生已经commit却无法解析的instance。
+## 4. CLI 生成的是 map 骨架，不是替作者写完程序
 
-所有 instance consumer必须经过shared resolver按tagged ref取得verified bundle。cold resolve依次验证ref的tagged kind与schema、metadata仍为`live`、manifest完整、每个asset digest匹配以及整体content identity匹配；通过全部检查后才可写入process cache。任一步失败都返回具名missing/corrupt/unsupported/retiring结果，不得以旧cache、current source或“尽量兼容”的弱解析继续。current compile与pinned resolve是两个接口：前者回答“现在写在source里的定义是否成立”，后者回答“这个实例创建时固定的定义是否仍可完整取回”。process cache只缓存`definition ref → verified content`，cache miss必须重新读immutable store，不能退回current path。
+### 4.1 生成物属于 preset 的定义态
 
-### 3.3 Corrupt、legacy 与 GC
+作者先写 prompt 与类型定义，再由 CLI 根据所有 map source 生成对应时态的 map 文件骨架。骨架不是一个只有函数名的空壳：它包含可检查的输入/输出签名，并用注释枚举该 map 运行前可用的 context 值及其类型。前置 map 只能看到 item source 和此前已经形成的前置值；后置 map 可以看到运行前 context 与已通过填值校验的 agent 值。
 
-artifact missing、digest mismatch、unknown schema、kind mismatch或retiring都产生typed definition resolution状态。对已经存在的pinned instance，这些状态导致hold并显示exact ref；系统不能通过重新编译current source“修复”它。
+生成器不为 item source 或 agent source制造虚假 map。它也不猜业务转换，不自动把 bash string 强转为目标类型。作者必须补完每个声明的 map；未补完表示 preset 仍处于 authoring 状态，而不是运行时再找一个 fallback。
 
-真实中央数据进一步限定了migration：当前可见的历史数据是pre-ref legacy，15个chain、69个item、932个finished run都没有可验证的历史definition content或ref壳。残留materialized目录、repository字段、event、status或current source都无法证明当时使用的H1。此类记录必须标记`legacy-definition-unproven`：list、status和audit仍可读，resume、schedule和mutation停止。用H2构造一个看似完整的ref只会伪造历史。
+### 4.2 完整性与 staleness 必须可判
 
-GC只以persisted ref可达性为依据，扫描chain、item、runtime node、run和保留历史；任何一条持久ref都阻止artifact退役。候选artifact必须在事务中再次确认零ref，才能从`live`进入`retiring`；进入retiring后，新的resolve与create立即拒绝它。清理器随后把artifact移入trash，再删除metadata；若进程在任一步崩溃，restart从retiring/trash状态继续，而不是把它重新当作live。这里不引入reader lease或cache保留权：cache不是retention authority，publish、create与GC的协调只需守住“有持久ref绝不退役、零ref退役后不再新增引用”。
+生成骨架的期望签名由类型定义和时态位置机械推导。类型、来源或可用 context 改变后，旧 map 文件若仍对应旧签名，就是 definition 失配。compiler 必须识别缺失、未补完、签名不符和 stale map，并把 finding 放进唯一 CompileEnvelope；不能等到脚本已运行后才以普通异常暴露定义没有写完。
 
-H1/H2 restart、publish各崩溃窗口、create/GC竞争、cache重建和corrupt修复仍需集成验证。目标合同已经确定恢复依据，但不能把尚未跑通的路径写成 current 保证。
+精确文件布局、命名、import 装配和生成器如何发现已有文件属于 TypeScript 工程实现，不构成本 RFC 的抽象。RFC 只要求生成结果具有稳定 identity、能够和声明一一对账，并在严格执行前成为 definition bundle 的完整资产。
 
-## 4. Publish 与 Create 之间为什么需要两份 Pure Plan
+## 5. 双面闭合决定 definition 是否可执行
 
-不可变 H1 已经存在，并不意味着 item 可以立即写入数据库。实例创建还需回答两类只有在“具体输入 + exact definition”同时已知时才能回答的问题：这些chain/item值是否合法；这份任务定义应该物化成什么runtime graph。两类计算都必须在business事务之前完成，因而分别形成typed admission plan和runtime materialization plan。
+### 5.1 来源面闭合
 
-### 4.1 Typed admission：值的意义只能由 source schema 决定
+来源面回答每个声明值从哪里来。compiler 必须穷尽检查：值有且仅有一个 item、map 或 agent source；item default 与 ValueType 相容；map 所在时态能够取得其声明的 context 输入；map 输出与目标值类型一致；agent source 位于允许 agent 填值的步骤；所有 map 骨架均存在、已补完且不 stale。
 
-current 中 `[item.fields]` 虽有有限类型词表，但该type没有贯穿生产消费者；chain metadata是开放JSON，runtime value大多压成string。缺失的item/chain值在render时经常变成空串，结构值则拖到render才抛异常。`false`、`0`、显式`null`、missing和default因此容易被混为“没有字符串”。generic JSON boundary只能证明数据可以安全编码，不能证明它符合某个source的领域类型。
+多来源、悬空 source identity 和不可能成立的签名是结构矛盾，直接产生 rejected CompileEnvelope。缺失实现、未补完骨架等 authoring 不完整项进入 typed finding，使作者仍能查看 normalized model 和生成建议，但不能在严格执行路径中被当成完成的 preset。
 
-目标使用封闭递归ValueType：`string | number | boolean | null | array | record | union`，不保留opaque JSON或为未来预埋无consumer的variant。source declaration是值意义的唯一权威；use-site不能重新解释source type。外部 candidate以unknown进入parser，成功后得到`AdmittedBinding`，其中保留owner、source、definition ref、provenance和refined value。
+### 5.2 消费面闭合
 
-missing是独立状态，不是空串。null只有在类型允许时才是合法值；default属于source declaration；required在相应消费边界判断。定义期可知的default/type compatibility在compile拒绝，具体chain/item值在create、update或batch admission拒绝，运行时才产生的agent exit或外部outcome在各自typed boundary判断。每个约束只在最早拥有足够信息的位置判定一次。
+消费面回答值在何处被读取。prompt 占位符、检查谓词和特殊路由读取都必须引用已声明且在该时态可达的值；引用未来时态的值、把 `Nothing` 当值消费或在 use-site 改写类型都属于编译拒绝。反向地，声明值若没有任何消费位置，compiler 产生未消费 finding；严格模式禁止执行这种未闭合定义，避免类型表逐渐变成无人负责的值仓库。
 
-update不能只验证patch里的孤立字段；它必须将patch应用到旧对象后验证完整对象不变量。batch必须共享同一pinned definition和admission规则，任一元素失败则整个batch零写。agent可以写入明确声明的typed exit/result字段，但不能覆盖item、chain或runtime authority拥有的值。
+检查面为每个相关值提供谓词槽。未声明自定义检查时，槽位由恒真谓词补齐，因此穷尽性不要求生成无意义代码。路由面使用封闭后继集合：“下一个 preset”的候选数为零、一个或多个，都必须在 compiled product 中形成 total 形状；compiler 能证明候选集合与 chooser 类型闭合，不能证明运行时 chooser 会选择哪个值。
 
-D2拥有typed value及其canonical value serialization：标量有唯一文本，structured value有canonical JSON。它不拥有prompt布局。D6的职责是在后续阶段把value text放入声明驱动的文档结构。这个owner分界避免ValueType同时变成格式模板，也避免renderer重新猜类型。
+### 5.3 Warning 与严格模式承担不同职责
 
-### 4.2 Runtime materialization：声明图不等于运行图
+authoring compile 允许以 finding 告诉作者“还缺什么”，以便继续生成和补完；严格模式则是 live publish、instance create 和运行恢复的准入条件，任何来源面或消费面未闭合都不得执行。结构上自相矛盾的声明始终 rejected，不因关闭严格模式而放行；可继续编辑但尚未完成的声明可以保留 normalized 结果和 warnings，却没有运行资格。
 
-current 已有leaf、seq、par、join的runtime ADT、SQLite外键和round-trip测试，但production scheduler没有从compiled tree一次构造完整runtime tree。它仍从preset phase数组和item phase/status选择下一步；runtime leaf往往在run真正出现时动态追加。status可以展示一棵树，scheduler却完全不读取它，这棵树因此只是旁观记录，不是推进权威。
+这个分层不是把错误推迟。它区分“编译器能否理解这份半成品”与“这份 definition 是否足以驱动运行”。两档都使用同一 CompileEnvelope 和 finding 词表，不建立第二个 checker。
 
-目标的任务声明采用referenced-node table：root id、按显式id声明的nodes，以及child/target/dependency引用。stable node id不由数组位置或嵌套路径生成；移动节点不改变identity。compiler建立索引并检查duplicate、dangling、cycle和非法结构。现有linear phase输入只是一种兼容语法糖，parse后立即normalize为同一canonical graph，不形成第二套模型。
+### 5.4 可达性证明不是运行结果
 
-在exact H1上，materializer纯计算完整runtime nodes、edges、initial readiness、definition-node refs和需要的资源意图。它不在遍历中写DB。这里有两种不可混淆的缺席：若递归task parser/normalizer尚未交付，compile直接返回`recursive_tasks_unsupported`，根本不产生可发布product；若parser已经能生成合法的non-degenerate par，而真实constructor/scheduler尚未交付，则在任何副作用前返回`par_runtime_unsupported`，新实例拒绝、已pin且到达该路径的实例hold。禁止把par顺序执行，因为那会把“缺能力”伪装成不同业务语义。
+编译面能够判定的范围止于声明闭合、签名匹配、值管道连通、谓词槽穷尽和后继闭集穷尽。这些都是可达性证明。脚本是否启动成功、map 是否产出 `Just`、agent 是否填写合法值、谓词真假和 chooser 选择，全部在运行时求值。任何 status、doctor 或 GUI 都不得把“compiled and reachable”显示成“运行时已经满足”。
 
-两份plan之间可以相互引用definition identity，却不能吞并对方owner：admission不创建runtime node，materializer不解析raw binding。这样，错误能在写入之前完整收集，实例事务只负责提交已经验证的domain products。
+## 6. 完整 definition 必须不可变发布
 
-## 5. 为什么实例创建必须是一个事务
+### 6.1 H1/H2 是最直接的反例
 
-拿到live H1、admission plan和materialization plan后，目标系统在一个`BEGIN IMMEDIATE`事务中写入：chain/item业务row、tagged definition ref、admitted bindings、完整runtime nodes与edges、initial readiness，以及transactional outbox row。commit之前，scheduler、status和dispatcher都不能观察到这个实例；commit之后，dispatcher才允许执行已经提交的outbox dispatch intent。
+current 会计算 source hash，也可能持久化 tagged ref，但完整 definition content 不能可靠地按 ref 恢复。scheduler 在 spawn 或 resume 前仍可能根据路径读取 preset；进程内 cache 暂时保留 H1，daemon restart 后 cache 消失，旧 instance 便可能被 H2 重新解释。若 H2 修改类型、map、prompt 或后继，status 仍显示 H1 ref 而实际执行 H2，ref 就只剩归因价值。
 
-这个边界不是为了追求“所有东西放一个事务”这种形式美。若item row先commit、binding随后失败，DB会出现不可运行的item；若runtime tree在first spawn才建立，create成功并不证明实例可调度；若outbox row在business commit后才写，进程可能在两者之间崩溃，造成不可恢复的漏投递。transactional outbox必须和business state同事务，dispatch只能发生在commit后。实际transition产生的effect intent属于后续独立authority，不被create合同预先合并。
+current materialize 顺序也存在同源风险：source 先被复制到 staging，完成 marker 和 rename 早于完整 parse/compile，旧 sibling 还可能先被清除。非法 H2 因而可能成为唯一“完成”artifact；并发 materialize 也可能互相 prune，使成功返回的路径最终不存在。
 
-create之前的错误都导致零business row。若客户端得到的commit结果未知，恢复顺序不是盲目重跑create，而是用instance identity查询business row与outbox，再决定返回既有结果或安全重试。这个规则防止因网络断开或进程崩溃重复创建runtime graph与外部资源。
+### 6.2 Bundle 必须闭合所有运行时消费者
 
-去隐藏业务原语也在这个边界落地。item和chain selector是opaque identity；`owner/repo#123`不会被engine parser改写成另一item id。repository不再是engine物理selector或forge admission字段，而是可选typed business binding，只在明确需要remote操作的adapter中读取。local worktree、reconcile与资源身份只使用chain/item/baseBranch/path等本地事实；repository缺失只阻断对应remote operation，不使无remote需求的实例全局hold。
+严格 compiled product 发布为完整 pre-run bundle。bundle 至少包含 normalized preset、ValueType 与来源声明、prompt 与 fragments、文档渲染声明、谓词槽与后继闭集、脚本声明、已补完且签名匹配的 map 资产、公共 schema 和 manifest。对象域 task 声明只以 #546 定义的 typed seam 进入 bundle；#547 不在这里编译一棵完整运行树。
 
-baseBranch并不因此消失。它是引擎确实消费的pre-run chain输入，由typed ChainDefinition提供。ChainDefinition的ADT、parser、version和error属于具名provider；本仓只通过client boundary消费verified ref与payload，不复制第二parser。新item必须显式pin自己的PresetDefinitionRef；empty chain可以独立展示status，mixed chain逐item解析，不能借一个“代表preset”做chain-wide判断。
+map 文件是 definition 资产，而不是环境中按名字重新发现的程序。其 bytes、签名和 manifest digest 都参与 definition content identity。运行结果不进入 bundle；运行前无法求得的 `Just/Nothing`、agent 值和谓词结果也不能伪装成 definition 字段。
 
-真实v14数据中的15个chain全部是repository column-only，未发现column/binding冲突，因此repository值可以无损搬到business binding，同时保留row id、69个item、932个run、baseBranch和资源关联。然而，这个shape migration不产生historical definition证据；所有pre-ref记录仍然hold。数据搬运和definition证明是两个完全不同的问题。
+### 6.3 Publish、resolver 与 cache
 
-## 6. 完整实例如何成为一次可执行 Attempt
+发布先在同一 filesystem 的 staging 目录写入不可解析的 partial bundle，再逐个 fsync 文件并 fsync 目录；随后按 canonical bytes 计算 content identity，重新打开并验证 manifest、每个 asset digest 和整体 identity。全部验证通过后，才以 rename 公布 artifact，并把 metadata 置为 `live`。
 
-事务commit后，scheduler只能读取runtime readiness。创建事务已把首批可执行leaf置为`ready`；scheduler以revision/epoch约束的CAS把其中一个leaf从`ready`改为`claimed`，并在同一权威步骤持久分配稳定的RunIntent和RunId。claim是一次调度租约和身份分配，不是业务完成。binding、definition与runtime capability admission必须在`BEGIN IMMEDIATE`和business row创建之前完成；只有需要明确run host的pre-spawn gate在claim之后判断。任何worktree、closure或process副作用都必须等到这两层检查结束。
+相同 ref 与相同 content 的重复 publish 是幂等成功；相同 ref 对应不同 content 是 identity collision，必须拒绝；不同 ref 不得因“只保留最新版本”互相 prune。CompileEnvelope 保留原 findings，publish 不重新计算第二份判定，也不把 envelope、product 和 content identity 混为一个。
 
-一次 attempt的持久轨迹因此不是“spawn后补一条run记录”，而是：`ready`节点经CAS成为`claimed`并得到稳定身份；pre-spawn gate要么把它推进到可spawn状态，要么原子改为`held`并释放capacity；允许spawn后记录process fact；process exit写入不可变exit fact并把attempt置于awaiting-transition；validator据此构造TransitionCommit；commit再原子派生父seq的下一child、par children或join host的新readiness。每次派生都引用原节点revision、definition node identity和RunIntent，duplicate transition幂等返回既有commit，stale revision、foreign credential或错误host则在写入前拒绝。
+所有 instance consumer 通过 shared resolver 按 tagged ref 取得 verified bundle。cold resolve 依次验证 kind、schema、`live` metadata、manifest、每个 asset digest 和整体 identity；通过后才可进入 process cache。cache 只保存 `definition ref → verified content`，miss 必须重读 immutable store，不能退回 current path。
 
-这条轨迹也定义了restart，而不是把restart留给猜测。`claimed`但没有process fact时，系统按同一intent重新进行pre-spawn恢复，不能另分配RunId；process已经exit但transition未commit时，从exit fact和domain journals重建同一transition request；transition已经commit而outbox尚未dispatch时，只恢复dispatcher，不再推进第二次readiness。这样，崩溃窗口被压缩为“读取哪条已持久事实继续”，而不是“推测上一进程做到哪一步”。
+### 6.4 Corrupt、retiring、GC 与 legacy
 
-### 6.1 Prompt bytes 的 owner 链
+missing asset、map digest mismatch、unknown schema、kind mismatch或 retiring 都产生 typed definition resolution 状态。新 instance 在副作用前拒绝；已经 pinned 的 instance 进入可见 hold，并显示 exact ref。系统不得用 H2、旧 cache 或兼容 bundle“修复”H1。
 
-D2将admitted value转成canonical value text；D6读取versioned `DocRenderDeclaration`，按固定顺序组合label、prefix、suffix、style和blankBefore，输出runtime inputs doc bytes。structured value默认使用单行canonical JSON；block或fenced呈现只有声明显式要求时才使用。变量名、placeholder位置、JSON大小或内容不触发启发式布局。
+GC 只以 persisted ref 可达性为权威。任何 chain、item、task、run 或保留历史中的 ref 都阻止退役；零 ref 候选在事务中再次确认后从 `live` 进入 `retiring`，此后新 resolve 与 create 立即拒绝。清理器再把 artifact 移入 trash 并删除 metadata，restart 从 retiring/trash 状态继续。cache 不是 retention authority。
 
-这条链区分两个owner。D2决定“这个值是什么、它的canonical文本是什么”；D6决定“这个文本怎样进入文档”。如果renderer重新解析raw JSON，typed admission就会被旁路；如果ValueType携带任意Markdown布局，类型系统又会变成模板系统。相同definition ref、phase、binding和typed value必须在create、resume和restart得到逐字节相同的prompt输入。
+真实中央数据中的 15 个 chain、69 个 item 和 932 个 finished run 都属于 pre-ref legacy，没有可验证的历史 definition content。repository 字段、materialized 残留、event、status 或 current source 都不能证明当时的 H1。此类记录标记 `legacy-definition-unproven`：list、status 和 audit 可读，resume、schedule 和 mutation 停止；只有真实历史 artifact 证据可以解除。
 
-unknown render declaration version、corrupt declaration或unsupported style在任何worktree/process副作用前产生typed hold。多类型create→prompt→真实runner，以及resume后同ref字节一致性目前仍是proof gap；current production renderer的存在只说明部分布局资产可复用。
+## 7. Typed admission 把值管道接到实例与闭包
 
-### 6.2 Tool 与 Gate 必须先证明 runtime capability
+### 7.1 Item source 在最早拥有信息的边界解析
 
-current public projection保留tools/toolRequirements槽位，但值恒空；doctor仍硬编码检查`gh`；runner selection只验证binary。hook declaration能被解析、持久化和按global/chain/item形成effective view，但没有executor、decision journal或调度调用。空数组和carrier都不能证明能力存在。
+具体 chain/item candidate 在 create 前以 unknown 进入 pinned definition 的 parser。成功后形成 admitted item values，保留 owner、source、definition ref、provenance 和 refined value；失败返回精确 field/path/expected/actual，不写 business row。missing、default 和 null 的语义只由 source declaration 决定，renderer 不补空串，CLI 也不私自归一。
 
-目标tool协议以definition-scoped ToolId贯穿requirement、invocation和outcome。compile后的requirement在每个run中派生稳定requirement identity；实际调用产生带definition/run/phase/tool/namespace/author与durable-commit provenance的evidence；evaluator把journal从`Pending`推进为`Evaluated(Achieved | NotAchieved | NotEvaluated)`；finalize冻结本次attempt允许消费的结果；TransitionCommit只消费已经finalize且属于同一host的ref。provider、availability、invocation、outcome和requiredness是不同轴：availability只说明能否提供；invocation说明发生过调用；outcome说明业务条件是否被确定满足；requiredness决定缺少确定outcome时能否完成。compile、doctor和prompt读取同一registry。首个具体predicate可以是entry-existence，但它仍必须产生与具体run/invocation关联的typed outcome，不能由event或context字符串伪造。
+update 必须把 patch 应用到旧对象后验证完整对象不变量，不能只看 patch 中的孤立字段。batch 中所有元素共享同一 pinned definition 和 admission 规则，任一元素失败则整个 batch 零写。agent 运行时只能填写声明为 agent source 的值，不能覆盖 item 或 map authority；其填值修正循环由 #545 定义。
 
-required与expected不是同义词。required tool capability缺席时，新实例unsupported reject、已有实例hold；expected capability缺席时可以继续，但必须显式投影`NotEvaluated`，不能伪装成Achieved，也不能让该轴从结果中消失。已经选择并开始评估的requirement则受finalize cutoff约束：cutoff之后到达的late evidence不得改写本次transition，只能成为后续attempt可见的新事实。restart看到Pending时恢复同一evaluation，看到Evaluated但未finalize时只做finalize，看到已consume ref时不得再次消费。真实invocation/evidence/finalize runtime仍是具名外部dependency；本RFC规定的是本仓必须消费的合同与缺席行为。
+### 7.2 运行时必须只使用 pinned map
 
-目标gate协议使用四个封闭decision point：`run.pre-spawn`的host是RunIntent，触发事实是claim完成，decision决定spawn或hold；`run.post-exit`的host是同一run，触发事实是durable exit，decision决定是否允许构造transition；`container.join`的host是container node/epoch，触发事实是所需children到达候选终态，decision决定join推进或hold；`chain-complete`的host是chain completion epoch，触发事实是root候选完成，decision决定发布终态或hold。每一点都必须把trigger fingerprint、binding identity、decision与consume ref写入GateEvaluation journal，而不能只发event。
+前置脚本、prompt 组装、agent 填值、后置脚本和流转判定都从同一 verified bundle 取得类型与 map 资产。pre-run map 的 context 从 admitted item values 开始；post-run map 在此基础上还能读取已验证的 agent 值。相同 definition ref、context 与脚本输出必须进入同一 map 实现，不能在 resume 或 restart 时扫描当前目录找到另一个版本。
 
-GateEvaluation按`evaluating → decided → consumed`推进。restart看到evaluating时以同一host与fingerprint恢复，看到decided时由对应consumer原子consume，看到consumed时返回既有结果。named binding遵循chain覆盖global；item层不参与named gate binding。optional只表示“optional declaration没有matching binding时可以skip”；一旦选中了optional binding，其executor失败或能力缺席就不能静默忽略。任何gate declaration在能力缺席时都使新实例reject、已有实例hold，因为runtime连声明的point/journal语义都无法兑现。
+若 resolver 发现 map asset 缺失或损坏，沿既有 definition corrupt 语义拒绝或 hold；若 asset 完整但脚本启动失败、map 返回 Nothing 或谓词为 false，那是运行时结果，分别进入 #545 规定的异常或 fail/NIL 流程。两者不能都压成“map failed”。
 
-create capability admission发生在`BEGIN IMMEDIATE`之前：它检查声明所需的tool/gate协议版本、registry与runtime实现是否可用。任何gate能力或required tool能力缺席时，新实例typed reject，已经pinned的实例在以后解析时hold；只有expected tool能力缺席允许继续，同时显式形成`NotEvaluated`。它不同于claim之后的具体gate evaluation；后者必须等RunIntent/RunId稳定后才能绑定host。不能继续运行一个“声明存在、runtime忽略”的gate，也不能把required tool降级成prompt提示。
+闭包内 context、填值驳回、map 中间结果与谓词求值属于函数域，不进入 daemon 的 ToolOutcome 或 GateEvaluation journal。对象域最终只观察 `returned(value) | exception`。
 
-pre-spawn gate发生在RunIntent/RunId已经稳定分配之后，因此decision可以绑定明确host。若gate阻断，runtime原子地从claimed转为held，保留同一intent、run id和evaluation epoch，同时释放scheduler capacity；恢复后根据同一journal/fingerprint重评，而不是创建第二次evaluation。只有gate advance后，系统才允许创建worktree、closure或runner process。其他三个point也遵循同一原则：先持久trigger fact与host，再评估，再由唯一consumer消费；评估失败停在journal/hold，不得绕过gate推进业务状态。
+### 7.3 Canonical value 与 prompt bytes 的 owner 链
 
-ToolOutcome和GateEvaluation的外部runtime尚未交付。#547定义registry、identity、capability seam、缺席行为和transition消费方式，但不虚构transport或executor。真实entry/outcome/finalize/restart与gate timeout/recovery仍需由具名dependency和集成路径证明。
+ValueType owner 输出 canonical value text；文档 renderer 读取 pinned DocRenderDeclaration，把文本放入声明的 label、prefix、suffix、style 与 blankBefore 结构。renderer 不重新解析 raw JSON，ValueType 也不携带任意 Markdown 布局。相同 ref、步骤、context 和 typed value 在 create、resume 与 restart 必须生成逐字节相同的 prompt 输入。
 
-## 7. Runner 退出为什么不等于业务完成
+unknown render declaration version、corrupt declaration或 unsupported style 在任何 worktree/process 副作用前产生 typed failure。多类型 item 经过 create、map、prompt、agent 填值和后置 map 的真实路径仍是 proof gap，不能由现有 renderer 的存在替代。
 
-current run结束、item status写入、active run清理、closure状态、session更新和events分布在多个事务与异步步骤。进程可以在任意两步之间崩溃，留下“run已结束但active_run仍存在”“runner成功但item未推进”“event已写但业务row未更新”等中间状态。startup recovery能清理部分stale/orphan run，却不能重放一个不存在的统一业务commit。
+## 8. Publish 与 create 分相，create 自身保持单事务
 
-目标系统把runner exit视为fact，而不是推进命令。validated agent exit、ToolOutcome、GateEvaluation和必要的join decision组成typed transition request。`TransitionCommit`是唯一业务完成authority，记录from/to readiness、host identity、RunIntent/RunId、validated result以及被consume的domain journal refs。stale transition、foreign credential或错误host在commit前拒绝。
+artifact 必须先完整 publish，instance 才能引用它。先 publish、后写 DB ref，崩溃最多留下可由 GC 回收的完整 orphan；先写 DB 再补 bundle，会产生已经 committed 却无法解析的 instance。
 
-这些journal不能合并。ToolOutcome拥有工具结果，GateEvaluation拥有gate decision，Transition拥有业务推进，external effect ledger拥有副作用dispatch/dedupe，outbox拥有派生投递。transition可以在同一事务中引用并consume已决定的outcome/evaluation，但不能复制它们的状态；event只投影authority，不能反过来成为authority。
+create 前，typed admission 已经得到 admitted item values，shared resolver 也已经证明 exact definition 可用。#546 提供对象域所需的合法初始 task/readiness 计划；该计划是运行时实例化输入，不是 #547 对完整未来任务树的编译结果。目标系统在一个 `BEGIN IMMEDIATE` 事务中写入 chain/item business row、tagged definition ref、admitted item values、初始对象域事实与 readiness，以及 transactional outbox row。commit 前 scheduler、status 和 dispatcher 都看不到半实例；commit 后 dispatcher 才能处理已经提交的 intent。
 
-业务事务原子写入transition、派生readiness/cursor/status，以及effect intent与outbox row；它提交的是“将要执行什么”的持久意图，不是外部副作用已经发生。只有commit之后，dispatcher才读取这些rows并调用外部系统、记录delivery/effect ledger，再按TransitionId/effect identity幂等确认。若外部调用结果明确，可安全确认；若调用可能发生但结果无法证明，系统进入unknown-effect hold，等待可验证的外部事实。它不能从日志文字猜测成功，也不能无条件重试导致重复副作用。
+create 前任何错误都导致零 business row。客户端若无法确认 commit 结果，恢复顺序是按 instance identity 查询 business row 与 outbox，再决定返回既有结果或安全重试，不能盲目再造一份对象结构或外部资源。
 
-scripted join consumer与真实tool/gate runtime是具名dependency。#547只消费decided ref，不顺便实现第二套join算法。transition crash、outbox dispatch、外部effect fault injection仍是proof gap；但恢复依据已经明确是持久journal和identity，而不是process“通常只跑一次”的假设。
+## 9. Attempt 与 TransitionCommit 只持久化对象域事实
 
-## 8. H2 出现并重启后，旧 Item 为什么仍是 H1
+### 9.1 ready、claimed 与 pre-spawn 资源准入
 
-现在回到贯穿全文的item。它创建时的business row、admitted bindings、runtime graph与readiness都在同一事务中引用H1 definition ref。daemon重启后，scheduler从runtime readiness恢复待执行节点；shared resolver按H1 ref读取verified bundle；prompt renderer读取H1的binding和doc declarations；tool/gate requirement读取H1的registry；transition validator读取H1的node与exit schema。H2只进入current compile接口，并只影响随后创建的新实例。
+事务提交后，scheduler 只从 #546 的 runtime readiness 选择 task。`ready` 经 revision/epoch 约束的 CAS 变为 `claimed`，并在同一权威步骤分配稳定 RunIntent 和 RunId。claim 是调度租约与身份分配，不是业务完成。
 
-status应分别展示pinned instance ref的健康与current source的编译健康。operator可以看到“current是H2且有效，旧instance仍pin H1”，但系统不会因为两者不同自动rebind。doctor默认回答current definition是否健康；instance missing/corrupt/legacy状态由status/ref resolver或显式definition-ref诊断展示。
+只有依赖明确 run host 的资源准入留在 claim 之后、任何 worktree、closure 或 process 副作用之前。它检查 exact definition、runner provider 和本次资源前置条件是否能够兑现；它不是函数域检查面，不执行 preset 谓词，也不建立 GateEvaluation journal。暂时不可用时，instance 以同一 intent 进入 typed hold并释放 scheduler capacity；恢复后重用同一 identity 重新准入。
 
-cache不能改变这条语义。cache hit返回H1 verified content；cache miss从immutable store重读H1；digest mismatch产生corrupt hold；retiring ref拒绝新create并按GC协议处理现有引用。任何分支都不允许尝试current H2。source edit、daemon restart、session resume和cache eviction因此不再具有修改旧实例业务定义的能力。
+### 9.2 Runner exit 是事实，TransitionCommit 才推进业务
 
-pre-ref legacy是更严格的边界：没有证据表明历史实例使用哪个完整definition，系统就永久不能声称能恢复它。repository字段、当前preset路径、旧marker、event和run status都不构成H1。保留只读历史和明确hold比构造一个可运行但虚假的definition更可靠。
+允许 spawn 后，process exit 先写成不可变 fact。闭包 runtime 按 pinned definition 完成五时态，并把最终结果收窄为 `returned(value) | exception`；该结果在 exact ValueType 边界验证后，才可构造 transition request。runner exit 本身不改写业务 readiness。
 
-## 9. Reject、Hold、Unsupported 与 Unknown 不是同一种失败
+TransitionCommit 是唯一业务推进 authority。它记录 from/to readiness、host identity、RunIntent/RunId、validated closure outcome 和幂等 identity；stale revision、foreign credential、错误host或重复提交在写入前得到穷尽结果。事务原子写入 transition、#546 派生的下一批对象域事实/readiness、effect intent 与 outbox row。event 只投影 authority，不能反向成为推进依据。
 
-前面各阶段已经给出了失败点。本节只横向比较它们的判定依据和恢复动作。
+外部 effect 只在 commit 后由 dispatcher 执行。明确结果可以按 TransitionId/effect identity 幂等确认；调用可能已经发生但结果无法证明时，进入 unknown-effect hold，等待外部证据或 operator 裁定，不能从日志猜成功，也不能无条件重试。
 
-| 状态 | 发生条件 | 权威结果或所需持久状态 | Business rows / capacity | 自动恢复条件 | 明确禁止 |
+### 9.3 Restart 从持久事实继续
+
+`claimed` 但没有 process fact 时，按同一 intent 重新执行 pre-spawn 资源准入；process 已 exit 而 transition 未 commit 时，从 exit fact 和 pinned definition 重建同一 transition request；transition 已 commit 而 outbox 未 dispatch 时，只恢复 dispatcher，不产生第二次 readiness。restart 的问题因此被压缩为“从哪条持久事实继续”，而不是猜测旧进程走到了哪里。
+
+## 10. H2 出现后，旧 instance 仍然只属于 H1
+
+item 创建时，business row、admitted item values、初始对象域事实和 readiness 在同一事务中引用 H1 definition ref。daemon restart 后，shared resolver 读取 H1 verified bundle；prompt renderer、map runtime、填值 parser、谓词与后继声明都来自 H1。H2 只进入 current compile 接口，并只影响随后创建且显式 pin H2 的 instance。
+
+status 分别展示 pinned ref 的完整性健康和 current source 的编译健康。operator 可以看见“current 已是 H2，旧 instance 仍 pin H1”，系统不因此自动 rebind。cache hit 返回 H1 verified content，cache miss 从 immutable store 重读 H1；digest mismatch 进入 corrupt hold；任何分支都不得尝试 current H2。
+
+pre-ref legacy 的边界更严格：没有证据证明历史 instance 使用哪个完整 definition，就永久不能声称可恢复。保留只读历史和明确 hold，比用当前 source 构造一份可运行但虚假的 definition 更可靠。
+
+## 11. Reject、Hold、Unsupported、Exception 与 Unknown 必须分开
+
+| 状态 | 发生条件 | 权威结果 | 对 instance / capacity 的影响 | 恢复条件 | 明确禁止 |
 |---|---|---|---|---|---|
-| Compile rejected | source snapshot在schema、引用或静态规则上无效 | 返回authoritative rejected envelope与diagnostics；不新增永久历史义务 | 不产生live definition | source变更后以新snapshot重试 | 发布marker、空warning成功 |
-| Admission rejected | new create/update/batch的具体值不满足exact definition | typed field/path/expected/actual error | create零写；update/batch零部分写 | caller修正输入 | 先写row、render时补判 |
-| Dependency unsupported | definition声明的gate、required tool或其他必需runtime能力/provider未交付或版本不兼容 | capability identity与unsupported reason | new instance拒绝；expected tool缺席例外为继续并显式`NotEvaluated` | dependency按兼容版本advertise | fallback、stub success、silent inert |
-| Pinned held | existing instance遇到gate、required tool或其他必需capability缺失，或definition corrupt、pre-spawn gate阻断等 | exact ref、host、journal/evaluation epoch | 保留实例；按状态释放capacity；expected tool缺席不hold而显式`NotEvaluated` | 原条件可验证恢复后按同identity重评 | 换current definition、新建第二evaluation |
-| Unknown effect held | 外部副作用可能发生但结果不可证明 | transition/effect identity与unknown fact | 不重复业务推进 | 获得幂等外部证据或人工裁定 | 从event猜成功、无条件retry |
-| Legacy-definition-unproven | 历史实例没有可验证完整definition | legacy标记与只读历史 | 禁止resume/schedule/mutation | 只有真实历史artifact证据可解除 | 用current source或repository伪造ref |
-| Definition corrupt | pinned artifact缺失、digest/schema/kind不匹配 | corrupt reason与exact ref | existing hold；new resolve失败 | artifact按同identity可验证恢复 | 兼容bundle、隐式recompile |
+| Compile rejected | schema、唯一来源、签名或闭集存在结构矛盾 | rejected CompileEnvelope 与 diagnostics | 不产生 live definition | 修正 source 后以新 snapshot 编译 | 关闭严格模式放行结构矛盾 |
+| Strict-definition rejected | map 未补完/stale、值未消费等闭合 finding 尚存 | 同一 CompileEnvelope 的 findings | live create 零写 | 补完 definition 并重新编译/publish | 把 authoring 半成品投入运行 |
+| Admission rejected | create/update/batch 的具体 item 值不满足 pinned definition | typed field/path/expected/actual | create 零写；update/batch 零部分写 | caller 修正输入 | 先写 row、render 时补判 |
+| Dependency unsupported | ChainDefinition、对象域 runtime 等必需 provider 未交付或版本不兼容 | dependency identity 与 reason | new instance 拒绝；已有 instance 可见 hold | provider 提供兼容版本 | fallback、stub success、silent inert |
+| Definition corrupt / retiring | pinned bundle missing、digest/schema/kind 不匹配或正在退役 | exact ref 与 resolution reason | new resolve 拒绝；existing hold | 同一 identity 的 artifact 恢复可验证 | current source 重编译替代 |
+| Resource held | claimed 后的 runner/host/资源前置条件暂不可用 | RunIntent、reason 与持久 hold | 保留同一 intent，释放 capacity | 条件恢复后重新准入 | 分配第二 RunId、伪装 spawn failure |
+| Runtime exception | 脚本异常、map Nothing 未被 fail/NIL 消费、runner 崩溃等 | 闭包 `exception` | 由 #546 的对象结构消费或停止 | 按声明产生新的前向处理 | 伪造成业务返回 tag |
+| Unknown effect held | 外部调用可能发生但结果不可证明 | Transition/effect identity 与 unknown fact | 不重复业务推进 | 可验证外部事实或 operator 裁定 | 从 event 猜成功、无条件 retry |
+| Legacy-definition-unproven | 历史 instance 没有可验证 definition | legacy 标记与只读历史 | 禁止 resume/schedule/mutation | 取得真实历史 artifact | 用 repository/current source 伪造 ref |
 
-统一判据是：当前边界已有充分信息且输入无效，使用reject；合法existing instance受可变化的外部或完整性条件阻断，使用hold；声明需要的gate、required tool或其他必需runtime实现不存在，报告unsupported并区分new与existing；expected tool缺席则继续并显式记录`NotEvaluated`；外部副作用的事实本身未知，使用unknown hold而不是猜测。
+统一判据是：当前边界信息充分且输入无效时 reject；合法 existing instance 被可恢复的完整性、provider 或资源条件阻断时 hold；声明所需实现根本不存在时 unsupported；闭包运行已经发生且没有正常返回时 exception；外部 effect 的事实无法确定时 unknown。它们不能共享一个“失败”字符串。
 
-## 10. RFC 同时移除了哪些隐藏业务原语
+## 12. 单一类型权威同时移除隐藏业务原语
 
-单一权威链无法与一组隐式业务捷径共存。current engine仍存在多套GitHub语义：CLI使用`--issue`，queue wire使用issue字段并归一化`owner/repo#id`，batch兼容路径回填issue/issueNumber，repository物理列和forge格式校验成为chain身份，省略preset又可能触发内置default。不同入口对同一字符串应用不同转换，opaque item存储因此没有真正成为公共合同。
+current engine 仍包含多套 GitHub 语义：CLI 使用 `--issue`，部分 wire 归一化 `owner/repo#id`，batch 兼容路径回填 issue/issueNumber，repository 物理列与 forge 格式参与 chain 身份，省略 preset 还可能触发内置 default。不同入口对同一字符串应用不同转换，typed admission 就不可能成为唯一权威。
 
-目标在一个可消费breaking checkpoint中移除engine-owned GitHub notation、alias、normalize、repository selector、git inference与default preset fallback。合法preset内部仍可以有名为`issue`的业务字段；清零gate必须按ownership与API surface区分engine原语和preset domain，不能用盲目全文grep误删业务模型。
+目标在一个可消费 breaking checkpoint 中移除 engine-owned GitHub notation、alias、normalize、repository selector、git inference 与 default preset fallback。合法 preset 仍可拥有名为 issue 或 repository 的业务值；清理必须按 ownership 与 API surface 区分 engine 原语和 preset domain，不能用全文字符串删除业务模型。
 
-repository迁入typed business binding后，不再参与chain selector、definition content identity或local worktree identity。明确需要远端repository的operation可以按需读取它；缺值只阻断该operation。baseBranch继续作为引擎真实消费的typed ChainDefinition输入，它不是repository物理列的替身。
+repository 迁入 typed business binding 后，不参与 chain selector、definition content identity 或 local worktree identity。明确需要远端 repository 的 adapter 按需读取该值；缺失只阻断该 operation。baseBranch 继续作为引擎真实消费的 typed ChainDefinition 输入，不是 repository 物理列的替身。
 
-新item显式pin自己的preset definition。省略/null不会落到default；legacy null不会隐式rebind；empty chain不需要虚构代表preset；mixed chain不能任选一个item的preset解释全链。provider尚未交付时，本仓以typed dependency unavailable停止，不复制flat metadata parser。
+新 item 显式 pin PresetDefinitionRef；省略或 null 不落到 default，legacy null 不隐式 rebind，empty chain 不需要虚构代表 preset，mixed chain 不能任选一个 item 的 preset 解释全链。真实 v14 数据中 15 个 chain 均为 repository column-only，未发现 column/binding 冲突，因此值可以迁入 business binding并保留 69 个 item、932 个 run、baseBranch 和资源关联；这项 shape migration仍不能制造 historical definition 证据。
 
-plan控制面已经大幅退役，但这不自动证明所有fragment都有consumer。目标dead-fragment分析必须从canonical typed fragment graph计算reachability，并把结果写入唯一CompileEnvelope。current缺少该graph与finding carrier，所以现在不能为了“先做一点”在D8中顺手实现其他owner，也不能把transitive、invalid-kind、cycle或typed finding验收削掉。R12把它保持not-yet，正是单一权威原则在规划层面的应用。
+## 13. #547 明确不实现什么
 
-## 11. 为什么局部补丁无法解决这些问题
+#547 不把整个 preset 改写为代码载体，也不把内部 ArkType 表达式当作公共类型语言。prompt、类型与路由声明仍是 declarative assets；生成的 TypeScript map 文件只是 definition 中承载外部值提升的函数资产。
 
-给compile命令增加JSON输出，但不发布并pin完整definition，preview仍可能是H1，restart执行H2。给binding增加ValueType，但让create先写row、render再验证，DB仍会产生半实例。建立runtime tree表和round-trip测试，但scheduler继续读取phase/status，status中的tree仍不是推进权威。
+脚本的扫描、发现、import 装配和运行时注入属于纯 TypeScript 工程事务，不是 RFC 抽象面。RFC 规定 map 的来源、签名、时态、identity、bundle 归属与缺失语义，不规定目录遍历算法、glob、barrel import 或 loader 实现。
 
-同样，给preset加tools或gates字段而没有capability handshake与domain journal，只会让声明看似存在、runtime继续忽略。把gate失败写成普通event，transition仍无法判断它是否被持久决定；把tool invocation当outcome，required条件仍可能在没有结果时通过。
+#547 不定义 task algebra、await、join、异常传播或对象域派生规则；这些属于 #546。它不定义 agent 填值交互、fail/NIL 配置级联的完整 ADT 或五时态 executor；这些属于 #545。它不实现 hook、GUI 或 remote adapter；#543、#544、#548 只消费本篇发布的 typed projection 与 definition ref。
 
-重命名`--issue`为`--item`也不够。如果repository物理列、forge parser、git inference、default preset和current fallback仍存在，引擎依然内置同一业务假设。删除plan目录也不够；没有canonical fragment graph与统一finding carrier，dead-fragment checker只能创建第二权威。
+worktree 起点、branch 命名、resource pin、回收和 publication sampling仍是 engine 原生机制，不进入 preset 值语言。历史 pre-ref instance 也不会被“兼容修复”；没有真实 definition 证据时，永久 hold 是事实边界。
 
-最关键的限制是：设计不可分割性不等于实施必须一次完成。各producer和consumer可以分阶段交付，但任何已启用能力都必须沿同一authority合同。若consumer尚未交付，producer可以完成自身schema和round-trip proof；若gate、required tool或其他必需runtime capability尚未交付，声明它的实例必须reject或hold；expected tool缺席则只能以显式`NotEvaluated`继续。不能把半条链描述成兼容模式，因为半启用正是current权威分裂的来源。
+## 14. Current、Target、Dependency 与 Proof 对账
 
-## 12. #547 明确不实现什么
+### 14.1 Current 可复用资产及其证明边界
 
-#547 不把TOML换成代码载体，也不把ArkType表达式变成公共类型语言。TOML仍负责声明，compiler内部可以使用精确boundary实现，但公共合同由版本化schema和ADT定义。ValueType不保留opaque JSON、computed business key或可选字段汤；新variant只有在producer、persistence、event和consumer同时存在时才能加入。
-
-#547 不定义新的task algebra语义。它提供referenced graph、typed identity、runtime materialization和transition seam，但不发明best-of-n、reopen策略、script join选择算法或par串行降级。non-degenerate par未交付时必须unsupported；scripted join decision由具名consumer拥有。
-
-#547 不实现tool本体、provider transport、outcome/finalize runtime，也不实现gate executor transport或scripted join consumer。它实现本仓的declaration、registry、identity、capability handshake、journal消费合同和缺席行为。gate、required tool或其他必需外部能力不存在时，正确结果是typed reject/hold；expected tool缺席时是继续并显式`NotEvaluated`。本仓不会为任一缺口创建临时transport。
-
-#547 不实现GUI、hook执行平台或remote adapter。它提供公共projection、tagged identity和typed seam，使这些consumer不必猜内部shape；independent consumer的真实读取仍需cross-owner proof。hook carrier可以作为gate binding基础资产，但不能冒充gate executor。
-
-worktree起点、branch命名、definition/resource pin、seq推进、回收和publication sampling仍是engine原生机制，不进入preset DSL。repository只在业务明确需要时由remote operation读取。历史pre-ref实例不会自动“修复”；没有历史definition证据时，永久hold是事实边界，不是缺少兼容代码。
-
-## 13. Current、Target、Dependency 与 Proof 的最终对账
-
-### 13.1 Current 可复用资产，以及它们不能证明什么
-
-| Current资产 | 可以复用 | 不能证明 |
+| Current 资产 | 可以复用 | 不能据此证明 |
 |---|---|---|
-| canonical compiler、compiled/rejected骨架、source hash、projection函数 | 单一编译入口、identity素材、公共读面位置 | warning/finding全系统同源、可分发schema、content cache、verified publish |
-| source/binding tagged union、unknown-first boundary、JSON-safe store、batch事务框架 | candidate parsing、owner/source表达、原子写基础 | recursive ValueType贯通、missing/default语义、typed admission/exit |
-| runtime leaf/seq/par/join ADT、SQLite约束、tree round-trip | runtime domain shape与持久化基础 | compiled→runtime constructor、readiness scheduler、typed transition |
-| doc declaration与production renderer | prefix/suffix/style/blankBefore和单一consumer基础 | typed value输入、多类型真实prompt、resume字节一致性 |
-| hook declaration carrier与effective view | gate binding层和来源provenance | executor、capability handshake、GateEvaluation journal |
-| tagged definition ref/FK、source hash | attribution和引用形状 | definition content、shared resolver、create pin、restart H1 |
-| opaque item存储主体、per-item preset互斥、baseBranch/closure资源 | 去原语与资源恢复基础 | 公共CLI/wire全opaque、repository退列、无default/fallback |
-| WAL、BEGIN IMMEDIATE、migration/outbox部分框架 | 原子create、journal与升级的工程基建 | 当前业务动作已经单commit或effect可恢复 |
+| canonical compiler、compiled/rejected 骨架、source hash、projection | 单一编译入口与 identity 素材 | findings 同源、双面闭合、严格执行资格 |
+| source/binding tagged union、unknown-first boundary、JSON-safe store | candidate parsing 与 provenance 形状 | recursive ValueType、唯一来源、Just/Nothing 管道 |
+| doc declaration 与 production renderer | prompt 布局的单一 consumer 基础 | typed context 输入、map 生成、resume 字节一致 |
+| tagged definition ref/FK、source hash | attribution 与引用形状 | definition content、shared resolver、H1 restart |
+| WAL、BEGIN IMMEDIATE、migration/outbox 基础 | 原子 create 与 TransitionCommit 的工程地基 | 当前业务动作已单 commit、effect 已可恢复 |
+| runtime leaf/seq/par/join ADT 与 SQLite 约束 | #546 对象域持久化素材 | 编译期完整运行树、production scheduler 已以它为权威 |
+| opaque item 主体、per-item preset、baseBranch/closure 资源 | 去隐藏原语与资源恢复素材 | typed business binding 已贯穿所有入口 |
 
-### 13.2 Target 保证
+### 14.2 Target 保证
 
-目标完成后，同一source与contract version只有一个CompileEnvelope；instance创建前固定完整definition；pre-run chain/item candidate在create/update/batch admission按exact definition准入，runtime产生的exit/outcome则在各自typed boundary按pinned definition准入；runtime graph完整物化并成为scheduler唯一readiness权威；tool/gate声明必须经过capability handshake；runner exit只通过typed transition推进；external effect只从committed outbox/effect intent恢复；restart、resume、status和prompt只解析pinned ref；engine不再通过GitHub notation、repository selector、default preset或plan控制业务。
+目标完成后，同一 source snapshot 与 contract version只有一个 CompileEnvelope；每个值有唯一 item、map 或 agent source；CLI 能从类型定义生成并校验对应时态的 map 骨架；来源面、消费面、谓词槽与后继闭集在严格执行前闭合；完整 definition 连同 map 资产不可变 publish并按 ref resolve；item 值在 create/update/batch 最早边界准入；运行时五时态只消费 pinned 类型与 map；create 和 TransitionCommit 各自在自己的事务中形成唯一 authority；restart 不读取 H2；engine 不再通过 GitHub notation、repository selector 或 default preset 猜业务含义。
 
-这些保证由191项原子需求和36条named seam覆盖。数字表示需求映射完整，不表示191项已经编码或36条runtime边已经接通。
+这些保证可以分阶段交付，但任何启用路径都不能绕过 CompileEnvelope、definition ref、typed boundary 或 committed fact。旧 R12 的 unit 数量与零批次结论建立在已经删除的 tool/gate 划分上，不再作为当前 source-ready 判断；新的 implementation split 必须按本篇重写后的 producer、consumer 和 proof 重新建立。
 
-### 13.3 具名 Dependency
+### 14.3 具名 Dependency
 
-- **independent schema consumer：** 验证公共schema在本仓之外能被真实消费；缺席不阻断producer，但保留cross-owner proof gap。
-- **typed ChainDefinition provider：** 唯一拥有ChainDefinition ADT、parser、version和error；缺席时本仓不能复制parser，相关new admission unsupported，legacy hold。
-- **tool outcome/finalize runtime：** 拥有真实invocation outcome、required finalize与restart journal；缺席时required路径不能运行，expected路径继续并显式`NotEvaluated`。
-- **gate evaluator/journal：** 拥有GateEvaluation的执行、持久化和恢复；缺席时任何gate声明都不能inert。
-- **scripted join consumer：** 产生可被transition消费的decided join ref；#547不实现第二选择算法。
+- **independent schema consumer**：在本仓之外真实消费公共 schema；缺席不阻断 producer，但保留 cross-owner proof gap。
+- **typed ChainDefinition provider**：唯一拥有 ChainDefinition ADT、parser、version 与 error；#547 只消费 verified ref/payload，不复制 parser。
+- **#546 对象域 runtime**：提供合法初始 task/readiness 计划、ready/claimed 语义与 TransitionCommit 后的对象域派生；#547 不编译完整运行树。
+- **#545 函数域 context runtime**：执行五时态、agent 填值修正、map 调用、谓词与 fail/NIL；#547 提供其唯一类型和 pinned definition 输入。
 
-### 13.4 Proof Gap
+### 14.4 Proof Gap
 
-仍需真实路径证明：schema cross-owner round-trip；多类型create→prompt→agent exit→transition；referenced graph→constructor→scheduler→join/recovery；H1/H2 restart/resume；publish崩溃与GC竞争；tool outcome/finalize/restart；gate hold/advance/onFailure/dedupe；remote repository present/missing；fragment人口与dead finding；冻结候选SHA上的integration和compatibility real E2E。
+仍需真实路径证明：CompileEnvelope 的 findings 在 CLI、doctor、status 与 GUI projection 中同源；map 骨架生成确定、上下文注释正确、类型变化能识别 staleness；普通与严格模式对同一 finding 给出规定结果；多种 ValueType 经过 create、pre-map、prompt、agent、post-map 和 transition；H1/H2 restart/resume 不漂移；publish 每个崩溃窗口、GC竞争和 map asset corrupt 都按 ref 收敛；create reply-loss 与 batch/update 零写成立；pre-spawn 资源 hold 重用同一 RunIntent；TransitionCommit、outbox 和 unknown effect 在 fault injection 下不重复推进；repository present/missing 与 v14 migration 保持边界；冻结候选 SHA 上的 integration 与 compatibility real E2E 仍需单独执行。
 
-proof未完成不自动说明producer不存在；反过来，存在schema、表或carrier也不说明整链已经运行。两者必须分栏记录。
+proof 未完成不自动说明 producer 不存在；反过来，存在 schema、表、renderer 或生成文件也不能证明整条值管道已经运行。每项实现 issue 必须直接触发自己新增的 producer 与 consumer，不能用静态类型检查替代运行结果。
 
-### 13.5 为什么当前滚动批次为零
+## 15. 结论
 
-R11得到的是目标态供需图。R12只有在一个capability unit的全部输入seam已由main或已交付dependency真实提供时，才能写出验收自包含的下一项issue。当前十个unit都缺少至少一个producer，因此source-ready为零。
+沿一个 H1 item 的生命周期重新看，类型定义与 prompt 先产生可生成的 map 需求；作者补完骨架后，严格 CompileEnvelope 证明声明闭合、签名匹配和管道可达；compiled product 连同 map 资产发布为 immutable definition；item source 在 create 前准入，单事务写入 pinned ref 与初始对象域事实；closure 运行时只使用 H1 的类型、prompt 和 map，把五时态最终折叠成 `returned(value) | exception`；TransitionCommit 再成为唯一业务推进；restart 只从 verified H1 和持久对象域事实继续。
 
-dead-fragment最接近可拆，但仍不满足条件。目标输入S-33要求versioned canonical typed fragment graph；current只有fragment id/role/path和phase role validation。目标输出S-07要求带identity/location/reason/version的typed finding进入CompileEnvelope；current carrier只有较窄的finding shape。若把graph producer和D1 carrier都塞进D8 issue，验收就依赖其自身范围之外的未来合同；若削掉transitive、invalid-kind、cycle或typed projection，issue又不能交付稳定需求。保持零批次，是拒绝虚构source-ready的正确结果。
-
-main发生变化并满足既定事实gate后，下一轮才重跑必要的存在性、地基和供需匹配。RFC没有因此被宣布实现，也没有因为当前零批次而失效。
-
-## 14. 结论
-
-沿贯穿全文的item重新看一次：H1首先被compiler作出唯一判定；成功product被发布为可按identity取回的immutable definition；pre-run bindings和任务图在exact H1下形成pure plans，runtime结果在各自typed boundary验证；一个事务提交完整instance与outbox；scheduler从runtime readiness分配稳定attempt；prompt、tool和gate只消费pinned declarations与registered capability；runner exit经过typed transition成为唯一业务推进；restart依靠definition ref、runtime state和domain journals继续，而不是重读H2或猜测event。
-
-每一步之所以存在，都对应current的一种具体失败：多读面给出不同finding、path cache与restart改变定义、missing被伪造成空串、runtime tree被scheduler旁路、声明在无executor时静默、run close跨事务、repository/default fallback重新解释身份。RFC的价值不在术语更多，而在为每类事实指定唯一owner、最早判定点和可恢复持久证据。
-
-这套合同允许分阶段交付，却不允许任何一段以“暂时兼容”为名半启用。一个能力的producer可以先交付，consumer未就绪时系统必须明确停止；一旦能力启用，它就不能绕过definition、identity、typed boundary或journal。#547 最终要消除的，正是“系统还能继续跑，所以先猜一个答案”的行为。
-
+这条链保留了旧 RFC 最可靠的定义冻结、事务和恢复纪律，同时删除了把函数域时态写入 daemon journal 的补偿机制。#547 的价值不在于声称运行必定成功，而在于让系统能够在运行前证明一条合法值路径存在，并在运行时确保所有实际值都只能沿这条被 pin 的路径产生、提升、消费和交付。
 <!-- 548 -->
 
 # RFC #548：外部调用与执行终端的能力、现状与设计理由
