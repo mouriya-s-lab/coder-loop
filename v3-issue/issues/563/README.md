@@ -1,0 +1,132 @@
+# #563 feat(engine): 运行中追加平行任务——leaf 原地物化 par 与 createItems 作用域授权
+
+- state: **closed**  | author: `RiriAgent`  | created: 2026-07-02T11:15:53Z  | updated: 2026-07-17T20:14:58Z
+- closed: 2026-07-17T20:14:58Z  | state_reason: `not_planned`
+- labels: (none)
+- url: https://github.com/mouriya-s-lab/coder-loop/issues/563
+- comments: 1  | timeline events: 19
+
+---
+
+## Body
+
+## 必须先读的关联 issue
+
+#546（RFC: v3 任务模型）。继承条款逐字快照（#546 body「动态追加平行任务」节，全节承接）：
+
+> "**语义能力无条件**：任何未终结节点可随时被追加平行兄弟。"
+> "**表示稀疏**：不预建包裹容器；首次追加时把运行中 leaf 原地物化为 par——物化请求可显式指定 join（值域 = pinned 定义内候选引用；追加者在物化时刻最知道这批工作要不要 gate），未指定默认 `join=drain`；诞生后演化按「join 判定权演化」条款（绑定版本追加，归 #564）。物化时容器获得稳定 id（RFC-3 的 `group` scope 键，见接口假设）。" — 2026-07-11 随 `v3/join-evolution-decision.md` 裁决修订
+> "**粒度**（#413 开放问题「包裹粒度」的消解）：调度、状态准入保持 item 粒度；par 节点是控制流节点，不是可调度单元。"
+> "**授权**：追加 = 现有 `createItems` right 增加目标作用域维度，不发明新授权面。"
+
+#413 原始语义（操作员，2026-06-10，#413 body，经 #546 以稀疏表示替代「默认包裹」后承接）：
+
+> "容器可以在任意时刻添加 item……所以 item 只要没执行结束都可以随时添加平行任务。"
+
+供给条款 4（par 同 commit 派生，凝固点语义；2026-07-10 修订，权威记录 `v3/closure-lifecycle-decision.md` §3）逐字快照——追加动作的 pin 语义按此钉住：
+
+> "**par 同 commit 派生**：par 展开/物化时引擎 pin base 尖端 commit 并持久化；成员子树共同启动入口任务集的闭包首次打开从 pin 派生（凝固点语义：后续追加复用同 pin）；嵌套 par 内层重新 pin；rationale = 并发代数语义不被调度时序引入副作用" — #546 body「供给条款」#4
+
+## 目标
+
+任何未终结节点可随时被追加平行兄弟：首次追加把运行中 leaf 原地物化为 par（物化请求可显式指定 join，值域 = pinned 定义内候选引用；未指定默认 drain），容器获得稳定 id，授权走 `createItems` right 的作用域维度扩展；追加动作按供给条款 4 的凝固点语义配合 pin（物化即容器诞生点则同步写 pin；追加进已存在容器则复用同 pin，不重新 pin）。
+
+## 使用场景
+
+运行中扩批。一个 item 跑到一半发现可并行的伴生工作（如 review agent 派生修复任务、operator 临时加平行调查）时，agent（被授权 phase）或 operator 对该节点追加平行兄弟——原 run 不中断、不重建，新 item 与之同容器并发调度；物化容器的稳定 id 同时是 #545 context CLI 的 `group` scope 键，使并行分支间可经 context 通道通信；追加进来的新成员是**新任务** = 新闭包（走闭包 create 路径），底座 commit 由容器的 pin 决定。
+
+## 上下文
+
+- Repo: `mouriya-s-lab/coder-loop`。基线 main，行号实施前自行 grep 核对。
+- `createItems` right：preset `[phases.rights]` 声明（`presets/gh-issue-pr-iteration/preset.toml` review phase 先例）；daemon 执法 `src/daemon.ts:3364-3435`（default-deny、无 grant 拒绝、审计事件）；rights 解析 `src/loop.ts:4416` 附近。
+- 追加落库面：`store.createItems`（`src/daemon.ts:2278` 调用点）。
+- par 容器稳定 id 的存储位由 #558（树运行态 shape）钉住（#546 shape 承诺）；本 child 是运行时分配点。
+- **par pin 存储位**（供给条款 4）由 #558 shape 钉住；**pin 写入动作**：首次展开路径由 #559（树调度）承担（该 child 「par 展开时 pin 写入」预期结果与验收行）；**物化路径**由本 child 承担——若物化动作同时是该容器的诞生点（首次把裸 leaf 变成 par），则物化路径中同步写入 pin；若追加进的容器已存在（第二次以后追加、追加进已有 par 成员集合），则**不**重新 pin，复用已持久化的容器 pin（凝固点语义）；嵌套 par 内层若在本 child 路径经物化诞生，则内层独立重新 pin（其容器 pin 与外层无关）。
+- 树遍历调度归 #559（树调度）；诞生后的 join 演化归 #564（物化容器判定权演化——绑定版本追加、候选引用与授权方向，`v3/join-evolution-decision.md`；本 child 的诞生时 join 参数与其共用同一候选值域）；闭包状态与转移执行归 #558/#560——追加产生的新成员是新闭包，其 create 转移调用归 #559 派发、#560 执行本体，本 child 只负责落库容器结构与 pin 语义。
+
+## 问题
+
+现状追加只能进 flat 队列尾部/位置（`item add` + position），不存在「对某个运行中节点追加平行兄弟」的语义——没有物化机制、没有容器 id、`createItems` right 无目标作用域维度（授权是「能不能创建」而非「能在哪创建」）。#546 行 3（运行中追加平行任务）无法成立；供给条款 4 的**凝固点语义**（追加复用同 pin）在物化路径缺 pin 写入点与「已有容器复用 pin」的执法。
+
+## 预期结果
+
+- 性质：对任何未终结节点的追加请求都产生同容器平行兄弟——目标是裸 leaf 则原地物化为 par；目标已是 par 成员/容器则直接入该容器。已 terminal 节点追加被拒。
+- **诞生时 join 参数**（`v3/join-evolution-decision.md` 裁决 4）：物化请求可显式指定 join——值域 = enclosing 实例 pinned 定义内的候选引用（drain 或 validator 候选，与 #564 演化通道共用同一值域），经 join ADT 边界 parse，悬空候选/自由构造的调用声明被拒 + 审计事件；未指定默认 `join=drain`。追加进已存在容器的请求不接受 join 参数（join 归容器诞生点与 #564 演化通道）。
+- 物化不打扰在场者：原 leaf 的活 run 不中断、不重建、不重 spawn；物化是纯运行态结构变化。
+- 物化时容器获得稳定 id：同容器后续追加复用同一 id；该 id 即 #545 `group` scope 键（存储位遵循 #558（树运行态 shape） 钉住的形态）。
+- 调度与状态准入保持 item 粒度：par 节点不进入可调度单元集合、不拥有 item 状态。
+- 授权：`createItems` right 增加目标作用域维度——agent 仅能在其被授权作用域内追加（作用域维度的具体词表为本 child 决策项，落地时裁并登记；声明语法与 #547 rights 面协同）；operator 无条件；不新增授权面。
+- **凝固点语义（供给条款 4）**：
+  - 追加**不重新 pin**——第二次及以后向已存在容器追加成员时，引擎不重写容器 pin；新成员闭包 create 时的底座 commit 从该容器已持久化的 pin 派生。
+  - 物化即容器诞生点时**同步写 pin**——把裸 leaf 变成 par 的动作路径中，引擎先 pin base 尖端 commit（存储位随 #558）落库、再落库容器结构（含诞生 join）、再触发新成员闭包 create（新闭包底座 = 该 pin）。原成员（原 leaf 的现存闭包）不改动、不重派生。
+  - **嵌套 par 内层重新 pin**：若追加发生在已展开的 par 内某成员，且该追加动作把内层裸 leaf 物化为内层 par，内层 par 独立重新 pin（内层 pin 与外层容器 pin 无关，各自持久化）。
+- 追加进来的成员是**新任务** = 新闭包：走 #559 的 spawn 决策「无闭包记录 → 触发 #560 create 转移」路径；本 child 只负责结构落库与 pin 语义，不实现闭包 create 机制本体。
+
+## 不应残留
+
+- 本 child 范围内：预建包裹容器（每 item 默认套 par）；物化时重建/重 spawn 原 run 的路径；无稳定 id 的匿名容器；追加进已存在容器时重新 pin 的路径（违反凝固点语义）；追加动作直接为新成员写闭包状态（应经 #560 转移调用）。
+- 本 issue 范围之外不应改动：不实现 join 评估（归 #561）与诞生后的 join 演化（归 #564）；不实现候选声明位与候选表（归 #554，本 child 消费其解析）；不实现 context CLI 的 group 读写（归 #545）；不动 flat `item add` 既有语义（向后兼容，追加平行是新增能力而非替代）；不实现 par 首次展开路径的 pin 写入（归 #559，本 child 只承接物化路径的 pin 语义）。
+
+## 约束
+
+- 代码红线（操作员裁决 2026-06-12，全仓统一）：必须全链路 ADT，禁止任何类型退化。不引入 `any`/匿名形状；`unknown` 仅限 catch 与边界 parse 入口；禁止真 `as` 断言（`as const` 除外）；外部输入经边界 parse（arktype）为精确类型后流转。违反红线 = changes requested，无例外。
+- 与 #534 audit 树排序默认（v3 总控整合裁定，2026-07-02）：#535/#536/#538 默认先合、本 child 其后 rebase；偏离需在本 issue 说明理由。
+
+## 本 issue 的验证边界
+
+- **验证层级**：真实 daemon + 隔离 loop-data + 确定性 runner 的专用进程级 integration。
+- **本 issue 必须证明**：fixture 直接进入本 issue 新增的运行态与转移，观察 SQLite/status/events/进程或资源生命周期的前后值；只跑旧线性 preset而没有进入新状态不算通过。
+- **不在本 issue 内执行**：不负责连接全部 v3 子系统，也不运行 bundled preset compatibility real E2E。跨 issue 场景归 #684；真实 GitHub preset 不回归归 #685。
+- **现有 GitHub real E2E**：本 issue 不运行 `bun scripts/real-e2e.ts`；该 compatibility 验证只由 #685 在冻结发布候选 SHA 上执行。
+## 验收标准
+
+| Dimension | Check | Command | Env | Expect |
+|---|---|---|---|---|
+| function | 原地物化（#546 行 3） | 对运行中 leaf 追加平行兄弟（不带 join 参数），观察树快照与原 run | local | 原地物化 par（默认 join=drain）；新 item 被同一容器调度；原 run 不中断不重建；par 容器自身不作为可调度单元被 spawn、不可被写 item 状态（粒度保持 item 级） |
+| function | 诞生时 join 指定（预期结果 2） | 物化请求携带 validator 候选引用；另两次分别携带悬空 candidateId 与自由构造调用声明；对已存在容器追加时携带 join 参数 | local | 首次成功：容器诞生即 join=validator(候选)，成员全 terminal 后按 #561 spawn 验证者；悬空引用与自由构造均被拒 + 审计事件；对已存在容器带 join 参数被拒 |
+| function | 容器 id 稳定 | 对同一容器再追加一次，比对两次快照的容器 id | local | 同一稳定 id；成员 3 个 |
+| function | 物化时 pin 写入（供给条款 4） | 首次物化裸 leaf 为 par 时观察 pin 存储 | local | 容器 pin 落库 = 物化时刻 base 尖端 commit；新成员闭包 create 后底座 commit = 该 pin |
+| function | 追加不重新 pin（凝固点语义） | 对已存在 par 容器再追加成员，比对追加前后容器 pin | local | 容器 pin 不变；新成员闭包底座 commit = 容器 pin（不等于追加时刻的 base 尖端） |
+| function | 嵌套 par 内层独立 pin | 对已展开 par 的成员再触发内层物化 | local | 内层 par 独立重新 pin，与外层容器 pin 无关；内层新成员底座 = 内层 pin |
+| function | terminal 拒绝 | 对已 terminal 节点追加 | local | 被拒 + 审计事件 |
+| function | 授权作用域执法 | 无 createItems grant 的 phase 凭证追加；有 grant 但目标超出授权作用域 | local | 均被拒（default-deny）+ 审计事件；operator 无条件成功 |
+| type | 全链路 ADT | `bun run typecheck` | local | 通过 |
+
+## 依赖关系
+
+- Depends on: #558（树运行态 shape，容器 id、par pin 与 tagged `ExecutionDefinitionRef` 存储位）、#559（树调度，par 成员并发调度与首次展开路径的 pin 写入；新成员闭包 create 转移的派发路径）、#560（闭包转移机制，新成员闭包 create 由其执行）、#554（join 候选具名声明位）、#605（enclosing 实例 pinned 定义与 `(definitionRef, candidateId)` 解析域；ref kind 必须与 enclosing instance 匹配）。
+- Relates to: #596（context 共享 group scope 真实化——par 容器稳定 id 键解析）——本 child 是 `group` 键的运行时分配点，其存储位 shape 由 #558（树运行态 shape）钉住；#564（物化容器判定权演化——诞生后 join 演化，与本 child 共用候选值域）。
+
+
+---
+
+## Comments (1)
+
+### comment #5007117894 by `RiriAgent` — 2026-07-17T20:14:57Z
+
+重新拆分后由 #702 承接运行中动态物化 par。旧 issue 没有关联 PR，按 #546 重拆结果关闭。
+
+
+---
+
+## Timeline (19)
+
+- 2026-07-02T11:15:54Z `assigned` @RiriAgent
+- 2026-07-02T11:18:16Z `cross-referenced` @RiriAgentsrc=558
+- 2026-07-02T11:18:22Z `cross-referenced` @RiriAgentsrc=559
+- 2026-07-02T11:18:30Z `cross-referenced` @RiriAgentsrc=568
+- 2026-07-02T11:19:08Z `parent_issue_added` @RiriAgent
+- 2026-07-02T11:20:58Z `cross-referenced` @RiriAgentsrc=546
+- 2026-07-05T07:52:45Z `cross-referenced` @RiriAgentsrc=554
+- 2026-07-10T17:21:26Z `cross-referenced` @RiriAgentsrc=564
+- 2026-07-10T17:26:26Z `cross-referenced` @RiriAgentsrc=547
+- 2026-07-10T17:27:31Z `referenced` @RiriAgentcommit=a720d74f93ef04080c001cf0fec1202db9e450b5
+- 2026-07-16T03:45:41Z `cross-referenced` @RiriAgentsrc=560
+- 2026-07-16T08:23:00Z `cross-referenced` @RiriAgentsrc=690
+- 2026-07-17T20:13:14Z `cross-referenced` @RiriAgentsrc=698
+- 2026-07-17T20:13:16Z `cross-referenced` @RiriAgentsrc=699
+- 2026-07-17T20:13:25Z `cross-referenced` @RiriAgentsrc=702
+- 2026-07-17T20:14:57Z `commented` @RiriAgent
+- 2026-07-17T20:14:58Z `closed` @RiriAgentcommit=None
+- 2026-07-17T20:37:23Z `cross-referenced` @RiriAgentsrc=739
+- 2026-07-18T01:17:08Z `cross-referenced` @RiriAgentsrc=749

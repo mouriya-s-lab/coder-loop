@@ -1,0 +1,141 @@
+# #569 GitHub 消费 daemon 立项：router 规范化事件到 coder-loop CLI 结构化调用（新建独立 repo）
+
+- state: **closed**  | author: `RiriAgent`  | created: 2026-07-02T11:58:00Z  | updated: 2026-07-17T20:42:09Z
+- closed: 2026-07-17T20:42:09Z  | state_reason: `not_planned`
+- labels: (none)
+- url: https://github.com/mouriya-s-lab/coder-loop/issues/569
+- comments: 2  | timeline events: 12
+
+---
+
+## Body
+
+## 必须先读的关联 issue
+
+#548（RFC: v3 第三方调用接口与 GitHub 外挂）。本 child 承接其裁决 A/C/F 与 consumed 语义，逐字快照：
+
+> "引擎原生面 = daemon socket；不长 HTTP、不长 token、不新增第三方主体类；每类外部系统一个本地消费 daemon 终结网络可达与外部鉴权；「本机 socket = operator」信任模型不变" — #548 裁决 A
+
+> "不引入新实体：= 新建一条 chain。调用语义两分支 `into-chain | new-workspace`；不加引擎组合命令，外挂两步调用（chain.create 幂等 + item.add 唯一拒绝使部分失败重放安全）" — #548 裁决 C
+
+> "新建独立 repo（`github-hapi-iac-daemon` 形态：NetBird 监听 + HMAC + delivery 幂等）；消费面 = PATH 上的 `coder-loop` CLI，零 import 引擎源码；「label→preset、issue→itemId、chain 命名、repo→本地 checkout」映射配置全归消费端" — #548 裁决 F
+
+> "消费 daemon 的 consumed 语义：`item.add` 成功即 `consumed`（入队 = 接管）；coder-loop daemon 不可达/拒绝 → `not-consumed` + blocker，router 保留队列重推。完成语义归引擎与 preset（fire-and-forget target 不占 router 槽）。" — #548 核心设计
+
+## 目标
+
+新建独立 repo 落地 GitHub 消费 daemon：接收 `github-hapi-agent-router` 的 HMAC push（规范化 issue 事件），按映射配置转译为 coder-loop CLI 的 `into-chain | new-workspace` 结构化调用，返回 `consumed | not-consumed` verdict。
+
+## 使用场景
+
+操作员给某配置内 GitHub repo 的 issue 打 trigger label → router 推事件 → 本 daemon 把它变成 coder-loop 队列工作 → preset 工作流迭代至 PR merged / issue closed。操作员全程只操作 GitHub；无人工 prompt、无手工 CLI。这是 #548 关闭验证行 4「GitHub 事件端到端」的承载部件。
+
+## 上下文
+
+repo 未建（见决策项）。上游、参照、下游三面锚点（2026-07-02 核实；行号实施前自行 grep 核对）：
+
+- **上游 router push 契约**（`mouriya-s-lab/github-hapi-agent-router`@14de4e4）：POST 规范化事件，HMAC 头 `x-router-timestamp` / `x-router-signature-256`，签名 `sha256=HMAC(secret, timestamp+"."+body)`（`src/forwarder.ts:61-73`）；期待响应 `{outcome: "consumed"|"not-consumed", session_id?}`（`src/forwarder.ts:41-52`）；`not-consumed` / transport-error 分别 5min / 60s 重推（`src/push-loop.ts:8-9`），队列持久化落盘（`src/queue-store.ts`）；delivery id 去重在 router 侧（`src/delivery-store.ts` `DeliveryStore.check` → `already-forwarded`）。
+- **形态参照** `mouriya-s-lab/github-hapi-iac-daemon`@33bfc9a（Python/FastAPI，7 模块 598 行）：HMAC 校验（`src/iacdaemon/api.py:124-135`）、`Consumed`/`NotConsumed` 响应模型（`src/iacdaemon/models.py:87-105`）。其 clean-workspace gate 与 hapi spawn 是 iac 专用，本 daemon 不复制——排队、worktree 隔离、并发是 coder-loop 引擎本职。
+- **下游引擎调用面**（`mouriya-s-lab/coder-loop` main@a007fa4）：
+  - `coder-loop chain create <name> --config-json '...'`（`repository` 现为必填且须 `owner/repo` 形，`src/daemon.ts:1573`、`src/daemon.ts:395`——GitHub 事件源天然满足）；同名同字段幂等返回既有链（`src/daemon.ts:1607`），字段冲突 throw `conflict`（`src/daemon.ts:1602`）。
+  - `coder-loop item add <chain> --issue <id> --repo-cwd <path> (--preset <name> | --preset-path <dir>) [--field-json '{...}']`（`src/loop.ts:1443-1493`）；重复 itemId 拒绝，错误文本 `item with id ${itemId} already exists in chain ${chain.name}`（`src/daemon.ts:2214-2215`，物理约束 `UNIQUE (chain_id, item_id)`，`src/sqlite-state.ts:403`）。
+  - flag 漂移预警：`--issue` 由 #551 干净改名 `--item`（不留 alias，见依赖关系）；`chain create` 的 metadata 面正被 #557 演进（chain 级判定声明化，且其 gated 于 #546 的 chain 层声明 child、时点不定）——对 #557 不设硬依赖，本 daemon 的 chain 声明配置经 `--config-json` 透传，落地时以当时 CLI 契约为准。
+
+## 问题
+
+> "外部触发入口现状只有 CLI→Unix socket（行 JSON、每请求一连接，`src/daemon.ts:3833-3864`）；无 HTTP、无 webhook receiver" — #548 定位事实
+
+GitHub 事件今天无法自动变成 coder-loop 队列工作；iac 链路（router → `github-hapi-iac-daemon`）已端到端验证消费 daemon 形态，但 coder-loop 侧的对应消费端不存在。裁决 F 已裁定承载体：新建独立 repo，不进 coder-loop、不进 router。
+
+## 预期结果
+
+性质表述：
+
+1. **入队通路唯一性**：本 daemon 对 coder-loop 的一切写入都经 PATH 上的 `coder-loop` CLI——零 import 引擎源码、零直连 socket、零直写 SQLite。CLI 即契约（coder-loop CLAUDE.md 钉定的 stable API）。
+2. **两分支覆盖、零 prompt**：映射配置能表达 `into-chain`（既有链追加）与 `new-workspace`（声明新链 + 播种）两分支；任何调用通路上不存在自由 prompt 字段——传递的只有 chain 选择、preset 引用、preset 声明的元信息字段。
+3. **重放收敛**：对任意前缀失败的调用序列，同一事件重放收敛到与单次成功相同的终态——`chain.create` 幂等、`item.add` already-exists 按 `consumed` 处置（入队 = 接管的既成事实）、其余失败 → `not-consumed` 交 router 重推。
+4. **verdict 忠实**：`consumed` 当且仅当 item 实际入队（或已在队）；coder-loop daemon 不可达 / 拒绝 → `not-consumed` + 结构化 blocker。
+5. **映射知识独占**：label→preset、issue→itemId 约定、chain 命名约定、repo→本地 checkout 路径，全部归本 daemon 配置；coder-loop repo 零新增 GitHub 外挂知识。
+6. 事件→动作映射结果与 verdict 用穷尽 ADT 建模（union 加 variant 时编译器给出 worklist）。
+
+### 显式决策项（RFC 开放问题分配，落地时裁，裁决留本 thread）
+
+- **repo 命名**：落地时定。repo owner 创建前按操作员 GitHub 账号路由规则确认（候选 owner 四选一；姊妹 repo router / iac-daemon / hapi-remote-session 均在 `mouriya-s-lab`）。
+- **fire-and-forget 下的 GitHub 侧回执**（「已入队」comment 之类）：是否要、归哪端。若裁归 router 侧，需求登记到 router repo issue，不在本 repo 实现。
+
+## 不应残留
+
+- 本 child 范围内：无 prompt 透传通路；无绕过 CLI 的引擎访问（socket 直连 / SQLite 直写 / import 引擎源码）；不复制 iac-daemon 的 clean-workspace gate / agent-availability 机制。
+- 范围之外不动：coder-loop 引擎源码（#548 引擎近零改动原则 + 关闭验证行 6）；router repo 实现（演进需求归 `mouriya-s-lab/github-hapi-agent-router` 的登记 issue）；部署 IaC（#548 范围外：「消费 daemon 的部署 IaC——归 IaC repo 惯例路径」）。
+
+## 约束
+
+- 代码红线（#548 约束节逐字）："必须全链路 ADT，禁止任何类型退化。不引入 `any` / 匿名形状；`unknown` 仅限 catch 与边界 parse 入口；禁止真 `as` 断言（`as const` 除外）；外部输入经边界 parse（arktype）为精确类型后流转；不得删除类型依赖、绕过或降级既有类型边界。违反红线 = changes requested，无例外。消费 daemon repo 同样适用。"
+- 信任边界（裁决 A）：本 daemon 终结外部鉴权（HMAC 验签），对 coder-loop 以本机 operator 主体调用；不把任何外部凭证透传给引擎。
+
+## 本 issue 的验证边界
+
+- **验证层级**：跨系统专用 E2E。
+- **本 issue 必须证明**：真实 GitHub label → router → 消费 daemon → coder-loop 的跨系统路径，包括重投收敛与最终一次执行；这是本 issue 自己的产品路径。
+- **不在本 issue 内执行**：不得用 `scripts/real-e2e.ts` 代替上述外部路径。coder-loop 内部跨子系统接缝归 #684；claude/codex/opencode 与现有 bundled preset 的 compatibility 归 #685。
+- **现有 GitHub real E2E**：本 issue 不运行 `bun scripts/real-e2e.ts`；该 compatibility 验证只由 #685 在冻结发布候选 SHA 上执行。 本 issue 仍必须运行正文定义的 GitHub router 跨系统专用 E2E；它不是 `bun scripts/real-e2e.ts`。
+## 验收标准
+
+| # | Dimension | Check | Command | Env | Expect |
+|---|---|---|---|---|---|
+| 1 | function | into-chain 分支（RFC 行 1 前半） | 对映射到既有 chain 的 fixture 事件构造带合法 HMAC 的 POST；随后 `coder-loop status <target> --json` | local | 响应 `consumed`；item 出现在该 chain 队列（`queue.total` 增一且新 itemId 可见）；决策日志记录构造的 CLI 调用参数，其中无 prompt 内容字段 |
+| 2 | function | new-workspace 分支（RFC 行 1 后半） | 对映射到新链声明的 fixture 事件 POST；`coder-loop chain list` + `status --json` | local | 新 chain 建立、item 入队且 `queue.selected` 可指向它 |
+| 3 | function | 重放收敛（RFC 行 3） | 同一事件 POST 两次（模拟 router 重推同 delivery）；比较两次响应与 `status --json` 队列 | local | 两次均 `consumed`；队列 item 总数不变（执行恰好一次归行 5 端到端观察） |
+| 4 | function | verdict 忠实：引擎停机 | `coder-loop daemon stop` 后 POST；重启引擎后重放同一事件 | local | 停机时响应 `not-consumed` + 结构化 blocker；恢复后重放 `consumed` |
+| 5 | integration | 端到端 + 重试闭环（RFC 行 4、5；先决：router 完成模型 per-target 化已落地） | fixture repo 真实 labeled issue → router → 本 daemon → 引擎 → preset 工作流；期间制造一次引擎停机再恢复 | 真实 GitHub + router + 本机引擎 | issue 最终被 PR close；一次触发恰好一次执行；停机期事件经 router 队列重推恢复消费，不丢失 |
+| 6 | assumption | 外挂纯度（RFC 行 6） | 本 repo：检查依赖清单与 import 面对 coder-loop 的引用；本 child 的 closing PR 不落在 coder-loop repo | local | 依赖清单与 import 均无 coder-loop 源码引用（仅 spawn PATH 上 CLI）；coder-loop repo 无本 child 产生的改动 |
+| 7 | environment | 类型与测试 | 本 repo typecheck + test | local | 全绿 |
+
+## 依赖关系
+
+- Depends on: #551（`--issue` → `--item` 干净改名不留 alias；消费端调用面只建一次，避免建成即被改名破坏。超出总控简报已钉边，理由即此）。
+- Depends on: mouriya-s-lab/github-hapi-agent-router#12（完成模型 per-target 化——gate 验收行 5，进而 gate 本 child 的关闭证据；行 1-4 的开发与本地验证不受阻）。
+- Blocks: #570（请求预校验以本 daemon 为宿主）。
+
+
+---
+
+## Comments (2)
+
+### comment #4865424350 by `RiriAgent` — 2026-07-02T11:58:30Z
+
+## 架构切片
+
+1. **系统定位**：#548 核心设计外挂链路的第三部件（GitHub → router → **消费 daemon** → coder-loop daemon）。协议面词汇：它是两个既有稳定契约面之间的翻译进程——对 router 是 push target（consumed/not-consumed 合同），对 coder-loop 是又一个 CLI 调用方（operator 主体）；不拥有任何一侧的语义，只拥有映射表。
+2. **全局坐标**：外网事件域（GitHub webhook，router 已验签）→ mesh HMAC 信任域（router push，本 daemon 验签）→ 本机 operator 信任域（CLI→socket）。parse 点两处：进程入口的 HMAC 验签 + 事件 schema 边界 parse；出口是 CLI 参数构造（引擎侧 socket 边界再 parse 一次）。
+3. **类型↔值不漂移**：防类型泄露——GitHub 事件词表（label / issue number / repo fullName）终结在本 daemon 的映射配置，不得泄进 coder-loop 引擎类型；防值漂移——映射配置是唯一翻译表，事件字段不绕过映射直接透传成引擎参数。
+4. **消除的错误类别**：「外部系统向引擎注入自由 prompt / 任意指令」不可表达（调用面只有结构化字段）；「GitHub 知识渗入引擎 repo」不可表达（翻译发生在引擎 repo 之外，RFC 行 6 grep 可证）。
+
+## log/观测义务
+
+- 本 daemon 每个决策写一行结构化 JSON 日志（对齐 router / iac-daemon 既有形态）：deliveryId、repository、issue、映射结果（分支 + chain + preset + 构造的 CLI 参数）、verdict、blocker。受众是 agent 与操作员排障，结构化优先。
+- coder-loop 引擎侧零新增事件义务：chain.create / item.add 的既有审计事件（每条 mutation 1-3 条）已覆盖入队审计；裁决 H 的 origin 字段是登记在 #548 的可选演进，不进本 child。
+
+
+
+### comment #5007305499 by `RiriAgent` — 2026-07-17T20:42:08Z
+
+重新拆分后由 #746 承接。旧 issue 无关联 PR，关闭。
+
+
+---
+
+## Timeline (12)
+
+- 2026-07-02T11:58:01Z `assigned` @RiriAgent
+- 2026-07-02T11:58:07Z `cross-referenced` @RiriAgentsrc=570
+- 2026-07-02T11:58:17Z `cross-referenced` @RiriAgentsrc=12
+- 2026-07-02T11:58:26Z `parent_issue_added` @RiriAgent
+- 2026-07-02T11:58:30Z `commented` @RiriAgent
+- 2026-07-02T11:58:39Z `cross-referenced` @RiriAgentsrc=548
+- 2026-07-13T02:11:08Z `cross-referenced` @RiriAgentsrc=551
+- 2026-07-17T20:37:36Z `cross-referenced` @RiriAgentsrc=745
+- 2026-07-17T20:37:39Z `cross-referenced` @RiriAgentsrc=746
+- 2026-07-17T20:37:41Z `cross-referenced` @RiriAgentsrc=747
+- 2026-07-17T20:42:08Z `commented` @RiriAgent
+- 2026-07-17T20:42:09Z `closed` @RiriAgentcommit=None

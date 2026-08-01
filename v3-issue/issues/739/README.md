@@ -1,0 +1,107 @@
+# #739 feat(engine): phase task tree 声明与装载期检查
+
+- state: **open**  | author: `RiriAgent`  | created: 2026-07-17T20:37:22Z  | updated: 2026-07-27T04:27:10Z
+- labels: (none)
+- url: https://github.com/mouriya-s-lab/coder-loop/issues/739
+- comments: 0  | timeline events: 16
+
+---
+
+## Body
+
+## 必须先读的关联 issue
+
+继承 [#547](https://github.com/mouriya-s-lab/coder-loop/issues/547) 的共享契约与关闭验证。
+
+## 目标
+
+只交付语法、编译与 unsupported guard；compile→runtime identity 的生产连续性后置到 #546 runtime/final integration，禁止直接 store fixture。
+
+DSL 可声明递归 seq/par phase 任务树（含稳定节点 identity、join ADT、validator 调用、reopen target 引用、per-par 参数位、join 候选具名声明位），装载期完成全部结构检查，编译产物携带任务树结构与 identity。
+
+## 问题
+
+> "「零原语纯 meta 定义」……纯 meta 定义'三阶段两并行 + 强制 CLI 工具调用'需要 DSL 增加什么表达力——从 RFC-1 拿并行结构需求清单" — `v3/rfc-split.md` RFC-2 议题 2
+
+#546 登记的八项表达力需求中，第 1–6 项是并行结构基础，第 8 项是具名 join 候选声明位；当前 DSL 均无法表达：线性数组连「两个 phase 并行」都写不出来，更没有 join、reopen target、并发上限或候选注册位。第 7 项具名 gate 点由 #740 承接。
+
+## 预期结果
+
+性质表述：
+
+1. **递归可声明且 identity 稳定**：seq/par 任意嵌套深度可声明；每个可引用节点具有 preset 内稳定显式 id。compile 输出、SQLite、status/events 沿同一 identity 链关联；移动节点导致结构路径变化时 identity 不变。存量线性数组 normalize 为退化 seq，不保留第二套 parse 后模型。
+2. **join 是封闭 ADT**：当前仅 `drain | validator` 两个有完整语义的 variant；TS 侧穷尽 switch。本 child 交付时 union 只有 `drain | validator`；本轮 v3 的 #714 随后把 `script` 连同语义、持久化、观测投影和全部消费点一次加入，`best-of-n` 仍只登记未来方向。validator 携带 typed workflow invocation，不用自由字符串拼调用。
+3. **非法结构活不过装载期**：树 well-formedness（空 par、重复 phase 名、悬空引用）、reopen target 合法性（只能 `self | 同 seq 更早兄弟`）、join 声明完备性（par 必有 join；validator 必有调用声明）、静态 `dependsOn` 环——全部是编译 error findings，与 #408 同层同形态；错误点名违规节点。
+4. **参数归元数据**：per-par 并发上限与 reopen 预算是声明位 + 编译期类型/范围校验；消费机制归 #546 children（#396 机制/参数分离契约）。
+5. **产物真实化**：编译产物 phases 块任务树结构非退化——嵌套 seq/par 树可被 `jq` 遍历（#544 渲染的输入）。
+6. **过渡期不静默错跑**：scheduler 对新结构的消费归 #546 children；在其落地前，含非退化 par 的编译产物被调度侧点名拒绝（错误指明「par 调度尚未落地」）——不做退化串行执行（会错跑 validator join 语义）、不做可忽略的 warn。本 child 触 scheduler 仅限这一道 guard。
+7. **join 候选具名声明位**（`v3/join-evolution-decision.md` 不变量 7 的编译面；操作员裁决 2026-07-11）：preset 可声明具名 join 候选（validator 调用声明的具名注册，形态同预期结果 2 的 typed workflow invocation），编译产物携带候选表（每候选稳定 id）。运行时进入 join 位的值只能引用该候选表——#702 物化诞生时 join 参数与 #703 演化通道的值域即 `(definitionRef, candidateId)`，其中 `definitionRef` 为 #743 的 tagged `ExecutionDefinitionRef = preset | chain`，运行时不接受自由构造的调用声明。装载期校验：候选自身完备性（同预期结果 3 的 validator 完备性规则）；树内 join 声明与候选引用的悬空检查。
+
+8. **结构边同时是类型化转移路径**：每条可选后继路径具有稳定 identity、目标 step/preset invocation、可选 prompt template 与输入 binding 表。终结路径可无目标；非终结路径必须有且只有一个合法目标。prompt 占位符必须与 bindings 双向完备，`exit.*` 输出 schema 必须与目标输入兼容。
+9. **结构推进不得绕过数据边**：`seq` 的后继 readiness 消费 committed transition，而不是裸 terminal 或 runner exit；存量线性数组 normalize 为退化 `seq` 时同样生成/消费 transition path，不保留第二套无 payload 推进模型。
+
+补充验收：fixture 声明 `seq(A,B)`，A 的路径为 B 选择专属模板并要求结构化 exit object；compile JSON 可遍历 path identity、target、template、完整 bindings 与 agent-owned schema。悬空目标、模板未绑定占位符、未使用 binding、输出/输入类型不兼容均编译失败并点名路径。
+
+### 显式决策项（RFC 开放问题分配，落地时裁，裁决留本 thread）
+
+- seq/par 在 TOML 的具体语法形态（嵌套内联表 vs 引用式节点表）。
+
+## 验收标准
+
+| Dimension | Check | Command | Env | Expect |
+|---|---|---|---|---|
+| function | 嵌套树可声明可导出 | fixture preset 声明 seq 内嵌 par（含 validator join + 调用声明）→ `preset compile --json \| jq` 遍历树 | local | 编译通过；产物树结构与声明同构 |
+| function | reopen target 静态校验 | fixture 声明指向「未跑到的后位兄弟」/「跨 seq 节点」的 reopen target → compile | local | 编译错误点名非法引用与规则 |
+| function | join 完备性 | fixture par 缺 join / validator 缺调用声明 → compile | local | 编译错误点名 |
+| function | 静态 dependsOn 查环 | fixture 声明静态环 → compile | local | 编译错误点名环路径 |
+| function | 参数声明位 | fixture 声明 per-par 并发上限与 reopen 预算（含非法值如负数）→ compile | local | 合法值入产物；非法值编译错误 |
+| function | 过渡期 guard | 含非退化 par 的 fixture preset 建 chain 并启 daemon 调度 | local | 调度侧点名拒绝（错误指明 par 调度尚未落地），不串行执行、链不静默卡死 |
+| integration | 存量 preset 零改动兼容 | `bun test`（全量既有 preset 加载用例）+ 对 bundled preset `preset compile` | local | 全绿；线性数组呈现为退化 seq 树 |
+| integration | identity 跨层连续 | 编译嵌套树、持久化运行态、读取 status/events，再移动一个不改 id 的节点重编译 | local | compile/SQLite/status/events 可按 id 关联；路径变化不制造新身份 |
+| function | 空预留 variant 禁止 | 枚举 join union 并检查每个 variant 的 scheduler/persistence/status consumer | local | union 中只有完整实现的 variant，无 best-of-n/script 占位 |
+| function | join 候选声明位（预期结果 7） | fixture 声明具名候选 → `preset compile --json \| jq` 读候选表；另一 fixture 声明不完备候选（缺调用声明）→ compile | local | 产物含候选表（稳定 id + typed invocation）；不完备候选编译错误点名 |
+| environment | 类型链完好 | `bun run typecheck && bun test` | local | 全绿 |
+
+## 架构切片
+
+1. **系统定位**：编译管线的结构校验级——任务树 parse + well-formedness 检查，与 #408 `checkPresetDag` 同层；产物 phases 块的树结构投影。调度消费归 #546 children，本 child 在 scheduler 侧仅一道「非退化 par 点名拒绝」guard。
+2. **全局坐标**：TOML 树声明域 → typed task tree ADT（封闭 join union）→ 编译产物树投影（#544 渲染输入）。#546 的调度语义域消费同一棵内存树。
+3. **类型↔值不漂移**：防值漂移——产物树与内存树同源（一次 parse，两个投影）；防类型泄露——join/reopen 的**语义**不进声明面类型（声明面只知道词表与引用合法性，不知道调度行为）。
+4. **消除的错误类别**：「非法树（悬空 reopen target、缺 join、静态 dependsOn 环）活到运行期死锁」不可表达；「par 语义未落地时静默串行错跑」不可表达（guard）。
+
+## log/观测义务
+
+- 新增结构校验的 error/warn 进 compile findings 通道（与 #408 同形态）。
+- scheduler guard 拒绝沿既有 scheduler diagnostic 事件形态记录，点名 preset 与 par 节点。
+
+## 依赖关系
+
+- Depends on: #549、#737。
+- Blocks: #698、#706、#707、#709、#726、#744。
+
+
+
+---
+
+## Comments (0)
+
+---
+
+## Timeline (16)
+
+- 2026-07-17T20:37:23Z `assigned` @RiriAgent
+- 2026-07-17T20:38:48Z `cross-referenced` @RiriAgentsrc=726
+- 2026-07-17T20:39:11Z `cross-referenced` @RiriAgentsrc=744
+- 2026-07-17T20:40:14Z `parent_issue_added` @RiriAgent
+- 2026-07-17T20:41:57Z `cross-referenced` @RiriAgentsrc=554
+- 2026-07-18T06:19:39Z `cross-referenced` @RiriAgentsrc=698
+- 2026-07-18T06:19:40Z `cross-referenced` @RiriAgentsrc=706
+- 2026-07-18T06:19:41Z `cross-referenced` @RiriAgentsrc=709
+- 2026-07-24T04:01:28Z `cross-referenced` @RiriAgentsrc=756
+- 2026-07-26T16:14:04Z `cross-referenced` @RiriAgentsrc=707
+- 2026-07-26T16:14:13Z `cross-referenced` @RiriAgentsrc=714
+- 2026-07-26T16:15:06Z `cross-referenced` @RiriAgentsrc=546
+- 2026-07-26T16:15:07Z `cross-referenced` @RiriAgentsrc=547
+- 2026-07-26T23:48:58Z `cross-referenced` @RiriAgentsrc=702
+- 2026-07-26T23:48:59Z `cross-referenced` @RiriAgentsrc=703
+- 2026-07-27T04:27:10Z `cross-referenced` @RiriAgentsrc=737
