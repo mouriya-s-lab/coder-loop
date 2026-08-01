@@ -888,9 +888,11 @@ context 快照、填值驳回、map 结果、谓词结果与内部路由对 daem
 
 <!-- 546 -->
 
-# 为什么 coder-loop 需要任务代数，以及这套设计实际上建立了什么
+# 面 3：对象域——任务代数与调度
 
-> 本文不是 RFC 的缩写，也不承担规范权威。它从 coder-loop 的现实故障出发，解释为什么仅给现有队列补字段无法得到可靠并发，以及 RFC #546 所定义的目标语义、仓库里已经存在的工程地基和仍待实现的生产行为分别是什么。规范裁决以 [RFC.md](RFC.md) 为准，事实出处以 [EVIDENCE.md](EVIDENCE.md) 为准。
+本篇定义针眼外侧的对象域：task 怎样在运行时物化和增长，群组怎样落定并被消费，锁与 committed transition 怎样把调度写成可重放事实，以及函数域与出站边界交来的 typed 结局怎样成为对象域动作。当前模型不解释闭包内部步骤；它只消费面 1 发布并 pin 的定义合同、面 2 的 `returned(value) | exception`，以及面 5 的封闭事实 ADT。
+
+来源：division-plan.md“面 3”；A.md 第 0 篇 0.3、0.4.3、0.8。
 
 ## 1. 先看一个并不特殊的工作流
 
@@ -902,15 +904,19 @@ v2 的队列可以分别为这些问题增加条件分支，但那样得到的�
 
 “任务代数”因此不是为了让术语更像编程语言理论。它要把上述所有行为压到少数可组合、可持久化、可验证的构造中，使非法状态没有正常写入路径。删除这层约束，系统仍可以跑简单的线性 preset，却无法对动态并行、崩溃恢复、资源回收和审计给出同一个答案。
 
+来源：沿用旧 546 §1。【旧 RFC 候选 | A.md 旧 546 §1 | 待复核】
+
 ## 2. 现有模型为什么会在复杂场景里分裂
 
 旧实现把 item 同时当作业务材料、队列成员和生命周期载体。`item.status` 既可能表示 agent 返回的业务结论，又可能被 scheduler 当作可运行性依据；phase 既像函数标签，又像固定流程位置；slot 的串行约束还会把本来没有依赖的工作表现成先后关系。这些概念在简单队列中看似方便，因为一行记录就能回答很多问题。一旦出现 B 的内部等待、A 派生 A2 或顶层追加 D，同一行就不再能同时代表值、执行现场与组合位置。
 
-分裂最直观的后果是两个读面都“有依据”，却给出相反结论。现有生产调度仍主要沿 flat phase/slot 路径运行，而数据库已经有 task tree、closure 和 lock 的结构地基。某个兼容命令可以改变 flat item 或 closure 的状态，却没有同时产生一条合法的树演化。结果不是简单的缓存延迟，而是两个模型对“谁可以运行”各自作答。EVIDENCE 对 main 的冻结审计确认：shape 已能表达树，生产 scheduler 仍未以递归树状态作为唯一 ready-leaf 来源（[EVIDENCE.md §2](EVIDENCE.md#2-main-实然底图能力-an)）。
+分裂最直观的后果是两个读面都“有依据”，却给出相反结论：兼容的 flat phase/slot 路径与已经存在的 task、closure、lock 结构可能分别回答“谁可以运行”。这不是简单的缓存延迟，而是推进权发生分叉；现有结构地基能表达对象，不等于生产 scheduler 已经只从对象域事实推导 ready task。
 
-如果用双写补丁弥合这种分裂，新的问题马上出现：两次写之间 crash 怎么办？哪一边先写？重试如何去重？旧字段和树结构冲突时相信谁？每多一个派生方式，都要复制同样的协调逻辑。任务代数选择另一条路：只允许少数事实事件进入权威历史，其余 current state 都由它们投影；调度资格只能从一个组合结构推导。兼容读面可以继续存在，却不能成为第二个推进器。
+如果用双写补丁弥合这种分裂，新的问题马上出现：两次写之间 crash 怎么办？哪一边先写？重试如何去重？旧字段和对象域结构冲突时相信谁？每多一个派生方式，都要复制同样的协调逻辑。当前模型只允许少数事实事件进入权威历史，其余 current state 都由它们投影；兼容读面可以继续存在，却不能成为第二个推进器。
 
-用户可观察的改变不是“状态表更漂亮”，而是同一个任务在 CLI、daemon、GUI、重启恢复和 GC 判断中不会出现互相矛盾的生命周期。验证这一点也不能只查 schema；必须构造一次 flat 兼容写与 tree 状态冲突，证明生产系统拒绝制造额外 ready leaf，或者只把兼容操作翻译成合法的前向事件。
+用户可观察的改变不是“状态表更漂亮”，而是同一个 task 在 CLI、daemon、GUI、重启恢复和 GC 判断中不会出现互相矛盾的生命周期。验证这一点不能只查 schema；必须构造兼容写与对象域状态冲突，证明生产系统拒绝制造额外 ready task，或者只把兼容操作翻译成合法的前向事件。
+
+来源：沿用旧 546 §2，并删除已经失效的外部证据行号引用。【旧 RFC 候选 | A.md 旧 546 §2 | 待复核】
 
 ## 3. 三个域解决的是责任混淆，不是命名问题
 
@@ -920,189 +926,215 @@ v2 的队列可以分别为这些问题增加条件分支，但那样得到的�
 
 删除对象域与值域的分界，D 的种子数据就可能再次变成一个可变队列单元；删除对象域与函数域的分界，worktree 生命周期便会跟业务 status 绑定；删除函数域和值域的分界，session 中的临时现场可能被误当成可重放的持久输入。三域不是要求实现三个服务，而是要求跨模块数据类型不再用同一个松散 record 冒充三种身份。
 
-对用户来说，这意味着 `status` 读面会明确展示“task 是否已返回或异常”“closure 资源处于何种生命周期”“业务返回值是什么”，而不是给出一个含义随命令变化的字符串。其代价是迁移期必须为旧字段建立明确的投影或转换，不能继续让任何字段既是权威输入又是派生输出。验证要覆盖类型边界和运行路径：给引擎一个业务失败 tag，应当正常派生声明的处理 task；杀死 runner 而不提交返回，应当记录 exception，且不能伪造同一个业务 tag。
+对用户来说，这意味着 `status` 读面会明确展示“task 是否已返回或异常”“closure 资源处于何种生命周期”“业务返回值是什么”，而不是给出一个含义随命令变化的字符串。迁移期必须为旧字段建立明确投影或转换，不能继续让任何字段既是权威输入又是派生输出。
+
+来源：沿用旧 546 §3，并以总纲的对象域、函数域、值与针眼词汇收束。【record 收敛 | record-1 assistant 评价段 | 未反驳】【旧 RFC 候选 | A.md 旧 546 §3 | 待复核】
 
 ## 4. 三个时态使“定义”和“正在运行的程序”不再互相改写
 
-同一个工作流至少有三种不同事实。定义态描述 phase 能返回哪些 variant、每个 variant 接到什么后继、是否会 await 下级任务、chain 使用哪个 base branch，以及 finalizer 是什么。编译态把这些声明解析为精确类型，检查派发是否覆盖全部返回 variant、结构是否可组合、dependsOn 是否成环，并冻结一个可引用的 execution definition identity。运行态只实例化已经编译的构造，持有锁，追加事实，不修改正在运行实例的定义。
+同一个工作流至少有三种不同事实。定义态描述 phase 能返回哪些 variant、每个 variant 接到什么后继、是否会 await 下级任务、chain 使用哪个 base branch，以及 finalizer 是什么。编译态把这些声明解析为精确类型并形成可引用的 compiled product。运行态只实例化已经发布并 pin 的构造，持有锁，追加事实，不修改正在运行实例的定义。定义冻结、publish、pin 与 resolver 的机制归面 1，本篇只消费 exact definition ref。
 
-这不是“chain 先配置、再编译、最后永远运行”的三段流水线。D 是在 chain 已运行后追加的，它仍需经过自己的定义解析和编译边界。B 运行中派生 B-check 时，B-check 的定义也必须已经被 pin 并通过同样检查。每个定义对象都有自己的三时态，运行中可以实例化新对象，但不能热改旧对象。
+这不是“chain 先配置、再编译、最后永远运行”的三段流水线。D 在 chain 已运行后追加，仍需经过自己的定义解析和编译边界。B 运行中派生 B-check 时，B-check 的定义也必须已经被 pin 并通过同样检查。运行中可以实例化新对象，但不能热改旧对象。
 
-为什么 pin 必不可少？设 daemon crash 后，preset 文件已经被人修改，A 的 `review_needed` 原来派生 A2，现在却被改成直接 terminal。若重启时读取磁盘最新文本，恢复便不再是恢复，而是用新程序解释旧历史。类似问题也出现在 join：D 加入前后若允许改写消费者，已经收集的元组将失去确定含义。冻结 definition identity 的代价是升级不能悄无声息地作用于 in-flight chain；迁移必须显式创建新定义或按受控规则转换。这个限制正是所需的可复现性，而非可用性缺陷。
+pin 的消费理由保持不变：daemon crash 后若 preset 文件已经修改，A 的 `review_needed` 原来派生 A2、现在却直接 terminal，重启读取 current 文本就不再是恢复，而是用新程序解释旧历史。类似问题也出现在 join；运行中改写消费者，会让已经收集的值包失去确定含义。
 
-用户可观察的结果是：同一 run 在重启前后保持相同派发和 join 语义；磁盘漂移或 schema 不匹配时系统明确失败并报告 pinned identity，而不是“尽力猜”。可证伪测试应启动一个暂停中的 chain，修改 preset，再重启 daemon；旧实例必须继续绑定旧定义，或以类型化不兼容错误停止，绝不能静默采用新文本。
+用户可观察的结果是同一 run 在重启前后保持相同派发与 join 语义。磁盘漂移、bundle 缺失或 schema 不兼容时，系统消费面 1 的 typed resolution 结局并报告 pinned identity，绝不能静默采用新文本。
+
+来源：沿用旧 546 §4；冻结机制改为只消费面 1 第 5—7 节的合同。【旧 RFC 候选 | A.md 旧 546 §4 | 待复核】
 
 ## 5. 柯里化派生把流程推进变成函数应用
 
-A 并不是在创建 chain 时就带着一串预建节点。phase 声明先接受静态声明参数，编译成一个等待输入值的函数；运行时把 item 种子或前驱返回值交给它，应用的结果才是具体 task。A 返回后，返回 tag 选择下一函数，应用返回值形成 A2。这里借用“柯里化”描述的是分阶段供参：声明参数先固定，运行值后到达，而不是要求实现采用某种函数式库。
+A 并不在创建 chain 时携带一串预建节点。声明参数先被固定为等待运行值的函数；item 种子或前驱交付值到达后，应用结果才是具体 task。A 返回后，tag 选择 pinned 后继函数，交付值形成 A2。这里的“柯里化”只表示分阶段供参，不要求实现使用特定函数式库。
 
-这种设计消除了“未启动后继”的悬挂状态。C 没有返回，只产生 exception，因此没有任何返回值可用于应用后继函数；C 的依赖线自然停止。相反，A 即使返回的是业务负面结果，只要声明为该 variant 配置了处理函数，A2 就正常产生。派发表在编译时必须穷尽，因而不会在生产中遇到一个合法 tag 却不知道往哪里走。
+C 只产生 exception 时，没有返回值可应用到正常后继；A 即使返回业务负面 variant，只要声明了对应处理函数，后继仍正常物化。定义态穷尽有限后继，运行态只在 committed transition 后物化实际选择；没有被选择的后继不取得对象域 identity。
 
-若预先创建完整节点图，动态数据决定的分支必须靠 enable/disable 标志维护，未选中的节点会污染完成判定、GC 和 UI。若运行时用任意脚本决定下一个节点，系统又无法静态证明返回 variant 都有归宿。柯里化派生把两端接起来：流程可以由运行值选择，同时选择空间来自冻结定义。
+历史必须记录应用所用的 definition ref、输入值 identity 与派发原因。闭包仍可拥有副作用；这里要求确定的只是跨 task 的生成关系。验证应穷尽正常 variant，并证明 exception 不会预建或激活正常后继。
 
-其代价是运行历史必须记录应用所用的 definition ref 和输入值身份，调试工具也要展示“为何派生这个 task”，不能只列节点名。非目标是把 prompt 或 agent 内部计算变成纯函数；闭包当然有副作用。这里要求确定的是跨 task 的生成关系。验证时应为一个有三个返回 variant 的 phase 分别提交返回，确认三条派发表逐一命中；删去一个声明分支，编译必须失败；制造 exception，确认没有后继对象被预建或激活。
+来源：沿用旧 546 §5，并以总纲 0.3 的运行时生长边界收束。【旧 RFC 候选 | A.md 旧 546 §5 | 待复核】
 
-## 6. seq、par 和 join 给并发一个可计算的边界
+## 6. 一个节点消费一个群组
 
-案例中 A 的后继 A2 与 A 构成 seq：只有 A 返回值存在，A2 才能被应用。A、B、C 是顶层 par 的成员，因为三者没有相互依赖；所谓“初始顺序”只可作为调度优先级，不能暗中把它们变成依赖线。D 在顶层尚未落定时追加，也成为该开放并行集合的成员。
+当前模型只有一个结构关系：一个节点消费一个群组。`seq` 不是与 `par` 并列的第二套运行时构造；群组只有一个成员时，消费关系退化为 seq，多个无相互依赖的成员则形成可并行落定的群组。A 的单成员交付产生 A2，A、B、C 的多成员群组则把完整落定向量交给下一个消费者。
 
-par 不仅表示可以同时运行，还必须说明何时把各成员结果交给谁。join 是消费成员落定结果的函数。它按 all-settled 语义观察每个成员：正常返回携带值，exception 也作为一种落定结果进入边界。这样 C 的崩溃不会阻止 A、B、D 继续，但最终消费者能看见 C 没有返回。若声明者不关心成员值，可以使用 drain，即明确丢弃结果并放行；若需要判断，则实例化 validator task，它消费结果元组并通过普通返回值给出决定。
+群组成员以 `returned(value) | exception` 落定。exception 不阻塞 sibling，只作为一项 typed 结局进入消费边界。消费者不关心值时使用 drain；需要业务判断时实例化 validator 或 finalizer task。join 在诞生时固定它所消费的群组 identity、结果合同与消费者；固定的是消费含义，不是提前冻结尚可增长的成员快照，运行中不得热改为另一套消费者。
 
-join 必须在并行容器诞生时固定。允许运行中热改 join，等价于对已执行程序改写其消费者：同一组 A/B/C/D 结果在不同重启时可能走不同路径。需要新增检查时，可以在尚开放的外围结构中追加新的检查 task，或让 finalizer 把关，而不是改变已存在容器的含义。
+群组结束由消费触发，并可声明一个可选等待窗口。全体当前成员落定后，零等待意味着立即结束；非零窗口（例如六十秒）允许合法的新成员在结束前加入。动态增长必须发生在所属群组结束之前，结束一旦提交便不可重开，迟到提议只能重新声称别的位置。
 
-同级 leaf 未落定就不能越过它推进到下一级，这是组合代数的基本约束。seq 的位置只向前；par 只有达到声明的落定条件并经 join 消费后才能释放后继；不存在 cursor 后退、事后恢复已越过节点或重开 terminal 容器。这个限制不仅防止状态错乱，也确保 crash replay 可以从事件前缀唯一重建 frontier。旧兼容命令若暗示“把过去节点改回 ready”，必须被退役或重新定义为只作用于尚未完成的位置。
+等待期满必须写入日志；重放直接读取已经提交的期满事实，不重新等待墙钟。等待窗口内有新成员到达后，是重置计时还是保持原固定截止点，当前仍是待复核开放项，本篇不替声明模型作选择。
 
-用户会观察到：A、B、C 可并发；C exception 后其他成员不受阻；D 若在容器落定前成功追加，join 等待并消费 D；一旦 join 已提交，追加被拒绝，不能让已放行的结构重新打开。代价是某些临时运维欲望不能靠改状态解决，只能创建新的前向工作。验证需在时间上竞争 append 与 join commit，证明原子边界只允许两种结果：D 被纳入固定元组，或追加失败；绝不能出现 join 已放行但 D 又被算入旧容器。
+来源：seq 退化与统一消费关系来自 record-1 2:30—2:35【record 收敛 | record-1 2:30—2:35 | 未反驳】；等待窗口与期满日志来自 record-2 3:06—3:07【操作员原话 | record-2 3:06 | 已裁决】【record 收敛 | record-2 3:07 | 未反驳】；重置或固定保持待复核【record 收敛 | record-2 3:07 | 待复核】。
 
 ## 7. await 与 dependsOn 不是两种隐藏队列
 
-B 需要 B-check 时，B 的闭包尚未返回。await 允许运行中的 task 派生下级 task，保存自己的函数现场，释放执行锁，等下级返回后把值送回同一个函数实例继续执行。它是全模型中唯一允许“正在运行的函数从外部再接收一个值”的正规通道。B-check 仍是对象域中的 task，有自己的闭包、资源和锁；它不是 B session 里一个无法观察的子进程。
+B 需要 B-check 时，B 的闭包尚未返回。await 允许运行中的 task 派生下级 task，保存自己的函数现场，释放执行锁，等下级返回后把值送回同一个函数实例继续执行。B-check 仍是对象域中的 task，有自己的闭包、资源和锁；它不是 B session 里一个无法观察的子进程。
 
 如果没有 await，开发者通常会用 resume prompt、共享文件或手写 status 把 B-check 结果塞回 B。这些旁路既绕开类型检查，也无法证明 crash 后值被消费了几次。await 把等待关系和继续点放进持久模型，使 B 释放计算资源而保留必要现场。若 B-check exception，B 收到的不是伪造业务值；异常如何处理由声明的消费者结构决定。
 
-dependsOn 解决另一种需求：D 只要求 A2 先落定，却不消费 A2 的返回值。它相当于等待后丢弃，不应借用 seq 传值，也不应偷偷把 D 放进 A 的函数域。依赖图在写入或装载时查环；依赖方在前驱 exception 而无可消费结果时不会启动。系统不自动升级、不猜测“也许可以继续”，因为那会把业务政策写进引擎。
+dependsOn 解决另一种需求：D 只要求 A2 先落定，却不消费 A2 的返回值。它是严格弱于消费的布尔门，只能按 identity 观察“是否落定”，不能读取返回值或成为第二条值通道。依赖图在写入或装载时查环；依赖方在前驱 exception 而无可消费结果时不会启动，系统不自动升级或猜测“也许可以继续”。
 
-await 的成本是闭包现场需要可恢复，锁释放和重取必须有精确协议；dependsOn 的成本是动态追加时也要重复环检测。二者都不承诺分布式事务式的任意回滚，也不引入取消传播。验证应让 B await B-check 时停止 daemon，确认重启后 B 不被重复 spawn、B-check 仍可完成且返回值只注入一次；另造 A dependsOn D、D dependsOn A，写入必须在任何执行前失败。
+await 的成本是闭包现场需要可恢复，锁释放和重取必须有精确协议；dependsOn 的成本是动态追加时也要重复环检测。二者都不承诺任意回滚，也不引入取消传播。验证应让 B await B-check 时停止 daemon，确认重启后 B 不被重复 spawn、B-check 返回值只注入一次；另造 dependsOn 环，写入必须在执行前失败。
 
-## 8. 动态追加不是改数组，而是扩展尚未完成的结构
+来源：沿用旧 546 §7；dependsOn 与群组消费的区别由 record-1 2:30 澄清。【操作员原话 | record-1 2:30 | 已裁决】【旧 RFC 候选 | A.md 旧 546 §7 | 待复核】
 
-操作员追加 D 时，系统面对的不是“往 items 表插一行”，而是“在哪个仍开放的组合边界派生新 task”。如果目标原本是单个尚未落定 task，首次追加可把它原地物化为一个 par 容器：原 task 与 D 成为同级成员，容器取得稳定 identity，并在诞生时绑定 drain 或声明的 join。后续追加复用这份 pin。嵌套结构各自拥有独立容器 identity，不能凭路径字符串猜归属。
+## 8. 动态追加是 typed admit，不是改数组
 
-为什么必须限制为未落定结构？如果 finalizer 已消费 A/B/C 的结果，再加入 D，就会要求重开消费者或让 D 永远不被顶层完成条件看见。前者破坏单调性，后者制造孤儿。前向追加只允许改变尚未决定的未来，因此与崩溃重放兼容。
+运行时新增 task 必须同时携带“位置”和“时机”两个参数，才能提交给 `admit`。位置声称它要进入的当前群组边界，时机声称它相对该群组结束事件仍可入链；引擎结合 pinned 合同、开放前沿、结束事实与授权，计算这次声称能否成立。只说明“这是未来任务”或依赖“当前 item 附近”都不足以入链。
 
-append 还必须经过定义编译与授权。operator 可以按产品合同操作；agent 默认拒绝，只有 phase slice 明确授予 derive/create 权利并限定 scope 时才可追加。否则任意 task 都能扩大工作树、消耗无限资源或逃出自己的结构边界。配额和并发上限属于声明参数；未声明不等于引擎偷偷给一个经验默认值。
+同一个 admit 端口服务两类调用者：内部派生调用者经面 2 已声明并授权的对象域调用通道提出声称，外部注入调用者经面 4 提出同形声称。协议 owner 在本面；两条入口不能复制位置、时机、幂等或拒绝语义。
 
-用户可观察到稳定 group identity、追加来源、授权判定和加入后的 join 成员关系。代价是 CLI 必须要求明确目标容器或可唯一解析的 scope，不能继续依赖“当前 item 附近”这种隐式位置。验证应覆盖第一次物化、再次追加、嵌套追加、越权追加、落定后追加以及 daemon 在写容器和成员之间 crash 的恢复；每次重试都只能得到同一个 D identity，不得复制成员。
+判定结果是 ADT：成功分支返回 admitted task identity 与已提交位置；拒绝分支至少以 `position-unavailable`、`timing-invalid`、`contract-rejected` 或 `unauthorized` 等 typed reason 表达，不能压成笼统错误。当前开放前沿是本次判定的副产品，随需要重新声称位置的拒绝结果返回；它不是可独立调用、随后再与 admit 竞争的查询接口。
+
+原位置失效不产生对象域错误状态，也不由引擎自动选择替代位置。提议方可把 A2 改称为 B2，携带新位置与时机重新过同一道门；引擎只判定新声称，不判断语义上是否应该更换。幂等键绑定外部或内部事实 identity，而不绑定位置；拒绝不消耗键，只有成功准入才使该事实键收敛，防止同一事实在两个位置各生成一次。
+
+来源：位置与时机来自 record-1 2:48【操作员原话 | record-1 2:48 | 已裁决】；重新声称与只判不选来自 record-2 3:09—3:10【操作员原话 | record-2 3:09 | 已裁决】【record 收敛 | record-2 3:10 | 未反驳】；同端口两类调用者来自 record-1 2:28【record 收敛 | record-1 2:28 | 未反驳】；owner 映射沿用 division-plan.md“面 3”【主 session 裁决 | — | 待复核】。
 
 ## 9. 异常语义必须像程序异常，而不是业务状态机的万能失败
 
-C 的 runner 崩溃并耗尽 attempts 时，没有产生函数返回值。其 seq 线上因此没有可应用的后继，异常向最近的 par 边界传播，在那里成为一个已落定成员结果。A、B、D 继续。若 C 不在 par 内且没有声明消费者，流程就停在那里。这不是 scheduler 故障，而是程序没有定义处理路径。
+C 的 runner 崩溃并耗尽 attempts 时，没有产生函数返回值。其单成员消费线上因此没有可应用的正常后继，异常向最近的多成员群组边界传播，在那里成为一个已落定成员结果。A、B、D 继续。若 C 不在群组内且没有声明消费者，流程就停在那里。这不是 scheduler 故障，而是程序没有定义处理路径。
 
 业务失败完全不同。假设 A 返回 `{tag: "review_rejected", ...}`，该值是声明 union 的合法成员。派发表可以把它交给 correction task，这就相当于显式 catch。引擎不应内置“review_rejected 要重试”或“失败要通知操作员”。把业务 tag 和 exception 混合会让 validator 无法判断自己收到的是明确否决还是根本没有产出，也会诱使全局兜底绕过 preset 设计。
 
-设计允许一个受审计的 `override-advance`，但它只对汇合点实施一次前向推进，并通过与普通返回相同的提交边界。它不是回退、删除、取消、修改 join 或重新打开完成节点。它的存在承认判定 task 自身可能坏死，同时不破坏事件前缀单调性。
+设计允许一个受审计的前向 decision，但它只对汇合点实施一次推进，并通过与普通返回相同的提交边界。它不是回退、删除、取消、修改 join 或重新打开结束群组。它承认判定 task 自身可能坏死，同时不破坏事件前缀单调性。
 
-用户看到的 exception 应包含 attempt 和闭包身份，并与业务返回 tag 分栏；没有消费者时界面要显示“结构在此停止”，而非永远 spinning。代价是 preset 作者必须完整设计业务补救，而引擎不会替其善后。验证至少包括：业务负面返回派生 correction；进程崩溃不产生 correction；par 隔离 exception；无 par 时 frontier 停止；override 只推进一次且全程留审计事实。
+用户看到的 exception 应包含 attempt 和 closure identity，并与业务返回 tag 分栏；没有消费者时界面要显示“结构在此停止”，而非永远 spinning。验证至少包括业务负面返回派生 correction、进程崩溃不产生 correction、群组隔离 exception、无消费者时开放前沿停止，以及前向 decision 只提交一次。
+
+来源：沿用旧 546 §9，并以面 2 的针眼出口校准异常词汇。【旧 RFC 候选 | A.md 旧 546 §9 | 待复核】
+
+## 9.1 typed escalation 与 fail 级联的 policy owner
+
+级联配置由本面拥有一个显式 schema，而不是若干 optional flag。其核心 ADT 枚举仍只作为示例：步骤处置至少区分放弃重试或重试（原话两读待操作员裁决）、跳过、任务停机，任务处置 `skip-task | stop-group` 与组处置 `advance-next-item | stay-on-current-item`；preset 显式 fail 路由优先，其次由 evaluator 按配置逐层选择，最终没有消费者时进入硬默认。
+
+面 2 执行仍在函数域内完成的 retry 或 skip；当结局要求越过 task 边界时，它只在 `exception` 分支携带 typed escalation。本面的 evaluator 以该信号和 policy 为输入，纯求值出穷尽的 action ADT，不直接产生副作用；执行器再落实任务层、组层与 item 层动作，并把结果写成 committed transition。两者都不重跑面 2 的异常归属判断，也不读取闭包内部步骤状态。
+
+级联顺序固定为：步骤异常先决定重试、跳过或任务停机；任务停机再决定跳过该任务或组停机；组停机最后决定是否推进到下一个 item。evaluator 必须对 policy ADT 穷尽，未知 variant 不得落入 default。配置与显式 fail 路由都穷尽时，硬默认是抛出异常并全局停机；它不是可被普通 par 边界吸收的成员 exception，与面 2 第 6 节执行表保持一致。
+
+来源：级联层级来自 record-3 第 10 轮【操作员原话 | record-3 第 10 轮 | 已裁决】；步骤处置首项的原话存在两读，精确动作词表为待操作员裁决的开放项；schema、ADT、evaluator 与任务/组/item 动作 owner 来自 division-plan.md“面 3”【主 session 裁决 | — | 待复核】；硬默认对齐 A.md 面 2 第 5、6 节。
+
+## 9.2 面 5 封闭事实 ADT 的对象域消费
+
+面 5 只交付封闭 provider 事实，本面按 variant 穷尽消费。`pre-spawn absence` 进入 held 调度处置，不建立 run，也不虚构执行身份。`terminal winner` 经正常针眼形成 `returned(value) | exception`，再由 committed transition 消费。
+
+`active loss` 的检测及 terminal/loss winner 判定归面 5；当 loss 胜出，本面把该 run 消费为一次 exception 落定，并按本节与 §9.1 的声明路径继续。`unknown effect` 进入 unknown hold，保留 effect 是否发生的不确定性，不重复推进、spawn 或提交另一份结果。
+
+generic `held` 状态本身不被本面消费：它不是面 5 的事实 variant，也不能反向解释为何 held。对象域只消费上述带原因的封闭事实并投影具体处置；面 5 若新增 variant，必须同时指定唯一消费者。
+
+来源：逐 variant 映射来自 division-plan.md“面 5”，为第三/四轮对抗后主 session 裁决，record-3 未载。【主 session 裁决（record-3 未载） | — | 待复核】
 
 ## 10. 五类事实事件和锁把 crash 变成可重放问题
 
-目标运行模型可用五类领域事实描述：某个已编译函数被应用；task 正常返回；task 异常落定；新 task 由既有结构派生；join 消费一组落定结果。实际命令层还会有 spawn、release 和受控 override，但权威历史记录的是足以重建程序演化的事实。锁表回答“哪个 run 此刻拥有某 task 的执行权”，并保证每个 task 至多一个活跃 run。
+当前模型以五类核心领域事实描述演化：已编译函数被应用；task 正常返回；task 异常落定；新 task 被 admit；群组结束并由 join 消费一组落定结果。可选等待期满作为第五类事实的 typed 原因和时间证据一并入日志，重放不重新等待。命令层的 `spawn`、`commit`、`admit`、`release`、`await` 是候选封闭动词表；其权威为 record 收敛与旧 RFC 候选，仍待复核。
 
-锁不能代替事件，事件也不能代替锁。若只有可变 current row，daemon 在写返回值和派生 A2 之间 crash，会留下无法判断是否应重试的中间态。若只有事件却没有执行租约，两个 scheduler 可以同时启动 A，随后竞争提交。正确边界是一次 committed transition 原子地确认锁所有权、记录返回、完成当前 task，并构造由该返回选择的下一应用；失败重试依据同一 identity 去重。
+锁表回答哪个 run 当前拥有 task 的执行权，并保证每个 task 至多一个活 run。锁不能替代事件，事件也不能替代锁：只有 current row 会在返回与派生之间留下不明中间态，只有事件却没有执行租约则允许两个 scheduler 同时启动同一 task。
 
-状态、GUI 和日志是这份 durable history 的具名投影。它们可以因刷新延迟暂时不同，但必须携带 freshness 或 divergence，不可反向拥有 mutation 权。日志若只是文本输出，不能证明 committed transition；GUI 看到一个 terminal 卡片，也不能越过 DB 事实决定 GC。
+一次 committed transition 原子确认锁所有权、记录交付、落定当前 task，并按 pinned 声明产生后继应用或群组消费。状态、GUI 与文本日志只是 durable history 的具名投影，不能反向拥有 mutation 权。fault injection 必须覆盖锁获取、spawn、commit、admit 与 join consume 的每个边界，重启后得到同一开放前沿且没有双跑。
 
-代价是事件 schema 和投影版本需要迁移，历史量也会增长；本 RFC 不要求把所有 runner stdout 做成事件溯源，更不把 Git 对象库复制进数据库。验证的关键是 fault injection：在锁获取、runner spawn、返回提交、派生、join consume 的每个边界杀 daemon，重启后应重建同一 frontier，既不丢 task，也不双跑；并以第二个 scheduler 竞争同一 task，证明活 run 唯一性来自 closure/task identity，而非 slot 的偶然串行。
+来源：沿用旧 546 §10 的 committed transition、锁与 crash replay【旧 RFC 候选 | A.md 旧 546 §10 | 待复核】；动词表来自 record-1 2:35【record 收敛 | record-1 2:35 | 待复核】。
 
 ## 11. 函数域资源让并发真正隔离，而不是只让数据库行并行
 
-即使 A、B、C 在调度表中并行，如果它们共享同一可写 checkout，内容仍会互相覆盖。目标合同为每个 task 供给私有 closure：独立 worktree、引擎命名的 closure branch、runner session 和 scratch。B await 时释放运行锁，但这些现场原地保留；恢复从 closure branch tip 和保存的 session 继续，不是回到 chain base 重新开始。
+即使 A、B、C 在调度表中并行，如果它们共享同一可写 checkout，内容仍会互相覆盖。当前合同为每个 task 供给私有 closure：独立 worktree、引擎命名的 closure branch、runner session 和 scratch。B await 时释放运行锁，但这些现场原地保留；恢复从 closure branch tip 和保存的 session 继续，不是回到 chain base 重新开始。
 
-跨 task 的数据只能走声明通道。提交的值、Git origin/GitHub 事实、受权的 context CLI 和 chain 级 shared prompt 面各自有明确用途。共享 Git 对象库、remotes、config 和 hooks 不是 task 私有状态；引擎对其中结构性写操作必须按稳定 repository identity 串行，并限制在自己的 namespace。cwd、remote URL、chain id 和 repo 协调 identity 不能互换，因为同一 repo 可以有多个 worktree和路径，而多个 chain 也可能共享对象库。
+跨 task 的数据只能走声明通道。提交的值、Git 事实、授权 context CLI 和 chain 级 shared prompt 面各有明确用途。共享 Git 对象库、remotes、config 和 hooks 不是 task 私有状态；引擎对其中结构性写操作必须按稳定 repository identity 串行，并限制在自己的 namespace。cwd、remote URL、chain id 和 repository identity 不能互换。
 
 Git 的职责还要分清。引擎负责 fetch、解析 `chain.baseBranch` 的新鲜起点、建立 branch/worktree、保存 pin、采样终态和回收；agent 负责内容性的 commit、冲突解决、push 与 PR。base branch 的权威来自 chain 声明，prompt 或 ambient checkout 不能成为第二来源。并行成员从持久 pin 派生，避免各自在不同时间 fetch 后得到不同基底。
 
-删除这种资源合同，所谓 par 只会把竞态搬到文件系统。反过来，把所有 Git 行为都收进引擎也会越过业务边界，使引擎理解 PR 和项目策略。代价是更多 worktree 与磁盘占用，以及共享 Git 操作的协调。验证必须让 A/B 同时修改同名文件，证明未提交内容互不可见；让二者分别 commit/push，确认 branch identity 稳定；在 fetch、branch create、worktree create、DB登记之间逐点 crash，启动对账要枚举 residue，而不是依据单一表面静默删除。
+删除这种资源合同，所谓并行只会把竞态搬到文件系统；反过来，把所有 Git 行为都收进引擎也会使引擎理解 PR 和项目策略。验证必须让 A/B 同时修改同名文件，证明未提交内容互不可见，并在 fetch、branch create、worktree create 与 DB 登记边界逐点 crash，启动对账应枚举 residue，而不是静默删除。
+
+来源：沿用旧 546 §11 的闭包资源合同。【旧 RFC 候选 | A.md 旧 546 §11 | 待复核】
 
 ## 12. GC 和 publication 证据解决“资源已删”与“历史仍真”的冲突
 
-完成 task 不等于立即删除 closure。B 完成后，其返回值可能尚未被 join 消费；活 run 或前向可达引用也可能存在。目标消费谓词只要求没有活 run，且该 closure 不再被任何未来可达结构引用。在这个消费时刻，系统先采样并持久保存后续 observer 所需的证据；证据已被冻结为历史数据，而不是额外延迟 GC 的资源引用。消费事实与证据持久化后，GC 便可回收 worktree、引擎分支、session 等活资源。release 只是暂时解锁，绝不触发 GC。
+完成 task 不等于立即删除 closure。其返回值可能尚未被 join 消费，活 run 或前向可达引用也可能存在。消费谓词要求没有活 run，且该 closure 不再被任何未来可达结构引用。在消费时刻，系统先采样并持久保存 observer 所需的证据；证据被冻结为历史数据后，GC 才回收 worktree、引擎分支和 session 等活资源。release 只是暂时解锁，绝不触发 GC。
 
-资源 identity 与历史 identity 必须分开。回收 worktree 或删除引擎分支后，task 的应用、返回、异常、派生和消费记录仍然存在；否则 `delete` 会变成改写过去。启动时系统需要对数据库、分支和 worktree 三方核对，且只清理引擎 namespace。发现不一致要暴露为可处理 residue，不能猜测某个陌生分支是垃圾。
+资源 identity 与历史 identity 必须分开。回收 worktree 或删除引擎分支后，task 的应用、返回、异常、admit 和消费记录仍然存在；否则 delete 会变成改写过去。启动时系统对数据库、分支和 worktree 三方核对，且只清理引擎 namespace。发现不一致要暴露为可处理 residue，不能猜测某个陌生分支是垃圾。
 
-publication 是消费时采样的证据，不是生命周期门。它回答 closure 自己负责的远端通道是否包含 closure tip：有工作且 tip 被自有远端分支或已知 PR head 历史包含，可报告已发布；明确未包含则报告未发布即弃；查询失败保留为无法求值；没有工作另成一类。远端是否 merged 是业务判定 task 的职责，不应由 GC 推断。采样结果和采样所依据的 origin freshness 必须持久化，外部通知重试使用同一份样本，而不是重启后重新查询一个已变化的远端。
+publication 是消费时采样的证据，不是生命周期门。它回答 closure 自己负责的远端通道是否包含 closure tip：有工作且已包含、明确未包含、查询无法求值、没有工作分别保留。远端是否 merged 是业务判定 task 的职责，不应由 GC 推断。采样结果及其 origin freshness 必须持久化，通知重试使用同一份样本，而不是重启后重新查询变化后的远端。
 
-没有四值证据，网络错误很容易被压成“未发布”，给用户一个错误责备；若 publication 参与推进，Git provider 抖动会阻塞任务代数；若回收时重新查询，force-push 或 ref 删除会篡改历史报告。代价是系统必须保存 evidence intent、采样时间和错误类别，并接受“无法求值”不是立即可消除的状态。验证应在 consume 后改变远端 ref，再重放通知，结果必须保持原样；模拟 fetch 失败，不能输出 unpublished；GC 后查询历史，仍能看到 closure identity 与已冻结证据。
+没有四值证据，网络错误会被压成“未发布”；若 publication 参与推进，provider 抖动会阻塞任务代数；若回收时重新查询，force-push 或 ref 删除会篡改历史报告。验证应在 consume 后改变远端 ref，再重放通知，结果保持原样；模拟 fetch 失败时不得输出 unpublished；GC 后仍能查询 closure identity 与冻结证据。
+
+来源：沿用旧 546 §12 的 GC、publication 与 residue 合同。【旧 RFC 候选 | A.md 旧 546 §12 | 待复核】
 
 ## 13. finalizer 是任务，不是 daemon 中的特殊 if
 
-当 A、B、C、D 全部落定时，固定的顶层 join 不先做一次普通消费、再把结果二次交给别的判定环节。它的消费者就是被实例化并运行的 finalizer task；finalizer 直接接收顶层成员的结果元组，因而这一次消费本身就是 chain 结束判定。finalizer 使用自己的闭包和声明，返回 advance tag 时 chain 完成，返回 hold tag 时 chain 保持开放。它遵循相同的锁、提交、异常和审计规则，而不是由 daemon 解析 stdout 中某个魔法短语。
+当顶层群组全部落定并按声明结束时，固定 join 不先做一次普通消费、再把结果二次交给别的判定环节。它的消费者就是被实例化并运行的 finalizer task；finalizer 直接接收顶层成员的结果值包，因而这一次消费本身就是 chain 结束判定。finalizer 使用自己的 closure 和 pinned 定义，返回 advance 时 chain 完成，返回 hold 时 chain 保持开放，exception 则按声明结构处理。
 
 将 finalizer 特判在引擎里会重新引入业务词义：daemon 必须知道何谓“足够完成”，stdout 格式变化还可能误判。把它变成普通 task 后，preset 可以检查 GitHub、测试证据或其他声明通道，同时引擎只看返回 union。hold 后如何防抖、如何形成再次询问的幂等指纹属于相邻设计，不应在这里偷偷创造周期调度。
 
-用户可观察到 finalizer 的输入成员集合、definition identity、返回值和异常，且这些都出现在同一 task history 中。代价是 chain complete 不再是一个廉价布尔字段，而是投影出的业务结果。验证应让 finalizer 分别返回 advance、hold 和 exception：只有 advance 使 chain 完成；hold 保持开放但不重开任何已完成成员；exception 按声明结构停止，不能被 stdout 文本绕过。
+用户可观察到 finalizer 的输入成员集合、definition identity、返回值和异常，且这些都出现在同一 task history 中。验证应让 finalizer 分别返回 advance、hold 和 exception：只有 advance 使 chain 完成；hold 保持开放但不重开任何已结束成员；exception 不能被 stdout 文本绕过。
+
+来源：沿用旧 546 §13。【旧 RFC 候选 | A.md 旧 546 §13 | 待复核】
 
 ## 14. 授权必须跟派生能力一起收紧
 
-任务代数赋予 derive 和 append 后，安全边界不再只是“runner 能写哪个目录”。一个被攻陷的 agent 若能向任意容器追加任务，就能改变未来程序结构；若能读取 loop-data 全局目录，就能跨 task 获得凭据或未声明输入；若能修改共享 Git config/hooks，则能影响其他 closure 的执行。
+任务代数赋予 derive 和 admit 后，安全边界不再只是“runner 能写哪个目录”。被攻陷的 agent 若能向任意位置追加 task，就能改变未来程序结构；若能读取 loop-data 全局目录，就能跨 task 获得凭据或未声明输入；若能修改共享 Git config/hooks，则能影响其他 closure 的执行。
 
-现有地基已经包含 default-deny 准入、typed exit、run-scoped credential 和 phase-sliced binding/sandbox 权利，这些可以复用，但尚不能证明整套生产语义已接通。目标授权把 runner 可见面穷尽分为 task 私有资源、显式声明通道和 repo 级共享 Git 协调面。全局读取与 host environment 暴露是两个不同能力，缺失 runtime binding 时不能退回全局搜索。derive 可复用已有 create-items 类权利，但必须加结构 scope；operator 的干预也要审计。
+目标授权把 runner 可见面穷尽分为 task 私有资源、显式声明通道和 repo 级共享 Git 协调面。内部调用者默认拒绝，只有 phase slice 明确授予对象域调用权并限定 scope 时才能提出位置与时机声称；外部调用者也必须经面 4 的 identity、授权与审计进入同一端口。缺失 runtime binding 时不能退回全局搜索。
 
-若授权只检查命令名，不检查目标 identity，B 可能合法调用 append 却把 D 塞进 A 的容器。若 sandbox 只保护文件系统而允许 ambient Git credential，无声明通道仍可外泄。代价是每个 phase 需要精确声明 roots、bindings 和结构权限，调试初期会看到更多明确拒绝。非目标是封装 agent 的所有计算或禁止它访问项目允许的互联网；目标是让每一条跨 task 和共享写路径都有可说明的来源。
+若授权只检查命令名、不检查目标 identity，B 可以合法调用 admit 却把 D 声称到 A 的位置。若 sandbox 只保护文件系统而允许 ambient Git credential，无声明通道仍可外泄。非目标是封装 agent 的所有计算或禁止项目允许的互联网；目标是让每一条跨 task 和共享写路径都有可说明的来源。
 
-验证要用真实 runner credential 尝试：读取自己的 closure 成功，读取另一 task scratch 失败；读取声明 context 成功，无 binding 时不能 fallback；向获授权容器 append 成功，跨 scope 失败；修改引擎外 branch/config/hooks 失败；所有拒绝与成功均带 run/task/phase 审计身份。
+验证要用真实 runner credential：读取自己的 closure 成功，读取另一 task scratch 失败；读取声明 context 成功，无 binding 时不能 fallback；scope 内 admit 成功，跨 scope typed 拒绝；共享 Git 写只作用于引擎 namespace，所有结果均带 run/task/phase 审计 identity。
+
+来源：沿用旧 546 §14，并将 append 权限收束到 typed admit。【旧 RFC 候选 | A.md 旧 546 §14 | 待复核】
 
 ## 15. 迁移不能把 v2 的偶然串行误写成业务顺序
 
-仓库已有规范化 tree、closure、lock shape，以及授权切片等实现地基，但 v2 数据怎样进入新模型仍需谨慎。最危险的转换是把旧 item 列表机械迁移成顶层 seq。v2 的 slot 串行更多是资源调度限制，不代表 item 之间有数据依赖；迁成 seq 后，前一个 item exception 会封死整条 chain，改变已有业务行为。合理目标是把初始 items 视为默认并行同级，旧位置只保留为优先级；真正的依赖由 dependsOn 或显式组合声明表达。
+仓库已有 task、closure、lock shape 与授权切片等实现地基，但 v2 数据怎样进入新模型仍需谨慎。最危险的转换是把旧 item 列表机械迁移成顶层 seq。v2 的 slot 串行更多是资源调度限制，不代表 item 之间有数据依赖；迁成 seq 后，前一个 item exception 会封死整条 chain，改变已有业务行为。初始 items 应视为默认并行同级，旧位置只保留为优先级；真正的依赖由 dependsOn 或群组消费合同表达。
 
-closure 的持久键也要从旧 `(item, phase)` 观念迁向 task identity，原字段降为绑定元数据。现有 current status 列可在过渡期作为事件投影或兼容读面，却不能继续接受绕过树的独立写入。in-flight 数据必须关联冻结 definition ref；无法证明转换语义时应显式阻断，而不是用最新 preset 猜测。
+closure 的持久键也要从旧 `(item, phase)` 观念迁向 task identity，原字段降为绑定元数据。现有 current status 列可在过渡期作为事件投影或兼容读面，却不能继续接受绕过 committed transition 的独立写入。in-flight 数据必须关联 exact definition ref；无法证明转换语义时应显式 hold，而不是用最新 preset 猜测。
 
-迁移的代价包括一次性数据转换、双读核对和旧 CLI 行为收缩。它不承诺所有历史内部状态都能无损变成新运行实例；审计历史可以保留，而无法安全恢复的活实例应明确处置。验证应选取包含多个独立 item、失败 item、blocked dependency、已存在 worktree 的 v2 fixture，迁移后证明并行性、历史身份和资源归属正确；再跑现有 bundled preset compatibility E2E，确认没有把旧生产路径的 PR/merge/issue closure 行为误当作新代数已完成。
+迁移不承诺所有历史内部状态都能无损变成新运行实例；审计历史可以保留，而无法安全恢复的活实例应明确处置。验证应选取包含多个独立 item、exception、blocked dependency 与遗留 worktree 的 v2 fixture，证明并行性、历史 identity 和资源归属正确；bundled preset compatibility E2E 只证明旧生产路径未回归，不能替代新代数的专项验证。
+
+来源：沿用旧 546 §15。【旧 RFC 候选 | A.md 旧 546 §15 | 未反驳】
 
 ## 16. 这项设计刻意不做什么
 
-它不提供任何向后移动。完成是吸收态，seq 不倒退，par 消费后不重开，terminal leaf 不通过 unblock 恢复。需要纠正已完成工作时，创建新的前向 task，并保留旧历史。
+它不提供任何向后移动。完成是吸收态，单成员消费不倒退，群组消费后不重开，terminal task 不通过 unblock 恢复。需要纠正已完成工作时，创建新的前向 task，并保留旧历史。
 
 它不提供子树取消和自动回滚。整 chain 的 stop/resume/delete 属于实例运维；异常不会抹掉已经提交的 sibling 结果。业务补救由声明 task 表达。
 
-它不允许 join 热改，也不靠 epoch 技巧让同一个已实例化消费者改变意义。新增验证只能作为未来结构中的新 task。它不把 observer、GUI、event notification 或文本日志提升为推进权威；这些只是带版本和新鲜度的投影。
+它不允许 join 热改，也不用 epoch 让同一个已实例化消费者改变意义；不以 seal/封口动词替声明决定增长，也不把开放前沿做成独立查询接口。observer、GUI、通知与文本日志都是带版本和新鲜度的投影，不拥有推进权；面 2 的步骤进度也不提升为对象域事实。
 
-它不规定 DSL 的最终表面语法、不实现 context 工具本体、不定义所有 hook 或重问策略，也不把 GitHub mergedness塞进 GC。它不声称“用了事件日志”就自动获得分布式 exactly-once；外部通知采用 durable intent 与幂等重试，runner 副作用仍须由各自合同约束。
+它不规定 DSL 的最终表面语法，不实现 context 工具本体，不定义所有 hook 或重问策略，也不把 GitHub mergedness 塞进 GC。它不声称“用了事件日志”就自动获得外部副作用的 exactly-once；通知采用 durable intent 与幂等重试，runner 副作用仍由各自合同约束。
 
-这些非目标不是缺页，而是防止设计因反例无限膨胀。每个新增机制都必须追溯到实际问题：若只为守住一句过强主张而扩大系统，正确动作是弱化主张，而不是发明更多状态。
+这些非目标防止设计因反例无限膨胀。每个新增机制都必须追溯到实际问题；若只为守住一句过强主张而扩大系统，正确动作是弱化主张，而不是发明更多状态。
+
+来源：沿用旧 546 §16；删除项与边界同时对齐 division-plan.md“面 3”。【旧 RFC 候选 | A.md 旧 546 §16 | 待复核】
 
 ## 17. 从用户入口看，完成后的系统应怎样表现
 
-回到案例。chain 创建后，status 展示一个顶层并行结构及 A/B/C 三个 ready task，它们有不同 closure identity 和同一冻结 base pin。scheduler 可同时锁定三者。A 提交返回时，一笔 transition 完成 A 并派生 A2；界面能解释 A2 使用了哪个返回 variant。B 派生 B-check 后释放自己的运行锁，closure 显示 suspended 而非 terminal；B-check 返回后，B 只消费一次该值并继续。C attempts 耗尽后记录 exception，A、B 仍运行。
+回到案例。chain 创建后，status 展示 A/B/C 所属群组和三个 ready task，它们有不同 closure identity 和同一冻结 base pin。scheduler 可同时锁定三者。A 提交返回时，一笔 committed transition 完成 A 并物化 A2；B 派生 B-check 后释放运行锁，closure 显示 suspended 而非 terminal；B-check 返回后，B 只消费一次该值并继续。C attempts 耗尽后记录 exception，A、B 仍运行。
 
-追加 D 的调用指出顶层容器，授权和定义检查通过后只增地加入；若调用与 join 落定竞争，结果要么明确纳入，要么明确拒绝。所有规定成员落定后，固定的顶层 join 实例化 finalizer，并把包含 C exception 以及 A2、B、D 返回的整个结果元组直接交给它。这里没有一个先行的普通 join 消费步骤；finalizer 就是该顶层 join 的消费者，最终以普通返回选择 advance 或 hold。
+D 的 admit 明示事实 identity、位置和时机。若原位置已经结束，界面返回 typed 拒绝及本次判定产生的开放前沿，提议方可以换位置重新声称，引擎不代选。群组全体成员落定后，按声明立即结束或进入等待窗口；期满事实写入日志，固定 join 再把包含 exception 与正常返回的完整值包交给 finalizer。
 
-若 daemon 在任何一步 crash，重启先重建事件前缀和锁，再对账 branch/worktree/DB；它不会从 flat status 猜一个额外 ready leaf，也不会用改过的 preset重解释旧 task。消费后，GC 依据 durable 可达性回收 closure 资源，同时保留 task history 与 publication 样本。GUI 可晚于 DB 刷新，但会说明自己的 projection version；它不能因为缓存显示 completed 就触发删除。
+若 daemon 在任何一步 crash，重启先重建事件前缀和锁，再对账 branch/worktree/DB；它不会从 flat status 猜一个额外 ready task，也不会用改过的 preset 重解释旧 task。消费后，GC 依据 durable 可达性回收 closure 资源，同时保留 task history、级联决定与 publication 样本。GUI 可晚于 DB 刷新，但不能因缓存显示 completed 就触发删除。
 
-这套行为的价值在于所有观察点共享一套因果关系。用户不必知道“对象域”这个词，也能得到稳定答案：为什么这个任务能跑、它从哪个值派生、在等谁、哪个结果让容器放行、资源为何还没删、远端证据为何无法求值。若产品无法回答其中任一个问题，就还没有真正实现任务代数。
+这套行为的价值在于所有观察点共享一套因果关系。用户不必知道“对象域”这个词，也能得到稳定答案：为什么 task 能跑、从哪个值派生、在等谁、为什么一次 admit 被拒绝、哪个结果让群组放行、资源为何还没删、远端证据为何无法求值。任一问题无法回答，都说明任务代数尚未真正实现。
 
-## 18. 状态分辨：目标语义、现有地基与尚未落地
+来源：沿用旧 546 §17，并加入 record-2 3:06—3:10 的等待窗口与重新声称路径。【旧 RFC 候选 | A.md 旧 546 §17 | 待复核】【操作员原话 | record-2 3:06、3:09 | 已裁决】
 
-### 18.1 RFC 已经定义的目标语义
+## 18. 状态分辨：目标模型与当前地基不是同一层结论
 
-RFC 已定义 task/closure/value 的责任边界，定义态—编译态—运行态的冻结关系，以及以部分应用和返回派发产生后继的机制。它规定 seq、par、固定 join、drain、validator、await、dependsOn、动态 append、异常传播与顶层 finalizer怎样组合；规定运行演化只能前向，完成结构不可重开；规定事件历史、锁与 committed transition 是恢复和唯一活 run 的基础。
+本篇陈述的是产品完成后必须成立的目标语义：三域边界、统一群组消费、typed admit、await/dependsOn、异常与 escalation 消费、封闭 provider 事实、committed transition、私有 closure、GC/publication、finalizer 与授权。它不是对当前生产路径已经具备这些行为的宣告。
 
-它也定义每 task 私有 closure、Git 结构供给与 agent 内容职责的边界，消费驱动 GC、durable history、publication 四值证据、启动 residue 对账，以及派生和资源访问必须受 phase-sliced 权利约束。迁移方向上，旧顶层队列应解释为默认并行而非业务 seq，closure identity 转向 task id，旧 current 字段降为投影。
+当前仓库中的 task、closure、lock、typed exit、run-scoped credential 与授权切片等结构，只能作为承接目标模型的工程地基。shape 能存储某个概念，不证明 scheduler、admit、group consumption、replay、GC 或 policy evaluator 已接成运行闭环；current 投影也不能反过来成为目标语义的权威。
 
-这些都是“产品完成后必须成立”的语义，不是对当前代码的描述。
+因此实现报告必须分别陈述 current evidence 与 target contract。没有直接触发新增行为的 runtime/integration 证据时，只能说地基或局部路径已存在，不能说对象域已经完成。
 
-### 18.2 当前代码已经具备的地基
-
-冻结 main 审计显示，数据库和类型层已经有规范化任务树、closure 生命周期与锁表的 shape；`chain.baseBranch` 已有消费路径；default-deny 准入、typed exit 协议、run-scoped credential、binding 切片与 sandbox 权利为提交和授权提供了可复用底座。部分 closure activate、worktree/branch 资源和 runtime metadata 也已经存在。具体冻结位置与 SHA 见 [EVIDENCE.md §2](EVIDENCE.md#2-main-实然底图能力-an) 和 [EVIDENCE.md §3](EVIDENCE.md#3-供给审计)。
-
-这些地基只证明某些结构可以存、某些权限可以表达。它们不证明 scheduler 已按树运行，不证明 exit 已成为原子 committed transition，也不证明 GC、append、await、validator 或 finalizer 已按本设计工作。
-
-### 18.3 尚未实现的生产行为
-
-生产 scheduler 仍以 v2 flat phase/slot 路径为主，尚未仅从递归组合结构导出 ready leaves。返回、完成和后继派生尚未统一成原子 transition；五事件投影、crash replay 和 task-identity 活 run 唯一性尚未形成完整生产闭环。运行时 par 物化、动态 append、固定 join 消费、validator task、await 的现场保存与值注入、dependsOn 的统一构造语义，以及顶层 finalizer 的普通 task 化仍需实现。
-
-每 task Git closure 的完整 create/reconcile/consume/GC 事务、publication 冻结采样、三方 residue 对账和共享 repository identity 串行也未闭合。授权地基还需要接到 derive scope 与所有 runner-visible surface；迁移需要把旧队列和 closure key 转为新身份而不改变并发语义。GUI/observer 需要读取具名投影和 divergence，而不是拥有推进权。
-
-因此本文不能说 RFC “已经实现”。它建立的是目标模型和可检验合同；代码只落地了其中若干承重结构。
+来源：压缩沿用旧 546 §18，删除所有已失效的旧文档具体行号引用。【旧 RFC 候选 | A.md 旧 546 §18 | 待复核】
 
 ## 19. 可证伪验收：怎样证明不是只换了词
 
-验收首先应证明代数。构造 A/B/C 顶层并行，确认三者能在没有显式依赖时同时获得锁；让 A 返回并派生 A2，确认 A2 只在提交后出现；让 C exception，确认 sibling 继续且 exception 被 join 看见；让一个同级 leaf 永不落定，确认外层绝不推进。尝试重开 terminal、倒退 seq、热改 join，都必须没有合法 mutation 路径。
+代数验收构造 A/B/C 同群组并行，证明单成员群组退化为 seq、多成员无依赖动作可交换；A 返回后才物化 A2，C exception 不阻塞 sibling，未落定成员阻止消费，结束群组、terminal task 与固定 join 都没有重开或热改路径。
 
-其次证明动态结构。并发执行 append D 与 join consume，重复数百次并在事务边界注入 crash；每次恢复后 D 要么是同一 identity 的成员，要么追加明确失败，不能重复、丢失或出现在已消费容器。嵌套 append 必须落到指定稳定 group，越权 scope 必须拒绝。
+增长验收分别测试零等待与声明等待窗口：新成员只能在所属群组结束前加入，期满事件重放不再次等待；固定截止与到达重置两种策略在该开放项裁决前不得被实现冒充规范。原位置结束后，A2-at-A typed 拒绝且不消耗事实幂等键，A2-at-B 重新声称可独立判定；开放前沿只能来自拒绝结果副产品。
 
-再证明 await 和依赖。B await B-check 时杀 daemon，重启后保持 B 现场，B-check 结果恰好注入一次；构造 dependsOn 环在写入期失败。dependsOn 的前驱以 exception 落定时，原依赖方永不启动；即使声明结构为该异常提供 consumer 或 catch，它也只能派生另一条新的前向 task，不能解封原依赖方。业务负面 tag 必须走正常派发，runner exception 则没有返回值。
+交接验收覆盖 await crash 恢复与结果恰好注入一次、dependsOn 环和 value-blind 门、业务负面返回与 exception 分栏。逐级触发 `retry | skip | stop-task`、`skip-task | stop-group`、`advance-next-item | stay-on-current-item`，证明 evaluator 穷尽、跨层动作由对象域 committed transition 执行，配置穷尽时全局停机而非被 par 吸收。
 
-然后证明持久化和锁。在应用、spawn、返回、派生、join 消费的每个间隙 crash，事件前缀重放得到唯一 frontier；两个 daemon 竞争同 task 时最多一个活 run；projection 删除重建后，status 与原历史一致。flat 兼容字段任意改写都不能制造树外 ready leaf。
+出站事实验收穷尽 `pre-spawn absence`、`terminal winner`、`active loss` 与 `unknown effect`，分别观察无 run 的 held、正常针眼提交、exception 落定与 unknown hold 不重复推进；generic held 不得作为输入 variant。持久化验收在 spawn、commit、admit、release、await、群组结束与 join consume 边界注入 crash，两个 scheduler 竞争同 task 时至多一个活 run。
 
-资源验收要实际创建并行 closure。A/B 修改同名文件互不污染；resume 从各自 branch tip 继续；fetch 和 base pin 在同 repo 下协调。分别在 branch、worktree、DB create 前后 crash，启动对账准确分类 residue，只清引擎 namespace。closure consume 后回收活资源，history identity仍可查询。
+资源与授权验收实际创建并行 closure，证明文件隔离、resume、base pin、residue 对账、GC 后历史与 publication 样本仍在；真实 runner 只能访问自己的资源与声明 binding，scope 外 admit 明确拒绝。单 issue 的最小 runtime/integration、冻结合流 SHA 的整链路 integration 与发布候选 compatibility E2E 各自证明自己的边界，任何一个反例仍可产生时，本篇目标语义都尚未实现。
 
-publication 验收在采样后 force-push、删除 ref 或制造网络错误。已持久化通知重试必须复用旧样本；网络错误显示无法求值而非未发布；tag、他人 branch 或 provider synthetic ref 不应冒充 closure 自有发布通道；merged 判定只能由业务 task给出。
-
-授权验收使用真实 runner 路径，而非 mock 一个布尔函数。phase 能访问自己的 worktree和声明 binding，不能读取其他 task scratch或全局 loop-data fallback；允许 derive 的 phase只能在 scope内追加；共享 Git写只作用于引擎 namespace并留下审计。ambient host env和Git credential必须按独立表面核验。
-
-最后区分三层 gate。单个 implementation issue 运行类型检查、单元测试和直接触发其新增行为的最小 runtime/integration；冻结合流 SHA 上由专用 integration 连接 compile、tree、scheduler、gate、context、ingress、status/events 与 GUI；发布候选再跑两个真实 GitHub preset的 compatibility E2E。后者只能证明现有 runner—PR—merge—issue closure路径没有回归，不能替代前面对新任务代数的专项证明。只要上述任何一个反例仍可产生，RFC 的目标语义就尚未实现。
+来源：保持旧 546 §19 的可证伪验收精神，并补入 record-1 2:48、record-2 3:06—3:10、record-3 第 10 轮与 division-plan.md 面 3/面 5 的新增合同。【旧 RFC 候选 | A.md 旧 546 §19 | 待复核】
 
 <!-- 547 -->
 
