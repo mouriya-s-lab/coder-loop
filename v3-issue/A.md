@@ -1369,238 +1369,211 @@ tool/gate 协议已经从 v3 设计中整体删除；这部分需求由 context 
 来源：record-3 第 12、19 轮；division-plan.md“面 1—3”；旧 547 第 13 节中仍符合新边界的非目标。
 <!-- 548 -->
 
-# RFC #548：外部调用与执行终端的能力、现状与设计理由
+# 面 4：外部工作注入（入站边界）
 
-## 1. 问题不是缺少一个入口，而是缺少一条可信的跨边界链路
+## 1. 问题边界：外部工作止于对象域入口
 
-coder-loop 的核心职责是调度：读取 preset，把 item 放入 chain，在适当 phase 启动 runner，并根据持久化状态推进、恢复或终结任务。GitHub webhook、HMAC、组织级 App、远端 HAPI session 和网络重试都不属于这个领域。如果为了接收 GitHub 事件而在 coder-loop daemon 内增加 HTTP server、webhook 验签和 label 映射，引擎会同时承担网络入口、第三方身份、业务映射与任务调度。这样做不仅扩大攻击面，也使 GitHub 的失败模型渗入通用 scheduler。
+本篇处理入站方向：外部系统怎样把一项结构化工作可靠地提交给 coder-loop。入站链路止于面 3 的 `admit`；它不调用 runner，也不解释函数域的执行结果。出站执行由面 5 负责，两者的方向、identity 与故障窗口均不同。
 
-RFC #548 处理的是更严格的问题：外部系统如何在不成为引擎领域对象的情况下，把一个结构化工作可靠地交给 coder-loop；反向地，coder-loop 又如何把一次执行交给可能暂时不存在的外部终端，而不把“终端缺席”误判为普通进程启动失败。
-
-这两个方向看似不同，实际共享同一条原则：边界两侧必须各自保留唯一权威。网络端拥有 delivery、验签和重推；引擎拥有 chain、item、request mutation、closure 与调度资格；外部 runner 拥有远端 session 的真实执行结果。任何一侧都不能用自己的局部记录冒充另一侧的事实。
-
-## 2. 外部事件的三层结构
-
-RFC 采用三层结构，而不是让 GitHub 直接调用 coder-loop：
+链路由 router、消费 daemon、engine 三层组成。router 终结互联网入口，拥有 webhook source、验签、delivery queue 与重推；消费 daemon 终结外部业务映射，把 repository、label 和外部工作映射为通用请求；engine 只拥有 chain、item、request mutation 与调度资格。三层都不得以本层记录替代另一层的权威事实。
 
 ```mermaid
 flowchart LR
-  GH[GitHub issue event] -->|webhook| Router[GitHub router]
-  Router -->|signed normalized delivery| Consumer[本地消费 daemon]
-  Consumer -->|PATH coder-loop CLI| Engine[coder-loop daemon socket]
-  Engine -->|preset workflow| GH
+    External[外部工作事件] -->|webhook| Router[router]
+    Router -->|signed normalized delivery| Consumer[消费 daemon]
+    Consumer -->|PATH coder-loop CLI| Engine[engine]
 ```
 
-### 2.1 Router 终结互联网入口
+router 只有在获得消费 daemon 的 durable verdict 后才结束本次投递责任；该 verdict 要么证明 work 已入队、已接管，要么给出明确终态。在获得 verdict 之前，如果 coder-loop 侧不可用，router 保留 delivery 并稍后重推；一旦 work 已入队，其后的业务执行时间不计入、也不延长 delivery 的责任窗口。消费 daemon 校验签名、执行业务映射并编排公共 CLI，但不 import engine 源码、不写 SQLite、不直连内部 socket。engine 只接受 chain 声明、item identity、definition ref、item 值及 admit 声称，不识别外部系统的 label、URL 或 retry 语义。
 
-Router 负责 GitHub webhook、GitHub App source、外部鉴权、持久 delivery identity、队列与重推。它不能把一次网络投递的完成等同于 coder-loop 业务任务完成。对 coder-loop target 而言，item 入队即代表投递责任结束；后续 PR、merge 和 issue closure 属于 preset 工作流，而不是 router 的占槽条件。
+三层只通过 delivery identity、request identity 与 work identity 关联，不共享事实账本。router 的投递完成、消费 daemon 的业务 verdict 与 engine 的 mutation 结果必须分别由各自的 durable 记录证明。
 
-这一分离的理由是故障域不同。coder-loop daemon 停机时，router 必须保留原 delivery 并稍后重推；工作已经入队但尚未执行时，router 又必须停止重推，避免把业务执行时间误认为投递失败。只有 durable queue、稳定 delivery identity 和 per-target fire-and-forget 同时成立，这个闭环才成立。当前调查尚未取得 router 侧这些契约的运行证据，因此它们仍是外部地基缺口，不是消费 daemon 可以用本地 retry 替代的功能。
+因此，任何一层的成功都只是下一层可以继续判定的输入，不自动证明整个外部工作已经完成。跨层重放以稳定 identity 收敛，不以读取另一层的内部存储补齐结果。
 
-### 2.2 消费 daemon 终结 GitHub 业务映射
+CLI 是跨进程公共边界，daemon socket 是 engine 内部 transport。这里使用的 router、消费 daemon 与 engine 三层名称及其权威划分，来源于旧 548 §2；它们不是对象域之外新增的业务状态机。
 
-消费 daemon 负责 HMAC 校验、repository/label 到 preset 的映射、issue 到规范 item identity 的映射、schema 预校验、两步 CLI 编排以及 delivery verdict。GitHub 知识到此为止，不进入 coder-loop 源码。
+来源：旧 548 §1—§2，按 division-plan.md“面 4”改写。
 
-它只通过 PATH 上的 `coder-loop` CLI 写入引擎，不 import engine 源码、不直写 SQLite，也不直接连接内部 socket。CLI 是这里的稳定公共边界；socket 是 daemon 内部传输边界。把两者分开，允许内部 wire 演进，同时迫使 CLI 为外部调用者提供无损、版本化的公共契约。
+## 2. 两种注入模式与空 chain
 
-### 2.3 Engine 只接受通用结构化请求
+外部注入只有两种模式：
 
-引擎只看到 chain 声明、item identity、preset 引用和 preset 声明的字段。它不知道这些值来自 GitHub，也不知道 label、repository URL 或 delivery 的业务含义。
+- `into-chain`：向既有 chain 提交一项工作；
+- `new-workspace`：先创建新 chain，再向它提交第一项工作。
 
-这种纯度不是代码风格偏好，而是防止依赖倒置。若 engine 保存 delivery id、GitHub issue number 或 router retry 状态，通用 request ledger 就会变成 GitHub 专用投递账本；若 consumer 直接解释 SQLite 行，它又会绕过 engine 的事务、授权和迁移边界。RFC 因此同时要求“engine 不吸收 delivery 领域”和“consumer 不绕过 CLI”。
+`workspace` 不成为新的 engine 实体。chain 已承担命名、repository、凭据与隔离边界；`new-workspace` 只是 `chain.create` 与后续 work admission 的组合语义。
 
-## 3. 两种调用语义与 chain 的真实含义
+两个请求各自 durable，不承诺跨命令事务。第一步成功而第二步尚未成功时，空 active chain 是合法且可长期存在的状态；engine 不自动补种、不自动删除，也不把空 chain 归给某个 delivery。
 
-外部调用只有两种语义：
+空 chain 因而不能证明 delivery 已消费或未消费。router 与消费 daemon 用自己的 durable 记录回答投递结局；engine 只回答两个通用请求及 work admission 的结果。
 
-- `into-chain`：把 item 追加到既有 chain；
-- `new-workspace`：创建一条新 chain，再添加第一个 item。
+来源：旧 548 §3，保留 `into-chain`、`new-workspace` 与空 chain 裁决。
 
-“独立 workspace”没有引入新的引擎实体，因为 chain 已经承担命名、凭据、repository 和隔离边界。新增 workspace 实体只会与 chain 重复，并迫使 scheduler 同时理解两套容器语义。
+## 3. 公共 schema 只消费面 1 的类型权威
 
-`new-workspace` 保持两个普通命令，而不是增加组合事务命令。`chain.create` 与 `item.add` 各自 durable，二者之间没有跨命令事务。操作员裁决明确允许第一步成功、第二步未完成后留下空 active chain。空 chain 是长期合法状态，不归属某个 delivery，不触发自动补种或自动删除，也不能证明 `consumed` 或 `not-consumed`。投递状态必须由 router/consumer 自己的 durable 记录给出。
+面 4 不生产 item schema。item 值的类型权威是面 1 发布并由 instance pin 的定义资产：`CompileEnvelope` 提供公共 projection，exact pinned parser 执行实际的 `unknown → T` admission。外部入口、CLI 与持久态写门都消费这份权威，不复制 field map、必写性、unknown-field policy 或 default 规则。
 
-这个选择保留了 chain 的通用语义：chain 可以先创建、稍后再加 item，也可以长期为空。若引擎从空 chain 反推某次 delivery 尚未完成，它就会把调用历史误当成领域状态。
+CLI JSON Schema 是 pinned parser 的对外发布形态，不是第二个 schema producer。它从面 1 的同一权威 projection 导出，携带 definition identity、schema identity/version、字段类型、必写性、unknown-field policy 与 caller 可写性。engine-owned request envelope 可以声明自己的公共字段，但不能借此重写 item-value parser。
 
-## 4. Schema 不是 compile 输出上的一个版本号
+消费 daemon 可以用该发布形态提前拒绝显然非法的 payload；最终 admission 仍由 request 绑定的 exact pinned parser 判定。预校验成功不等于 engine 接纳，预校验失败必须保留公共 schema 的 field、path、expected 与 actual，不能压成外部系统专用字符串。
 
-### 4.1 Current main 的实际情况
+schema identity、definition identity 或 typed-result version 失配时一律 fail closed。消费 daemon 不以 current preset、缓存旧 schema 或“字段大致兼容”继续提交；engine 也不以 current source 替代 request 已 pin 的 definition。
 
-当前 `preset compile --json` 输出带有 `schemaVersion: 1` 的 projection instance，但它不是 JSON Schema，也不包含完整 item field map、required 集合或 unknown-field policy。当前 daemon 在 `item.add` 时会加载 preset，却没有用 preset field model 校验 `extra`。隔离运行已经证明：缺少声明字段、额外字段和类型错误都可以落库并抵达 scheduler。
+current 状态中，旧调查所见 `preset compile --json` 只输出带 `schemaVersion` 的 projection instance；该版本号本身不能证明完整字段协议已经存在。target 状态扩展的是面 1 的权威发布面，不在面 4 合成新权威。
 
-因此，现有 compile projection 只能描述编译结果的一部分，不能承担外部请求校验协议。给一个实例对象添加 `schemaVersion` 不会使它变成 schema；没有 consumer、版本失配处理和字段约束时，这个版本号也没有兼容性意义。
+来源：旧 548 §4，类型权威按 A.md 面 1 §5、§8 与 division-plan.md“面 4”改写。
 
-### 4.2 RFC 决定交付真正的 CLI JSON Schema
+## 4. 持久态不变量、写门、隔离与原子修复
 
-公共 schema 通过 PATH CLI 输出，而不是通过私有 TypeScript package 共享。CLI schema document 与现有 compile projection 保持不同身份。前者是跨仓协议，后者仍是编译结果投影。
+任何可能再次执行的 item 都必须持续满足其 pinned parser。`item.add`、batch add，以及所有改变 item 值或 definition ref 的 update 共用同一写门：create 失败零写；update 合并完整对象后再解析；batch 中任一元素失败则整批零写。任何入口都不能制造 missing、unknown-field 或 type mismatch 的新可执行持久态。
 
-Schema 来自同一权威归一模型，并包含：
+历史 item 不因新 schema 发布而自动合法，也不按 current preset 统一重判。启动 reconciliation 根据记录能够证明的 exact definition ref 取得 pinned parser；可执行 item 解析失败、definition 缺失或历史 definition 无法证明时，进入 durable、可观察的 quarantine（沿用旧 548 §5，指可执行 item 的启动隔离），不创建 run，也不把同一根因反复表现为 spawn failure。
 
-- preset identity 与 schema identity/version；
-- field type；
-- required；
-- unknown-field policy；
-- engine-owned 字段与 preset-owned 字段；
-- 每个字段对外是否可写。
+terminal item 与 deleted chain 下的 item 保留历史快照。若某个入口将来使其重新取得执行资格，该入口必须先执行同一 pinned admission；只读历史不被当前定义改写。
 
-`required` 在 field object 内逐字段表达。旧 shorthand 和旧 `{type = ...}` 默认 required；optional 必须显式写 `required = false`。这一默认值避免旧 preset 在升级后把原本参与 prompt binding 的字段静默变成 optional。
+operator repair（沿用旧 548 §5，指解除启动隔离的专用修复入口）在一个原子 mutation 中同时替换目标 definition ref 与完整 item 值。目标 pinned parser 先验证完整候选，成功后才提交并清除 quarantine 原因；失败时旧 ref、旧值与旧原因全部保持。repair 不猜测类型转换、不编造缺失业务值，也不暴露新旧 ref 与值交叉组合的中间态。
 
-### 4.3 为什么 schema 必须同时包含 engine 与 preset 字段
+旧调查中 58 个 item 的审计数字只证明 legacy 数据不能被一键视为合格，不证明 target reconciliation 已实现。quarantine 与 repair 的名称和含义均沿用旧 548 §5。
 
-真实 SQLite 数据表明，`extra` 不是纯业务 payload。它同时包含 preset business fields、`dependsOn`、scheduler backoff 等 engine control fields，以及历史迁移残留。如果只拿 preset field map 对整个 `extra` 做 `additionalProperties: false` 校验，合法的 engine 字段会被误判为 unknown。
+来源：旧 548 §5，校验权威改接 A.md 面 1 §7—§9 的 pinned resolver/parser。
 
-RFC 因此选择合成完整 schema：engine-control model 与 preset model 各自保持权威，然后合成为整个持久化 `extra` 的公共 schema。外部调用者可以看到 engine 字段，但“可见”不等于“可写”；只供 engine 维护的字段必须在公共 ADT 中标记为 caller 不可写。
+## 5. 三种 identity、幂等与 admit 声称
 
-这项决定仍有一个外部前置：preset 权威归一模型及稳定 identity 归 RFC-2 所有，目前尚未形成 current supply。正因为该前置未闭合，schema artifact、write gate、startup quarantine 和 repair 没有被提前拆成实现 issue。
-
-## 5. 持久态不变量与历史 item 修复
-
-RFC 不接受“创建时校验一次，随后 update 可以破坏数据”的弱保证。所有可能再次执行的 item 必须持续符合当前合成 schema。`item.add`、batch add 以及所有改变 `extra` 的 update 都消费同一归一模型；任何写入口都不能制造 missing、unknown 或 type mismatch 的新持久态。
-
-历史数据不能通过一次 schema 发布被假定为合法。对真实 loop-data 的只读检查发现，58 个 item 中，54 个引用当前 bundled GitHub preset，但按新 required 和当前 field types 重判均不合格；另外 4 个引用已经不存在的 preset。这个结果说明升级不能用“从现在起只校验新行”回避旧数据。
-
-daemon 启动时会对可能再次执行的历史 item 做 reconciliation。校验失败的 item 获得 durable、可观察的“不可启动”状态与具体原因，不进入 scheduler，也不反复形成 spawn failure。terminal item 和 deleted chain 下的 item 保持历史快照，不强制满足当前 schema；但如果未来存在让它们重新进入可执行状态的入口，该入口必须先经过同一 schema gate。
-
-修复通过专用 operator CLI 完成。该命令在一个原子操作中替换 preset 与完整 `extra`，先按目标 preset 的当前合成 schema 校验，再提交并清除不可启动原因。它不能自动猜测旧字符串应转换成什么数字，也不能为缺失业务字段编造值。原子替换同时解决两个风险：preset 已删除时可以迁移到新 preset；修复过程中不会暴露“新 preset + 旧 extra”或“旧 preset + 新 extra”的中间态。
-
-## 6. Identity、幂等和重放为何必须分层
-
-系统中至少有三种不同 identity：
+入站链路保留三种不能合并的 identity；这些定义沿用旧 548 §6：
 
 - delivery identity：router 的一次外部投递；
 - request identity：engine 接收的一次可关联请求；
 - work identity：`(chain, itemId)` 表示的规范工作。
 
-操作员裁决规定 `(chain, itemId)` 就是规范工作身份。相同 identity 的 item 已存在时，不再比较 payload，也不引入 operation fingerprint；它表示该工作已经被接管。这个规则把 itemId 映射正确性的责任放在调用方，同时让 engine 的唯一约束成为重放收敛地基。
+一次 delivery 可以映射为多个 request，例如 `new-workspace` 的 create 与 admit；同一 request 也可能因 reply 丢失而重放。router 与消费 daemon 持久化 delivery 到 request 的映射，engine 持久化 request 对通用 mutation 的结果。两份记录以 request identity 关联，但互不替代。
 
-delivery identity 不能取代 request identity。一次 delivery 可能依次调用 `chain.create` 和 `item.add`，也可能因断连重放同一 engine request。反过来，engine request 也不能取代 delivery：engine 不知道 GitHub 映射和 router queue。两者只能通过 request identity 关联，各自保留自己的 durable record。
+`(chain, itemId)` 是规范 work identity。相同 identity 已存在表示该工作已经被接管，不再比较 payload，也不增加 operation fingerprint；调用者负责稳定映射 itemId。数据库唯一约束提供收敛地基，公共结果仍必须明确返回 `already-existing`，不能只暴露 generic conflict。
 
-Current main 已有两项可保留资产：串行和同一 daemon 并发下，同声明 `chain.create` 会复用同一 chain；SQLite 对 `(chain_id, item_id)` 有唯一约束。运行调查还推翻了早期关于“同一 daemon 并发创建 chain 会让败者收到 sqlite_error”的假设：关键区间没有 `await`，隔离并发实验中的所有调用都成功返回同一 chain。
+外部调用者随 work candidate 携带位置与时机声称，并以 work identity 作为外部事实的幂等依据，提交给面 3 §8 的同一 `admit`。本篇不复制 admit 的合法性算法或拒绝集合；消费 daemon 只负责无损传递声称，并穷尽消费面 3 返回的 typed rejection 与开放前沿副产品。
 
-不足之处在 caller-visible contract。item duplicate 当前表现为通用 conflict，不比较既存 payload；PATH CLI 又把 socket 的结构化 details 压成文本。因此 RFC 需要公共 CLI typed result/rejection ADT，使 created、already-existing、rejected、no-op 等结果可以被机器穷尽处理，而不是解析 stderr。
+原位置失效时，消费 daemon 可依据业务映射重新声称位置与时机，再以新 request 提交。拒绝不消耗 work identity 的幂等依据；只有成功 admission 才使其收敛。engine 只判定新声称，不替调用者选择替代位置。
 
-## 7. Durable request record 解决的不是日志格式，而是线性化证据
+来源：旧 548 §6；声称、typed rejection 与开放前沿对接 A.md 面 3 §8。
 
-现有 JSONL observability events 不能证明逐请求结果。`item.created` 可以证明某行曾成功插入，却没有 request/delivery identity；rights admission 发生在实际 insert 之前，duplicate 同样会产生 allow；`chain.layout` 不能区分首次创建与复用。事件写入与 SQLite mutation 不在同一事务，写失败会被吞掉，因此“CLI 成功”不能推出“审计事件存在”。
+## 6. Durable request record 提供线性化证据
 
-RFC 决定新增 durable、可关联的 typed request record。它记录稳定 request identity、subject/admission 结果以及 created、already-existing、changed、no-op、rejected 等 verdict，并明确 record 与 mutation/read decision 的线性化关系。
+durable request record 指 engine 为 identity 已建立的请求保存的 typed、可关联结果；该定义沿用旧 548 §7。JSONL event 只能说明某个 mutation 曾发生，不能证明它属于哪个 request，也不能代替 mutation 的事务结果。
 
-这不是把 consumer delivery log 搬进 engine。Engine record 回答“这个 engine request 在哪个身份下观察或改变了什么”；consumer log 回答“这个 GitHub delivery 被映射成哪些 CLI 请求，最终向 router 返回什么 verdict”。两者通过 request identity 关联，但不能互相替代。
+record 至少保存 request identity、subject/admission 结果及 `created | already-existing | changed | no-op | rejected` verdict。mutation 与 `created/changed` record 共同提交或共同回滚；`already-existing`、`no-op` 与 read 在各自判定点形成 durable 结果。
 
-Request record 还必须覆盖失败和不确定窗口：
+malformed input 若尚未建立 request identity，不伪造可关联 record；identity 建立后的 unknown command、invalid args、权限拒绝与 admit rejection 形成 rejected record。commit 后 reply 丢失时，同一 request identity 的重放读取原 verdict；identity 碰撞返回 typed rejection，不覆盖旧记录。
 
-- identity 尚未成功解析的 malformed input 不产生可关联 record；
-- identity 已建立后的 unknown command、invalid args、权限拒绝产生 rejected record；
-- mutation 与 created/changed record 共同提交或共同回滚；
-- already-existing/no-op/read verdict 在其判定点形成 durable record；
-- commit 后 reply 丢失时，重放相同 request identity 能读到相同 durable 结果；
-- request identity 碰撞返回 typed rejection，不能覆盖原 record。
+request record 不是 delivery ledger。engine 记录通用请求观察或改变了什么；消费 daemon 记录 delivery 产生了哪些 request、如何解释 verdict 并向 router 回答。查询仍走公共 request registry，不通过日志或 SQLite 旁路。
 
-Request query 自身也是 engine request，也进入同一 registry 并产生 record；查询不会自动递归查询自身，因此不会形成无限调用。最终草案要求唯一 production registry 穷尽 23 个可关联 request variants，包括 `request.get` 和 `request.list`，并用类型层双向 equality 与 runtime 独立期望集合共同防止新增 variant 漏接审计。
+来源：旧 548 §7，按 division-plan.md“面 4”保留。
 
-这一能力是本 RFC 当前唯一能够合法滚动拆出的 next-batch child。原因并非它最简单，而是它没有依赖 RFC-2 schema authority、router wire 或 HAPI contract，并且现有真实 socket、隔离 daemon、SQLite、restart、reply-loss、rollback 和 credential admission 路径足以直接验收。
+## 7. CLI typed result ADT 是外部调用契约
 
-## 8. CLI 公共契约为何不能直接暴露 socket envelope
+daemon socket 的 `{ok,result|error}` 是内部 transport envelope，不直接成为跨仓公共协议。PATH CLI 为每个入站操作发布独立、无损的 success/rejection ADT，并穷尽转换内部 response。
 
-Daemon socket 已经有结构化 `{ok,result|error}` 形状，但它是内部协议。RFC 选择让 CLI 定义独立、无损的 success/rejection ADT，由 socket response 穷尽转换而来。这样做有三个理由。
+success variant 至少区分 `created`、`already-existing`、`changed` 与 `no-op`，并返回该操作拥有的 request、work 与 admitted task identity。rejection variant 保留 schema field details、面 3 admit 的 typed reason、权限原因与 identity collision；消费 daemon 不解析 stderr 来决定 ack、retry 或重新声称。
 
-第一，内部 wire 字段可以随 daemon 实现演进，公共 CLI variant 保持兼容。第二，CLI 可以把多个内部错误归一成稳定领域 rejection，同时保留调用者做 verdict 所需的 details。第三，新增内部 error code 后，穷尽转换会让编译器或 contract test 暴露未处理项，而不是静默把它变成文本。
+CLI ADT 不包含 delivery identity、router retry 或外部业务 blocker。新增内部 error code 或公共 variant 必须迫使转换与 consumer 穷尽更新；unknown future variant、schema version 或 result version 失配一律 fail closed。
 
-CLI ADT 不包含 delivery id、router retry 或 GitHub blocker。这些字段属于 consumer contract。它也不能把 unknown future variant 当作 generic failure 后继续执行；schema version 和 typed result version 不匹配时必须 fail closed。
+`new-workspace` 的两个请求各自返回 typed 结果并进入 request record。消费 daemon 用这两份 durable 结果形成 delivery verdict；空 chain 不能替代该 verdict。
 
-## 9. External-terminal 不是第四个本地进程 runner
+来源：旧 548 §8，typed rejection 对接 A.md 面 3 §8。
 
-### 9.1 Current closure authority 是唯一资源所有者
+## 8. Current 与 target 的状态分辨
 
-Current main 已形成 per-closure authority：closure identity、run、runtime node、worktree path/branch、session、reachability、consumption intent、cleanup 和 startup reconciliation 都绑定到 closure。stop 保留 closure 资源供 resume；consume 删除 session 并清理资源；cleanup 失败保留可重试状态。
+current 状态只提供窄地基：PATH CLI 到 Unix socket 的写入路径、`chain.create` 与 `item.add` 原语、同声明 chain 复用、`(chain_id,item_id)` 唯一约束、SQLite transaction，以及 engine 源码不含外部 webhook/HMAC 领域代码。隔离并发实验还表明，同一 daemon 内并发创建同声明 chain 会返回同一 chain。
 
-历史 HAPI 候选使用 `(chain, repo)` slot 作为 worktree owner，并用 item/phase session 恢复。这会与 current closure 同时拥有 cwd、branch、session 和 cleanup 事实，形成双重权威。因此历史 scheduler/SQLite hunks不能整块恢复；能保留的只有 runner/domain/probe/hold 等隔离概念和 `closure_sessions` 的 runner variant。
+current 状态尚未提供 router 的 durable queue/retry/fire-and-forget、消费 daemon 的验签与业务映射、面 1 schema 的 CLI publication、持续写门、启动 quarantine、原子 repair、durable request record、CLI typed result ADT 或真实入站 E2E。已有窄地基不能替代这些合同。
 
-### 9.2 历史实现只完成了 probe-only
+target 状态中，router 在 target 不可用时保留 delivery，并在 work 已接管后停止重推；消费 daemon 用面 1 的公共 schema 校验并通过 CLI 提交两种注入模式；engine 以 pinned parser、request record 与面 3 admit 产生可重放 verdict。任一层缺少 runtime 证据时，只能报告该层尚未闭环。
 
-被回退的历史实现明确把 HAPI 建模为 `probe-only / invocation-pending`。它可以执行 fake probe、把缺席 item hold、在恢复时清除 hold，并测试若干 loss latch 状态；但 invocation builder 不产生真实 spawn plan，验收脚本甚至把 zero HAPI spawn 当作成功条件。
+本篇不保留旧实现排期，也不定义 runner provider、endpoint、probe、session、terminal 或 active loss；旧 548 §9 全部移交面 5。对象域的 admission 判定与调度处置仍归面 3。
 
-这意味着它没有证明真实远端 session、headless completion、status admission、retry/resume 或 active loss。RFC 明确规定 zero-spawn 和 `invocation_pending` 不能作为 production 交付终点。
+来源：旧 548 §10—§12，压缩为结论性状态分辨；删除旧 §11 的过程叙事。
 
-### 9.3 真实本地 CLI 与历史假设不一致
+<!-- F5 -->
 
-调查没有找到历史设计假设的 `hapi-remote-session` binary。实际安装的是 `hapi-open-session` 0.1.0，它没有无副作用 `probe`、没有 headless status file、没有 resume/session-id 输入，也不等待远端 turn 完成。正常路径创建 session、发送 prompt 后即返回；把字面 `probe` 当位置参数还可能进入创建路径。
+# 面 5：runner provider 与执行边界（出站边界）
 
-因此，不能用现有 CLI 的 exit 0 表示 runner 完成，也不能发明 exit 69 表示缺席。Production binary、readiness、invocation、terminal/status、session resume/cleanup 都必须先成为真实外部契约，engine 才能实现对应 adapter。
+## 1. 问题边界：固化调用怎样离开函数域
 
-### 9.4 Availability、hold 与恢复
+本篇处理出站方向：函数域把已经固化的调用交给外部执行终端，并把可持久消费的执行事实交回系统。面 4 处理工作进入对象域；本篇处理调用离开 engine 进程。两者不共享 identity、故障窗口或状态机。
 
-稳定目标要求：external terminal 缺席是正常运行态，不是普通 spawn failure。Item 已创建后，若其 endpoint 不可用，应进入 durable hold，保持 preset status，不创建 run/worktree，也不进入指数 backoff；status/events 必须能区分长期缺席与瞬时进程错误。Endpoint 恢复后清除 hold，item 重新获得调度资格。
+provider（来源：division-plan.md“面 5”）指纯函数调用背后的执行实现。它可以使用本地进程、远端 API 或 session 完成 effect，但上层只消费显式 typed 输入与封闭事实；未通过合同提升的 stdout、文件变化和内部判断仍按总纲 §0.2 丢弃。
 
-历史机制证明了这种状态机的大致形状，也暴露了事务裂缝：item create、hold、warning、clear 和 restoration 分属不同事务，daemon 在这些边界崩溃可能留下 hold 无 warning或 clear 无 restoration。更重要的是，没有真实无副作用 probe 时，这些路径只能由 fake 验证，不能写成 current guarantee。
+provider 本体是实现细节，本篇拥有的是其合同形状，以及 endpoint/probe 与执行结果事实的定义权。adapter、transport 和 binary 的具体工程实现不在本 RFC 范围内。
 
-Endpoint identity 也不能只用 `kind + binary`。同一 binary 可能因 server URL、credential principal、machine 或 profile 指向不同 endpoint。最终 identity 必须从真实 runner/probe contract 推导，不能从历史 hold key 反推。
+来源：旧 548 §1、§9；合同 owner 按 division-plan.md“面 5”与 A.md 面 2 §8 新写。
 
-### 9.5 Terminal 与 loss 必须有唯一 durable winner
+## 2. Provider 合同形状与两个漏气孔
 
-外部执行期间可能同时发生业务 terminal 和 endpoint loss。历史 latch 算法在“重读 non-terminal”与“提交 loss latch”之间存在竞争窗口：terminal 可能先提交，随后 loss latch 又覆盖结果。现有测试分别覆盖窗口两侧，没有证明最窄竞争点。
+provider 合同显式包含 argv builder、model、spawn environment/sandbox、session identity 与 resume，以及结果读取面。各槽位只消费固化 prompt 投影和 typed operator 配置，不从 ambient CLI config 或未声明进程状态补入函数输入。
 
-正确交付必须在同一个真实 invocation 上定义 terminal admission commit 与 loss decision commit 的线性化关系，并证明 terminal-first、loss-first、crash/restart 后只有一个 winner。Events 只能观察结果，不能成为 winner authority。由于真实 invocation 和 status admission 尚不存在，这项语义目前仍是事实阻塞。
+| 合同槽位 | 合同要求 |
+|---|---|
+| argv builder | 把固化 prompt 投影与 typed 配置转换为 argv |
+| model | 由调用显式给出，不从 ambient 配置推断 |
+| spawn environment/sandbox | 完整声明 env、cwd、资源、网络与 sandbox 能力 |
+| session identity 与 resume | 只在当前 closure 的私有函数域内创建、保存与恢复 |
+| result reader | 按 endpoint 与 run identity 读取并解析封闭事实 |
 
-## 10. Current main 已经实现的窄地基
+第一个历史漏气孔是 spawn environment。target 合同从 allowlist 构造封闭 env，并显式给出 cwd、可见资源、网络与 sandbox 能力；不得整体透传 daemon ambient env，也不得让未声明变量、默认 credential principal 或宿主 profile 改变函数输入。地址或凭据存在于进程环境，不等于它已成为 context。
 
-RFC 的大部分终态尚未落地，但 current main 并非空白。已经存在并可直接复用的资产包括：
+第二个历史漏气孔是 session。continuation（来源：division-plan.md“面 5”）指当前函数调用为了 resume 而保存的私有续接状态；session identity 只能标识这份 continuation，不能成为函数输入，也不能跨 task 充当共享权威。session 生命周期服从 closure authority，外部终端不另建 cwd、branch 或 cleanup owner。
 
-| 能力 | Current main 的真实供给 | 不能据此声称的保证 |
+v2-current 采用三目 runner 分派与平行字段；新增一个 runner 需要改动约七处代码并执行一次 DB migration。这是 current 状态陈述。target 合同把 runner 差异收敛到上述槽位；adapter 如何提取、迁移或兼容不在本 RFC 范围内。
+
+来源：旧 548 §9.1、§10 的 current 事实；合同槽位与 env/session 边界按 division-plan.md“面 5”新写。
+
+## 3. Endpoint identity 与 probe
+
+endpoint identity（来源：旧 548 §9.4）是能够唯一指向真实执行终端的 typed identity，不能只取 `kind + binary`。同一 binary 可因 server URL、credential principal、machine 或 profile 指向不同终端；identity 必须由真实 provider 合同中会改变目标终端的参数推导，并贯穿 absence、recovery、terminal 与 loss 事实。
+
+probe（来源：旧 548 §9.3—§9.4）是按真实外部合同读取 endpoint 可用性或既有 run 状态的操作。合同必须说明它是否无副作用、怎样区分 ready/absent/unknown、观测新鲜度，以及 run 开始后如何读取 terminal/status。外部工具没有承诺的 exit code、status file 或 resume 输入，engine 不得自行补造。
+
+current 调查没有找到历史假设的 `hapi-remote-session`；实际安装的 `hapi-open-session` 0.1.0 没有无副作用 probe、headless status file 或 resume/session-id 输入，也不等待远端 turn 完成。正常路径发送 prompt 后即返回，把字面 `probe` 作为位置参数还可能创建 session。因此 exit 0 不能证明 terminal，也不能虚构 exit 69 表示 absence。
+
+历史候选只完成 `probe-only / invocation-pending`，并以 zero HAPI spawn 为成功条件。它证明了内部接缝可被触发，没有证明真实 invocation、completion、resume 或 active loss；probe-only 不能作为 target provider 合同。
+
+来源：旧 548 §9.2—§9.4，压缩保留真实 CLI 与 probe-only 两项教训。
+
+## 4. 缺席与恢复只产生事实
+
+runner endpoint 在 spawn 前缺席是正常运行态，不是本地进程 spawn failure。检测到缺席时，本篇产生 durable `pre-spawn absence`，携带 endpoint identity 与观测证据；此时不建立 run 或 worktree，也不进入普通 spawn backoff。
+
+本篇只负责检测缺席、持久化事实并识别后续 endpoint 恢复。held 调度处置、恢复后何时重新取得资格以及 status 投影归面 3；本篇不输出没有原因的 generic `held`。
+
+历史实验把 item create、hold、warning、clear 与 restoration 分在不同事务，暴露出 hold 无 warning、clear 无 restoration 的 crash 窗口。target 合同因此要求 provider 事实本身 durable、可重放；历史 fake probe 不构成这项保证的运行证据。
+
+来源：旧 548 §9.4；事实生产与消费边界按 division-plan.md“面 5”和 A.md 面 3 §9.2 改写。
+
+## 5. 封闭事实 ADT 与唯一 durable winner
+
+本篇只产生以下四个事实 variant。variant 名称与唯一消费者逐项采用 division-plan.md“面 5”：
+
+| Variant | 本篇负责的检测与判定 | 唯一消费者 |
 |---|---|---|
-| 外部写入传输 | PATH CLI → Unix socket → daemon | 不等于 GitHub consumer 已存在 |
-| 调用原语 | `chain.create`、`item.add`、per-item preset | 不等于两分支外部 E2E 已完成 |
-| 唯一性 | chain 同声明复用；`(chain,itemId)` 唯一 | 不等于 delivery/request verdict 已可追溯 |
-| 输入边界 | 顶层 known-key、JSON 安全/大小、preset 存在检查 | 不等于 preset field schema 校验 |
-| 持久化 | SQLite WAL、immediate transaction、foreign key | 不等于跨命令事务或 event 原子性 |
-| Engine 纯度 | 没有 GitHub webhook/HMAC 领域代码 | 不等于 router/consumer 链路已交付 |
-| Closure lifecycle | per-closure run/worktree/session/cleanup/recovery | 不等于 HAPI 已真实进入该路径 |
-| Observability | typed events 与当前态查询 | 不等于 durable request/delivery 审计 |
+| `pre-spawn absence` | spawn 前确认 endpoint 缺席；不建立 run | 面 3 以 held 调度处置消费 |
+| `terminal winner` | terminal admission 在同一 run 的 durable 排序中胜出 | 经针眼通道形成 `returned(value) \| exception`，由面 3 committed transition 消费 |
+| `active loss` | active run 检测到 endpoint loss，且 loss 在 winner 判定中胜出 | 面 3 把该 run 消费为 `exception` 落定 |
+| `unknown effect` | 不能证明外部 effect 是否发生，且无法取得 terminal 或 loss winner | 面 3 以 unknown hold 消费，不重复推进 |
 
-“可复用”在这里表示已有结构能承担未来保证的一部分，不表示测试绿色或 symbol 存在已经证明 RFC 语义。正式供需匹配把 67 项原子保证分为 9 项直接复用、24 项修补后复用、4 项过渡兼容、11 项 consumer 自建和 19 项地基仍缺。这个分布解释了为什么不能把整个 RFC 称为“基本实现，只差接线”。
+pre-spawn absence 的检测止于 run 建立之前。run 建立后，本篇检测 terminal 与 active loss，并负责 terminal/loss winner 判定；若 terminal 胜出，产生 `terminal winner`，若 loss 胜出，产生 `active loss`。若既不能证明 effect 未发生，也不能取得唯一 winner，则产生 `unknown effect`，而不是把不确定性伪装成 absence。
 
-## 11. 为什么不能一次拆完整实现树
+对同一 run，terminal admission commit 与 loss decision commit 必须形成一条 durable、可重放的线性顺序。terminal-first 只能留下 `terminal winner`，loss-first 只能留下 `active loss`；crash/restart 后不得互相覆盖。events 只能观察 winner，不能成为 winner authority。
 
-RFC 的依赖不是文件依赖，而是证据依赖。Schema 链需要 RFC-2 的 preset authority；GitHub 链需要 router 的真实 queue/retry/fire-and-forget contract；external-terminal 需要真实 binary、probe、status/session 和 loss ordering。若在这些事实出现前创建实现 issue，issue 的验收只能依赖未来 issue 才能解释，或者通过 fake、stub 和自写测试制造伪完成。
+本篇不把 `active loss` 转换为 exception，也不把 `unknown effect` 转换为 unknown hold；这两项消费均归面 3 §9.2。本 ADT 不产生 generic `held` variant。以后新增 variant 时，必须同时指定其唯一消费者，并使 producer 与 consumer 同时穷尽更新。
 
-滚动拆分因此只允许拆现场已经闭合的下一批。R12 最初尝试起草 schema、CLI、write gate、quarantine、repair 和 request record 六个 child，独立复核发现前五个直接或传递依赖 RFC-2 authority，且若干 checkpoint 使用并不存在的内部 hook。草案随后归零，再通过专门 runtime-seam 调查确认 durable request record 是无入边的独立节点。
+来源：旧 548 §9.4—§9.5；四 variant 映射以 division-plan.md“面 5”为权威，消费对接 A.md 面 3 §9.2。
 
-Request-record child 的验收最终固定为真实隔离路径：独立 Git repository、scheduler-disabled production daemon、真实 CLI/raw socket、SQLite 查询、restart、commit 后 reply loss、外部 abort trigger、并发 duplicate、request identity collision，以及由 production scheduler mint 的真实 agent credential admission。固定 driver 在 current main 上应精确失败于 `request.get` unknown command；实现者不能修改 driver 的预期来让错误实现通过。
+## 6. 非目标
 
-这种拆分纪律的目的不是拖延实现，而是保证每个 issue 的通过能够证明它自己的新行为，而不是证明一个 stub、未来依赖或测试里的手工注值。
+本篇不定义调度处置逻辑。held、unknown hold、retry、ready、以及 loss 作为 exception 进入 committed transition 的规则均属于面 3。
 
-## 12. 尚未实现的完整业务闭环
+本篇不定义五时态、context 累积、self-report、measurement、prompt 固化或 fail / NIL；这些属于面 2。provider 不能改变函数域文法，也不能增加第三个提升口。
 
-下列能力仍没有 current runtime 证据：
+本篇不实现 provider interface、adapter、binary、远端 transport、probe service、session store 或 credential provision。真实外部合同不存在时，fake probe、zero-spawn 与自造 status file 只能作为历史实验。
 
-1. RFC-2 preset authority 与稳定 model identity；
-2. CLI JSON Schema、合成 schema 和 version mismatch fail-closed；
-3. 所有可执行 item 的持续 write gate、startup quarantine 与原子 repair；
-4. CLI 独立 typed success/rejection ADT；
-5. GitHub consumer 的 HMAC ingress、映射、schema cache、delivery ledger 与两步 orchestration；
-6. Router 的 normalized envelope、durable retry、per-target fire-and-forget 与 GitHub App source model；
-7. External-terminal 的 production binary/probe、真实 invocation、headless terminal/status、session resume/cleanup、endpoint identity和 loss ordering；
-8. 真实 GitHub 业务 E2E、真实 HAPI E2E，以及冻结 candidate/live merge-base 双基线 gate。
+本篇也不接收外部 delivery、不做业务映射、不定义 work identity 或 request ledger；这些属于面 4。入站与出站只通过各自 typed 合同与对象域相接，不重新合并成旧 548 的跨方向状态机。
 
-这些条目不是被取消的需求，也不是“后续优化”。它们是 RFC 完整终态的一部分，只是尚未获得足以进入实现的地基或运行证据。当前能够实施的 request record 也不能替代它们；它只先建立以后所有外部调用都需要的 engine 侧线性化证据。
-
-## 13. 结论
-
-RFC #548 要建立的是一条可证明的外部工作链，而不是两个产品集成点。GitHub 方向通过 router、consumer 和 CLI 分层，使网络 delivery、业务映射与 engine mutation 各自拥有权威；external-terminal 方向要求远端 session 进入 current closure lifecycle，并把缺席、恢复、完成和 loss 建模为 durable 状态，而不是本地 `spawn` 的异常分支。
-
-Current main 已经提供 Unix socket 调用、chain/item 原语、部分唯一性、SQLite transaction、引擎纯度和 per-closure lifecycle。这些资产足以支撑后续工作，却不足以证明 schema、verdict、审计、router retry 或真实 HAPI invocation。RFC 调查最终把这些差距收敛为明确契约，并通过操作员裁决固定了 schema、历史数据、规范 work identity、空 chain 和 request audit 的语义。
-
-当前唯一具备独立实现与直接运行验收条件的能力是 durable request record/query。其余能力继续等待各自真正的权威输入：RFC-2 model、router contract 或 external runner contract。这个边界是 RFC 的核心成果之一，因为它阻止系统用错误层的局部事实拼出一个表面完整、实际不可恢复的集成。
-
-## 证据索引
-
-- `implementation-audit.md`：current main 的存在性底图。
-- `supply-main-contract-audit.md`：CLI、schema、校验、幂等与审计供给事实。
-- `supply-hapi-reconcile-audit.md`：历史 HAPI 候选与 current closure lifecycle 对照。
-- `operator-decisions.md`：D1–D11 的操作员裁决。
-- `expected-foundation.md`：修补后预期保证与仍未证明项。
-- `supply-demand-match.md`：67 项原子保证、owner、接缝与阻塞。
-- `detail-historical-extra-migration.md`：真实历史数据与迁移边界。
-- `detail-request-record-runtime-seam.md`、`detail-request-record-scope-fixture.md`、`detail-request-record-variant-admission.md`：request-record 独立性与真实验收路径。
-- `rolling-resplit-next-batch.md`：当前唯一 next-batch child 的完整契约。
-- `r9-foundation-review.md`、`r12-resplit-review.md`：预期地基与滚动拆分的独立 PASS 复核。
+来源：division-plan.md“面 2—面 5”，并删除旧 548 §11—§13 的实现排期与统一结论。
