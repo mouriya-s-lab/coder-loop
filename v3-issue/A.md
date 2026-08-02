@@ -185,7 +185,7 @@ hook 是挂在五时态转换点上的 **effectful subprocess runtime**，独立
 
 GUI 的本体是 context 与副作用的可观测手段。context 面展示被提升并参与交接的值、各时态快照、谓词结果、正常/fail 路径和对象域值账本；副作用面展示未进入交接语义但对人仍有诊断价值的 worktree、进程三证、events、日志和 Git 残迹。GUI 读取这些事实，不重建或美化它们。
 
-观测本体并不禁止 #544 已经定义的有限运维动作。daemon 生命周期操作、unblock 和具备 authority 的 decision 作为附属动作面保留，并与观察面分栏；二者共享稳定 identity，却不共享权威，所有 mutation 仍由 daemon 裁决并回到权威读面核验。
+观测本体并不禁止 #544 已经定义的有限运维动作。daemon 生命周期操作、unblock、chain 暂停/恢复与 item 重排作为附属动作面保留，并与观察面分栏；二者共享稳定 identity，却不共享权威，所有 mutation 仍由 daemon 裁决并回到权威读面核验。
 
 来源：record-3 第 18 轮操作员原话；hook 的 effectful runtime 定位、无领域 mutation 权威与 GUI 分栏控制面来自 division-plan.md 面 6、面 7 的主 session 裁决。
 
@@ -319,46 +319,43 @@ operator 可以调整全局 hook 声明，但该控制面不向脚本本身下�
 来源：division-plan.md“面 2”“面 3”“面 6”“面 7”；A.md 第 0 篇 0.7、0.8；A.md 旧 543 第三节的监督条件治理原则。
 
 <!-- 544 -->
-
-# RFC #544：把 coder-loop 变成一个人可以独立判断和处置的系统
+# 面 7：观测产品（GUI）
 
 ## 1. 从一次值班事故开始
 
 设想操作员在手机上收到一条消息：某个 chain 很久没有继续推进。他现在有几个问题，但没有一个能靠“daemon 进程还在”回答。
 
-他不知道 daemon 是健康、半死还是已经退出；不知道 socket 文件是活连接还是陈尸；不知道 chain 是被 rate limit、gate hold、失败 attempt 还是 operator decision 卡住；不知道最后一次 attempt 实际拿到什么 prompt；也不知道此刻按 resume、unblock 或 restart 是否合适。
+他不知道 daemon 是健康、半死还是已经退出；不知道 socket 文件是活连接还是陈尸；不知道 chain 是被 rate limit、失败 attempt、暂停状态还是 provider loss 卡住；不知道最后一次 attempt 实际拿到什么 prompt；也不知道此刻按 resume、unblock 或 restart 是否合适。
 
-在 RFC #544 之前，解决这些问题往往意味着再启动一次 agent 调查。调查者寻找 session、读日志、检查进程、比较数据库与文件，再把若干局部现象解释成一段结论。这个流程有三个结构性缺陷。
+在旧 RFC #544 之前，解决这些问题往往意味着再启动一次 agent 调查。调查者寻找 session、读日志、检查进程、比较数据库与文件，再把若干局部现象解释成一段结论。这个流程有三个结构性缺陷。
 
-第一，操作员看到的是解释，不是原始事实。调查可能选错 run，或者把 worktree、git branch、pidfile 之类的旁证误当成领域状态。
+第一，操作员看到的是解释，不是原始事实。调查可能选错 run，或者把 worktree、Git branch、pidfile 之类的旁证误当成领域状态。第二，调查会受到时间漂移。current preset、current item 和 current 文件不等于某次历史 attempt 当时看到的输入。事后重建的 prompt 可以语法正确，却仍然不是当时发送给 runner 的文本。第三，观察入口依赖被观察对象。daemon 崩溃时，任何依赖 daemon RPC 的“监控”都同时失效；浏览器连接失败也无法告诉人究竟是 daemon 死亡、gateway 不可达还是 mesh 断开。
 
-第二，调查会受到时间漂移。当前 preset、当前 item 和当前文件不一定等于某次历史 attempt 当时看到的输入。事后重建出来的 prompt 可以语法正确，却仍然不是当时发送给 runner 的文本。
+因此，面 7 不以“有一个 Web 页面”为完成条件。它要让操作员无需 agent 代查，就能从仍然存活的入口识别故障域、沿稳定 identity 进入具体执行、阅读真实输入、执行有限动作，再从权威读面确认结果。
 
-第三，观察入口依赖被观察对象。daemon 崩溃时，任何依赖 daemon RPC 的“监控”都同时失效；浏览器连接失败也无法告诉人究竟是 daemon 死亡、gateway 不可达还是 mesh 断开。
+全文用四个命题组织这一交付：证据比被观察进程活得更久；观察不修改、重建或美化事实；观测与控制共享 identity 但不共享权威；GUI 的价值由完成诊断闭环所需时间衡量。
 
-因此，这个 RFC 并不以“有一个 Web 页面”为完成条件。它要改变操作员获得事实的方式：无需 agent 代查，能够从一个仍然存活的入口识别故障域、沿稳定 identity 进入具体执行、阅读真实输入、执行有限动作，再从权威读面确认结果。
+来源：A.md 旧 544 第 1 节；division-plan.md“面 7”。
 
-全文用四个设计命题说明为什么要实现这些能力，以及这些能力具体是什么：
+## 2. 定位：观测二分本体与分栏动作面
 
-1. 证据必须比被观察进程活得更久；
-2. 观察不能修改、重建或美化事实；
-3. 观测与控制必须共享 identity，但不能共享权威；
-4. GUI 的价值由完成诊断闭环所需的时间衡量。
+GUI 的本体是 context 与副作用的可观测手段，不是 daemon 领域模型的另一种实现。**context 观测面**展示被提升并参与交接的值：各时态 context 快照、谓词结果、正常 / fail 路径，以及对象域值账本。它让人看见值怎样进入闭包、何时有效、怎样被检查并经针眼交付，但不把观察投影升级为新的 context owner。
 
-## 2. 命题一：证据必须比被观察进程活得更久
+**副作用观测面**展示被引擎语义丢弃、却对人仍有诊断价值的内容：worktree、进程三证、events、日志和 Git 残迹。这些内容没有经 self-report 或 measurement 提升，不参与主流转；它们仍能说明 runner 是否落过文件、进程在哪一层失联、现场留下了什么。引擎丢弃的副作用对人不是丢弃的——GUI 是人对被丢弃部分的读面。这个读面只能呈现来源与原始分歧，不能把 worktree、日志或 Git 残迹解释成 `returned(value)`、`exception` 或 committed transition。
 
-### 2.1 为什么 gateway 必须是另一个进程
+GUI 因而是“观测本体 + 分栏的有限运维动作面”。观察区回答发生了什么，动作区只承载恢复观察对象和调整既有工作的闭集命令。二者共享 daemon、chain、item、task、run、phase 与 attempt 的稳定 identity，但共享 identity 不共享权威：GUI 不拥有引擎的写权威，也不解释 mutation 是否合法。
 
-将 HTTP server 放进 daemon 看似减少了组件，却让观察面和执行面共享同一个故障。daemon 一旦因未捕获异常、runner failure 或资源问题退出，页面、API 和实时连接也一起消失。此时浏览器只能显示“连接失败”，而无法说明 daemon 是否留下持久状态、最后事件或崩溃线索。
+旧 544 已给出 gateway、读面、transport、PWA 与有限动作的交付纪律，本篇继承它们；页面组织按观测二分重排，事实 owner 仍在面 1、面 2、面 3、面 5、面 6 及 daemon，面 7 只拥有呈现、transport 与交互结果。
 
-RFC #544 实现一个独立的 TanStack Start/Bun gateway。它与 daemon 同仓、同版本演进，但不与 daemon 共生命周期。gateway 负责静态资产、server routes 和 SSE；daemon 负责调度、领域写入和 mutation 裁决。
+来源：division-plan.md“面 7”；A.md 第 0 篇 0.7、0.8；A.md 面 2 第 8、10 节。
 
-这项分离必须在两个方向都成立：
+## 3. 命题一：证据必须比被观察进程活得更久
 
-- daemon 已死时，gateway 仍能打开页面、读取持久状态、查询历史事件并提供 dead-state start；
-- gateway 被关闭时，它此前启动的 daemon 继续运行，不被父子进程关系或信号转发带走。
+### 3.1 gateway 必须是独立进程
 
-gateway 不是新的 daemon，也不是通用 supervisor。它不会自动守护、循环拉起或制定重启策略。它只实现操作员明确触发的 start、stop、restart，并用外部证据判断动作之后发生了什么。
+将 HTTP server 放进 daemon 会让观察面和执行面共享故障。daemon 因未捕获异常、runner failure 或资源问题退出时，页面、API 与实时连接也会一起消失，浏览器只剩“连接失败”。target 是独立的 TanStack Start / Bun gateway。它与 daemon 同仓、同版本演进，但不共生命周期：gateway 负责静态资产、server routes 与 SSE；daemon 负责调度、领域写入和 mutation 裁决。
+
+分离必须双向成立：daemon 已死时，gateway 仍能打开页面、读取持久状态、查询历史事件并提供 dead-state start；gateway 关闭时，它此前启动的 daemon 继续运行，不被父子进程关系或信号转发带走。gateway 不是新的 daemon 或通用 supervisor。它不自动守护、循环拉起或制定重启策略，只执行操作员明确触发的 start、stop、restart，并用外部证据判断结果。
 
 ```mermaid
 flowchart LR
@@ -367,308 +364,249 @@ flowchart LR
     Daemon[coder-loop daemon]
     State[(SQLite 持久状态)]
     Events[(events JSONL)]
-    Artifacts[(attempt artifacts)]
-
+    Artifacts[(时态二固化输入的持久快照)]
+    Context[(context 观测投影)]
     Browser -->|HTTP / SSE| Gateway
-    Gateway -->|严格只读 status| State
+    Gateway -->|strict status read| State
     Gateway -->|历史与 active offset| Events
-    Gateway -->|typed artifact read| Artifacts
+    Gateway -->|typed snapshot read| Artifacts
+    Gateway -->|observed 值读取| Context
     Gateway -->|typed socket query / mutation| Daemon
     Gateway -. dead-state start .-> Daemon
     Daemon -->|唯一领域写入| State
-    Daemon -->|追加事件| Events
-    Daemon -->|保存真实输入| Artifacts
+    Daemon -->|追加过程事实| Events
+    Daemon -->|保存固化输入| Artifacts
 ```
 
-### 2.2 为什么不能只有一种数据通道
+来源：A.md 旧 544 第 2.1 节；division-plan.md“面 7”。
 
-把所有读取都做成 daemon RPC，会在 daemon-down 时失去最有价值的证据。反过来，让 gateway 直接扫描所有 runtime 文件，又会绕过领域 owner，逐渐形成第二套状态解释器。
+### 3.2 三个数据面不能互相冒充
 
-所以系统按事实的生命周期分成三个面。
+**持久状态面**保存 queue、chain、item、run 与对象域的群组消费结构的最后持久事实。gateway 通过 engine-owned strict reader 读取 SQLite，不持有写连接，也不实现自己的 SQL 投影。**事件面**保存过程事实。gateway 读取主 events segments 的历史与 active byte offset，把新事件推给浏览器。daemon 退出后，既有历史与最后事件仍在，已建立的 SSE 不因 daemon 退出而自动关闭。
 
-**持久状态面**保存队列、chain、item、run 和 task tree 的最后持久事实。gateway 通过 engine-owned strict reader 读取 SQLite，不持有写连接，也不实现自己的 SQL 投影。
+直接读取 runtime 文件的特许只给被钉成同仓消费合同的 events JSONL。时态二固化输入的持久快照由专门 owner / path boundary 提供；pidfile 与 socket 只按三证探针合同读取。其他 runtime 文件不因此成为公共 API。**瞬时控制面**处理 daemon 当前可回答的查询与写动作，使用 typed socket transport。daemon 不可用时，它返回精确 transport 结局，不能从数据库旁路执行同一动作。
 
-**事件面**保存过程事实。gateway 读取主 events segments 的历史与 active byte offset，把新事件推送给浏览器。daemon 退出后，既有历史和最后事件仍在，已建立的 SSE 连接也不因 daemon 退出而自动关闭。
+三个面可以互相跳转，却没有共同全局时点。SQLite snapshot、活性探针和事件文件各自保留采样时间；GUI 不为视觉一致性伪造跨介质原子世界状态。
 
-这里真正获得“直接刮 runtime 文件”特许的只有 events JSONL，因为它已被钉成 gateway 的同仓消费合同。attempt artifacts 由专门的 artifact owner/path boundary 提供，pidfile 与 socket 也只按三证探针合同读取；它们不是 events 豁免的扩张。其他 agent、supervisor 或脚本仍不得把任意 runtime 文件当公共 API。
+来源：A.md 旧 544 第 2.2 节；A.md 面 3 第 1、6 节。
 
-**瞬时控制面**处理 daemon 当前可回答的查询和写动作。它使用 typed socket transport。daemon 不可用时，该面应给出精确失败，而不是从数据库旁路执行同一个动作。
+### 3.3 单 root 是进程级不动点
 
-三个面在 UI 中可以互相跳转，但它们没有一个共同的全局时点。SQLite snapshot、活性探针与事件文件各自保留采样时间。系统不会为了让页面“看起来一致”而声称跨 SQLite、文件和进程的原子世界状态。
+gateway 启动时只解析一个 loop-data root，并把它存入不可变 typed runtime context。URL、query、body、header 与前端状态都不能覆盖、枚举或逃逸该 root；切换 root 只能启动另一个明确配置的 gateway 实例。status、events、时态二快照、context 观测投影、daemon pid / socket 与 gateway 自诊断全部服从同一 root。它不是 UI 默认值，而是 identity、监听面和缓存含义的进程级隔离边界。
 
-### 2.3 一个 gateway 只能观察一个 root
+来源：A.md 旧 544 第 2.3 节。
 
-进程独立还不够。如果同一个 gateway 可以由 request 参数切换 loop-data root，一个浏览器请求就可能读到另一个环境，identity、监听面和缓存也会失去固定含义。
+### 3.4 宿主、静态资产与监听共用生命周期
 
-因此 gateway 在启动时解析一个 loop-data root，并把它存入不可变的 typed runtime context。URL、query、body、header 和前端状态都不能覆盖、枚举或逃逸这个 root。切换 root 的唯一方式是启动另一个明确配置的 gateway 实例。
+gateway 对外提供稳定的 root 命令：`gateway:start`、`gateway:build`、`gateway:typecheck`、`gateway:test`。同一生产进程拥有静态资产与 routes，不再启动第二个静态 server。
 
-这个不动点同时约束所有路径：status、events、attempt artifacts、daemon pid/socket 和 gateway 自己的诊断都必须来自同一个 root。它不是 UI 默认值，而是进程级隔离边界。
+静态资产处理先于业务 route，并拒绝 traversal、目录与非文件路径。多个显式 listener 共享 handler 与 PID；任一必需 listener 启动失败，整个 gateway 失败并清理已建立 listener，不能留下半就绪实例。
 
-### 2.4 宿主、静态资产和监听必须形成一个生命周期
+监听集合只含 loopback 与明确的 NetBird interface address，不含 `0.0.0.0`、`[::]`、LAN fallback 或公网入口。NetBird 地址漂移时更新配置或重启，不能放宽监听。
 
-gateway 作为一个产品进程，对外提供四个稳定的 root 级命令：`gateway:start`、`gateway:build`、`gateway:typecheck`、`gateway:test`。生产进程由同一个 owner 管理静态资产与 routes；不会再启动第二个静态文件 server。
+停止时向捕获的 gateway PID 发送 `SIGINT`，等待退出，并确认全部 listener 消失。运行手册所描述的对象必须就是生产进程。
 
-静态资产处理先于业务 route，并拒绝 traversal、目录和非文件路径。多个显式 listener 共享同一 handler 和同一 PID。若任一必需 listener 启动失败，整个 gateway 启动失败并清理已经建立的 listener，不能留下“本机可用、mesh 半失效”的半就绪实例。
+来源：A.md 旧 544 第 2.4 节；division-plan.md“面 7”的 mesh-only 交付纪律。
 
-监听集合只包含 loopback 与明确的 NetBird interface address。不存在 `0.0.0.0`、`[::]`、LAN fallback 或公网入口。NetBird 地址漂移时更新配置或重启，而不是放宽监听。
+## 4. 命题二：观察不能修改、重建或美化事实
 
-停止时，对捕获的 gateway PID 发送 `SIGINT`，等待进程退出，并确认所有 listener 都消失。这个闭环确保运行手册描述的对象就是生产进程，而不是一个遗留子进程或另一个静态 server。
+### 4.1 strict reader 决定证据资格
 
-## 3. 命题二：观察不能修改、重建或美化事实
+status reader 从打开到关闭必须只读：不创建数据库或 WAL / SHM，不改变 journal mode，不执行 DDL、migration、写 PRAGMA 或 metadata 写入。live-WAL 与 daemon-down 都经过同一合同。缺盘、权限、损坏、旧 schema、未来 schema 与合法 snapshot 是可穷尽的不同结果。一次 status 的 SQLite 槽来自一个 read transaction；chain、items、current、runs 与对象域的群组消费结构只能整体属于提交前或提交后，不从 process、worktree 或 Git 旁证补造 identity。
 
-### 3.1 严格只读是一种证据资格
+来源：A.md 旧 544 第 3.1 节。
 
-如果 status reader 在打开数据库时创建 WAL/SHM、改变 journal mode、执行 migration 或写入 metadata，它就改变了自己正在观察的现场。在 daemon-down 排障中，这尤其危险：读取动作可能覆盖原始故障条件，也可能改变之后 daemon 重启时看到的 schema。
+### 4.2 wire exact boundary 是最终消费边界
 
-RFC 实现一个 engine-owned strict status 入口。它从打开到关闭都保持只读，不创建数据库或 sidecar，不执行 DDL、migration 或写 PRAGMA。live-WAL 与 daemon-down 两种状态都要经过同一个合同。
+最终 `status --json` 与 gateway HTTP response 共享 engine-owned exact boundary，验证对象是 public wire 本身。顶层和嵌套槽都有精确 shape，有限状态使用 discriminated union；对象域的群组消费结构、hook 审计投影及其他 owner-defined variant 都必须穷尽。
 
-读取结果不是 `ok | missing` 两种。缺盘、权限、损坏、旧 schema、未来 schema 和合法 snapshot 都是可穷尽的结果。错误发生在打开、读某张表或组装 tree 的不同阶段，不应让同一个根因换一种领域含义。
+前端类型、route result 和 CLI 输出从 owner boundary 派生，验证后不再 flatten、合并 extra 或删除字段。status、socket RPC、events、时态二快照、`CompileEnvelope`、context 观测与 mutation 分别从自己的 owner boundary 派生，禁止 `any`、匿名 domain shape 与复制 parser。
 
-一次 status 中的 SQLite 槽来自一个 read transaction。即使 daemon 正在提交，chain、items、current、runs 和完整 task tree 也只能整体属于提交前或提交后。系统不会从 process、worktree 或 git 旁证补造缺失 identity。
+依赖方向只从 gateway 指向事实 owner。engine `src/` 不 import gateway，也不出现 UI route、组件或显示文案；gateway 不复制 schema、command registry、framing、compiler 或状态推断逻辑。
 
-### 3.2 最终 wire 才是消费者依赖的对象
+来源：A.md 旧 544 第 3.2 节；A.md 面 1 第 5 节；division-plan.md“面 7”。
 
-内部对象通过一次断言，不等于最终 JSON 已被证明。如果 serializer 在断言后 flatten 字段、合并 extra 或删除 `undefined`，CLI 和 HTTP 消费者实际收到的是另一个对象。
+### 4.3 hook 只展示 operator 声明与最小审计投影
 
-因此最终 `status --json` 与 gateway HTTP response 共享一个 engine-owned exact boundary。public wire 本身必须通过它。顶层与每个嵌套槽都有精确 shape；有限状态用 discriminated union；task tree 使用 CAP-1 的 leaf、seq、par variants；hook 与 CAP-4 的 producer shape 就绪后也必须进入同一公共 boundary。
+hook 的声明只有 operator/global 单一层级。GUI 展示该声明，不执行多层叠加或覆盖，也不从 events 反推 current 声明。
 
-前端类型、route result 和 CLI 输出从这一 boundary 派生。public wire 通过验证后不得再发生结构改写。这样，新增 variant 会在所有消费者上形成编译工作清单，而不是被匿名 `object` 或 default 分支吞掉。
+过程事实读取面 6 第 4 节定义的最小审计记录：锚点标识、触发时刻、执行结局，以及 delivery 与 execution 的关联。结局保留成功、非零退出码、超时或被信号杀死这些原始 variant；同一 delivery 的重复 execution 仍归于同一逻辑投递。
 
-这条规则不只适用于 status。status、socket RPC、events、attempt artifacts、compile、context、mutation 与 CAP-4 都必须从各自 owner 的 runtime boundary 派生类型。禁止 `any` 和匿名 domain shape；`unknown` 只允许短暂存在于 catch 或外部 parse 入口，并立即由精确 parser 收窄。除 `as const` 外，不用类型断言跨过已经断裂的类型链。
+GUI 可以把声明与审计按 owner-defined identity 关联，却不能重解释进程结局、把 hook 输出提升为 context，或据此生成领域事实。
 
-gateway 也不能为了接入方便复制 schema、command registry、framing、parser 或状态推断逻辑。依赖方向始终从 gateway 指向 engine/CAP owner；engine `src/` 不 import gateway，也不出现 UI route、组件或显示文案等 GUI 概念。否则观测面会反向污染被观测的领域层。
+来源：A.md 面 6 第 4、6 节；division-plan.md“面 6”“面 7”。
 
-### 3.3 Hooks 的当前事实与过程事实不能混在一起
+### 4.4 三证必须保留原始分歧
 
-操作员看到 chain 没推进时，需要区分“没有 worker”与“正在等待 hook/gate”。status 因而提供四层 hook 声明合成后的 effective view，并标明每项来自 global、chain、preset 还是 item。gate hold 需要显示 decision point、开始时间，以及下一次重问或继续判断所需的节奏线索。
+daemon 三证是三次分别发生、分别计时的观察。pidfile probe 保留文件存在性、解析结果、PID 活性分类、errno 与采样时间；socket probe 只回答能否 connect；RPC probe 发送带 request id 的 `daemon.status`，在 deadline 内收齐 envelope、核对 id 并解析精确结果。
 
-当前 effective view 属于 status；`hook.*` events 属于过程。二者通过 owner-defined hook identity 关联。GUI 既不重新执行四层合成，也不从事件历史倒推 current hooks。chain 详情展示完整有效配置，首屏异常区只提取当前 hold 和影响推进的关键信息。
+pidfile 缺失但 RPC 成功、PID 存活但 connect 失败、connect 成功但 RPC 超时，都要原样呈现。任何一证都不能覆盖另两证，也不能把三证合成为一个经过美化的红绿灯。
 
-### 3.4 活性证据必须保留原始分歧
+来源：A.md 旧 544 第 3.4 节；A.md 第 0 篇 0.7。
 
-界面所称的 daemon“三证”不是约定俗成的一个健康检查名称，而是三次分别发生、分别计时的观察。
+### 4.5 events 保存过程，不伪造完美日志
 
-第一项从 pidfile 开始：文件是否存在、内容能否解析、对应 PID 在采样时是否仍有进程。用 signal probe 检查进程活性是一种可用观察，但合同要求保留的是原始分类、errno 和采样时间，而不是把 probe 的布尔结果当作 daemon 健康。
+普通、timer 与 fatal 写入口共享写入所有权；day / size rotation 分配唯一 segment，并把触发翻段的记录写入可发现文件。保证止于正常 append 与 rotation，不扩张到掉电、任意 kill point、fsync 或 crash journal。
 
-第二项只问 Unix socket 能否建立连接。它不推导 endpoint 会读取请求、完成 framing 或返回合法领域响应。
+reader 扫描 sealed segments，并跟踪 active file identity 与 byte offset；文件通知只唤醒检查。历史可按 chain、item、run、phase 与时间窗口查询。offset 只维持当前 reader 生命周期的连续性，不承诺 replay 或 gateway 重启后的旧订阅恢复。
 
-第三项发送带 request id 的 `daemon.status`，要求在 deadline 内收齐一个 envelope，验证 id 相同，并把 result 解析成精确类型。超时、EOF、半包、非法 envelope 和 daemon 返回的错误都不是成功响应。
+真实历史若有坏行、尾部 partial 或旧 payload，reader 返回明确结果，只为已证实格式建立最小兼容。UI 按“最后进展、已知死因、崩溃诊断、点名异常”等问题组织证据，并标明来源，不宣称跨来源的全局顺序或完整因果。
 
-这三项不能互相覆盖。pidfile 缺失但 RPC 成功、PID 存活但 connect 失败、connect 成功但 RPC 卡住，都要原样呈现，并附各自时间和失败原因。只有这样，首屏才不会把最有诊断价值的半死状态压成红绿灯。
+来源：A.md 旧 544 第 3.5 节。
 
-### 3.5 Events 必须保存过程，而不是伪造一条完美日志
+### 4.6 SSE 的失败边界属于 gateway
 
-假设 daemon 在一次 size rotation 附近退出。页面至少要回答三个不同的问题：已经写入主流的最后一条是什么，是否留下 stop/fatal 或崩溃线索，以及哪些异常与当前 chain/run 有关。它不需要把几个物理文件重新包装成一份“绝对真相日志”，但也不能因为来源不同就让这些证据在界面上消失。
+SSE 建立后，daemon 停止只表示暂时没有新主事件；连接与历史查询仍可用。浏览器断开时，watcher、reader、offset、interval 与 subscription 立即释放；close / enqueue race 不能杀死 gateway，后续 API 与 SSE 仍可建立。这项保证只覆盖连接生命周期与资源回收，不提供离线队列、客户端确认、replay 或 exactly-once。
 
-为了守住正常路径，普通、timer 与 fatal 写入口共享写入所有权；day/size 翻段分配唯一 segment，并把触发翻段的那条记录写入可发现的文件。该保证止于正常 append 和 rotation，不延伸到掉电、任意 kill point、fsync 或 crash journal。
+来源：A.md 旧 544 第 3.6 节。
 
-读取端扫描已封存段并跟踪 active file 的 identity 与 byte offset。文件通知只唤醒检查，不能代表“恰好来了一个事件”。浏览器可按 chain、item、runId、phase 与时间窗口查询历史。offset 只在当前 reader 生命周期中维持翻段连续性，不对外承诺 replay，也不在 gateway 重启后恢复旧订阅。
+### 4.7 历史输入是时态二固化输入的持久快照
 
-若交付范围内的真实历史暴露坏行、尾部 partial 或旧 payload，reader 要给出明确结果，并只为已经证实的格式建立最小兼容。合成非法输入仍用于验证 parser 拒绝；“以真实样本决定兼容范围”并不禁止负例 fixture。没有实际代际证据时，不预建通用版本迁移系统。
+某次 attempt 的 runner 输入在面 2 的时态二完成组装后立即固化。fresh、普通 resume 与 chain-complete finalizer 都保存 prompt 与 bindings；runner argv 和所存 prompt 使用同一个 effective input，bindings 保留当次来源与 render string，resume 保留自己的 variant 与续接 session。
 
-UI 将可回答的问题而不是物理文件名放在前面：事件历史、最后进展、已知死因、崩溃诊断与点名异常各自标来源。它不会声称这些来源共享全局顺序或完整因果。
+这就是时态二固化输入的持久快照，也就是面 7 所说的 attempt artifact。它回答“当时发了什么”，不是从 current preset、current item 或 current 文件重算出来的近似文本。
 
-### 3.6 SSE 的失败边界属于 gateway，而不是 daemon
+prompt 与 bindings 完整且属于同一 attempt identity 时才是 present。write failed、incomplete、parse failure 与 legacy missing 必须分开；写入失败不阻止 runner，但留下关联 diagnostic。页面逐字显示，不做 Markdown 渲染、插值或重放。
 
-SSE 已建立后，daemon 停止只意味着暂时没有新主事件；连接和历史查询仍可使用。浏览器断开时，watcher、reader、offset、interval 与 subscription 都应立即释放。close/enqueue race 不得杀死 gateway，断开后新的 API 与 SSE 请求必须仍可建立。
+来源：A.md 面 2 第 2 节“时态二”；A.md 旧 544 第 3.7 节。
 
-这项实现保证的是连接生命周期与资源回收，不是消息系统语义。它不提供离线队列、客户端确认、replay 或 exactly-once。
+### 4.8 current compile 与历史执行有两种时间语义
 
-### 3.7 历史 prompt 不能靠现在重新计算
+历史 attempt 页面读取时态二固化输入，回答当时执行了什么；compile 页面消费面 1 的唯一 `CompileEnvelope`，回答对当前选定稳定 source snapshot 的编译判定。两者名称相同也不能混为一个时点。
 
-某次 attempt 的真实输入由当时的 pinned definition、item 状态和 bindings 共同决定。当前 preset 即使同名，也可能已经变化。GUI 若事后调用 renderer，会生成一份新的文本并把它错误地展示成历史事实。
+一次 refresh 只消费一个 envelope。compiled 分支同时投影 normalized compiled product 与结构化 findings；rejected 分支展示非空 diagnostics。unsupported schema、invalid boundary 与 transport failure 各自呈现，不拿旧缓存或 partial product 冒充成功。
 
-每次 fresh、普通 resume 和 chain-complete finalizer attempt 都保存 `prompt.md` 与 `bindings.json`。runner argv 与 `prompt.md` 使用同一个 effective prompt；bindings 记录每个 key 的来源和当次 render string；resume 记录其 variant 和续接 session。finalizer 的固定“继续”只属于该特例。
+GUI 不读 TOML、不实现第二个 compiler，也不把 current `CompileEnvelope` 冒充历史 pinned definition。具体页面字段只消费面 1 的公共 projection，不在面 7 复制或扩写 schema。
 
-prompt 与 bindings 都完整、属于同一 attempt identity 时，artifact 才是 present。写入失败不能阻止 runner，但要留下与 attempt 关联的 diagnostic。legacy missing、write failed、incomplete 和 parse failure 分开表示，页面不能用空文本或当前重建值填补。
+来源：A.md 面 1 第 3、5 节；A.md 旧 544 第 3.8 节。
 
-spawn、retry 和 daemon restart recovery 按完整 CAP-2 identity 解引用 pinned definition，不重读当前路径。RFC 不规定 TTL、永久保留或具体 GC 算法。CAP-3 的 typed value 只能作为现有 scalar render string 上的 additive evidence，具体字段由其 owner 定义。
+### 4.9 context 页观察闭包，不建立新通道
 
-artifact 通过独立 typed route 读取，不进入 status 正文。页面逐字显示 prompt 和 bindings 对照，不做 Markdown 渲染、插值或重放。
+context 页读取面 2 词汇下的观测面：`context₀`、`context₁`、`context₂`、`context₃` 的各时态快照，填值与 measurement 的提升结果、谓词结果，以及正常 / fail 路径；对象页再关联对象域值账本。
 
-### 3.8 Current compile 与历史执行回答不同问题
+这些投影让人观察闭包内部，但不让内部事实进入 daemon 任务账本，也不改变针眼只有 `returned(value) | exception` 的边界。observed 值逐字显示、不重放、不解释；GUI 不据此补值、重跑谓词或改选路由。
 
-历史 attempt 页面回答“当时发了什么”；compile 页面回答“如果现在选择这个 preset，编译器认为什么”。同一个 definition 名称出现在两处，并不让两种时间语义变成一回事。
+具体读取合同待面 7 实现细化。本篇不虚构字段名、cursor 或存储形态；无论最终 transport 如何，schema 与事实解释权仍属于生产者，面 7 只消费 typed projection。
 
-用户选择 preset name 后，gateway 调用 CAP-7 与 CLI 共用的编译路径。一次 refresh 只接受一个带 schemaVersion 的 artifact；状态图、phase tree、variables、tools、fragments 与 findings 都从这一个结果展开，不能各自重新编译。
+来源：A.md 面 2 第 2、3、4、10 节；A.md 第 0 篇 0.7、0.8。
 
-失败页面必须避免提供“看起来差不多”的图。如果编译器明确 rejected，就展示 findings 与拒绝；如果 artifact 版本超出 consumer 能力，就显示实际版本并停止；如果 boundary 非法或 transport 失败，就说明失败发生在传输/解析而不是 preset 语义。任何一种都不能拿上一版缓存或 partial block 冒充本次成功。
+## 5. 命题三：观测与控制共享 identity，但不共享权威
 
-GUI 不读取 TOML，也不实现第二个 compiler。该页面没有历史 pinned 入口或 current/pinned 双视图；历史执行证据仍由 attempt artifact 提供。
+### 5.1 稳定 identity 使钻取落到同一对象
 
-### 3.9 Context 必须保持不透明
+URL 从 daemon、chain、item、task、run 到 phase / attempt 都携带明确 typed identity。解析结果区分对象存在、消失、过期或父子关系不成立；显示名、数组位置和“当前选择”不能替代 identity。
 
-context 页面展示的是旁路证据，不是新的控制语言。它从 daemon 的 operator read 入口消费 CAP-6，按 item 谱系、chain 公告和 group 分支组组织内容。entry 的 identity、时间、scope 与 author 由 upstream boundary 定义，body 保持不透明；分页和过滤也沿同一合同流入 gateway。
+对象域页面直接消费面 3 的群组消费结构，展示群组、消费者、committed transition、closure lifecycle、branch 与 session identity。新增 variant 必须暴露编译缺口；前端不复活旧 slot，也不从 worktree 或 Git 重建对象结构。
 
-一段 body 即使长得像 Markdown 命令、状态更新或系统提示，也只能作为原文显示。前端不解释它、不直读 store，也不根据数据库内部字段发明 cursor。
+event envelope 的 chain、item、run 与 phase identity 用于跳到对象；对象页以相同 typed filter 反查事件。共享 identity 不表示共享存储事务、时间顺序或写权威。
 
-获得 read 能力并不授予 write protocol 所有权。上传会话怎样跨重启、重复 commit 怎样处理、事件与数据库怎样协调、多久保留，都仍属于 context producer 的问题。RFC #544 只要求成功持久化的 entry 能通过正式读面到达浏览器。
+来源：A.md 旧 544 第 4.1 节；A.md 面 3 第 3、6 节。
 
-## 4. 命题三：观测与控制必须共享 identity，但不能共享权威
+### 5.2 socket transport 不把“不知道”压成“失败”
 
-### 4.1 没有稳定 identity，钻取只是页面跳转
+status query、context read 和控制动作共用 transport 地基，但不共用宽松 JSON 结果。command registry 决定 command、args、result 与 error 的对应关系；gateway 派生 client，不复制命令字符串、framing 或 response parser。
 
-当一个人把 run 页面 URL 发给另一位操作员，两人必须定位到同一次执行，而不是各自浏览器里的“当前 run”。这要求 URL 从 daemon、chain、item、run 一直到 phase/attempt 都携带明确 typed identity。解析结果要能说明对象存在、已经消失、已过期，或根本不属于 URL 所写的父对象；显示名、数组位置和当前选择都不能替代 identity。
+调用必须在 deadline 或 caller cancel 内结束，并主动销毁底层 socket。connect failure、EOF、半 frame、非法 envelope、response id mismatch、daemon 明确拒绝，以及 mutation 已发送但响应未知，必须是不同类型。
 
-task tree 直接消费 CAP-1 的 leaf/seq/par union，穷尽展示 join、reopen、closure lifecycle、branch 与 session identity。新增 variant 必须暴露编译缺口。v2 线性 chain 使用 producer 提供的退化树；前端不会复活 slot 或从 worktree/git 重建树。
+领域拒绝表示动作未接受；transport 未确定表示动作可能已提交，页面只能刷新权威事实，不能自动重发。protocol error 也不能包装成业务拒绝。
 
-event envelope 的 chain、item、runId、phase identity 用于跳到对象；对象页面用同一个 typed filter 反查事件。它们共享 identity，但不因此共享存储事务或时间顺序。
+来源：A.md 旧 544 第 4.2 节。
 
-### 4.2 Socket transport 不能把“不知道”压成失败
+### 5.3 写面是四类有限动作的闭集
 
-status query、context read 和控制动作共用一条 transport 地基，但它们不能共用一个宽松 JSON 结果。command registry 决定 command、args、result 与 error 的对应关系；gateway 从该 registry 派生 client，不复制命令字符串、framing 或 response parser。
+写面只保留四类动作：daemon 生命周期管理（start、stop、restart，并包含 dead-state start）、unblock、chain 暂停 / 恢复、item 重排。创建 chain、添加 item、batch 与其他 daemon command 不进入 Web，新命令也不会自动获得 route。
 
-一次调用必须在 deadline 或 caller cancel 内结束。到期时 client 主动销毁底层 socket，不能只是放弃 await 而留下连接。connect failure、EOF、只收到半个 frame、非法 envelope、response id 不匹配、daemon 明确拒绝，以及 mutation 已发送但响应未知，必须保持不同类型。
+除 dead-state start 由 gateway 从外部拉起 daemon，其余 mutation 都经过 engine-derived typed façade。gateway 按 mesh 信任模型以 operator 身份调用，daemon 仍是合法性裁判；页面不复制状态转移与 authority 判断，也不模拟 agent credential。
 
-这种区分直接影响人是否可以重试。daemon 的领域拒绝表示动作没有被接受；transport 未确定则可能已经提交，页面只能刷新权威事实，不能自动再发一次。反过来，protocol error 也不能被包装成普通业务拒绝，否则 parser 漂移会看起来像用户操作错误。
+每个动作区分 accepted、rejected、failed 与 transport unknown。这个闭集不要求 durable operation、query / replay、outbox、saga、command log、跨介质事务或 exactly-once。
 
-### 4.3 写面只覆盖诊断闭环需要的动作
+来源：division-plan.md“面 7”；A.md 旧 544 第 4.3、4.5 节中仍有效的动作纪律。
 
-GUI 的动作按目的分成三组。恢复观察对象时可以 start、stop 或 restart daemon；调整既有工作时可以 unblock、暂停/恢复 chain 或重排 item；遇到 evaluation 时，只在 capability 允许的情况下提交 `advance`、`hold` 或 `reopen`。
+### 5.4 成功必须回到权威读面
 
-这三组动作构成完整闭集。创建 chain、添加 item、batch 和其他 daemon command 不进入 Web，新命令也不会自动获得 route。除 dead-state start 由 gateway 从外部拉起 daemon 外，其余 mutation 都经过 engine-derived typed façade。
+按钮完成 transport 不等于 mutation 被接受；daemon 已接受但客户端先断线，也不等于失败。诊断闭环必须是：请求携带稳定 identity，daemon 返回 typed 结果，GUI 再读 canonical status 与相关 events / audit。
 
-gateway 沿既定 mesh 信任模型作为 operator 发起调用，但 daemon 仍是合法性裁判。页面不复制 target、状态转移或 authority 判断，也不以 agent credential 模拟 operator。
-
-每个动作区分 accepted、rejected、failed 与 transport 未确定结果。accepted 后，从 canonical status 读取核心状态，从相关 events/audit 获得诊断证据。这个要求不等于跨 SQLite、process、events 和 response 建立共同 commit，也不要求 durable operation、query/replay、outbox、saga、command log 或 exactly-once。
-
-### 4.4 Decision 不是另一种 resume
-
-CAP-4 evaluation 由 par/epoch identity 及 binding version 关联，decision 是 `advance | hold | reopen` ADT。页面先查询当前 operator 对该 evaluation 的 capability，只展示允许动作；没有 capability 时显示 authority gap。提交时 daemon 再检查 currentness。
-
-accepted decision 由真实 evaluator 消费。status、event 和 audit 引用同一 evaluation identity、operator 与 decision。resume、unblock、修改 join 或 reopen count 都不能替代 decision；GUI 也不能因为自己是 operator 就自授 capability。
-
-### 4.5 成功必须回到权威读面
-
-一次按钮点击可能完成 transport，却被 daemon 拒绝；也可能 daemon 已接受，但客户端在响应前断线。页面必须让这些情况保持不同。
-
-真正的诊断闭环是：动作请求携带稳定 identity，daemon 给出 typed 结果，页面再从 canonical status 和相关 events 观察变化。若结果未确定，就明确显示未确定并允许人刷新事实；不自动重放可能已经生效的动作。
+结果未确定时明确显示 unknown，并允许人刷新事实；不自动 replay 可能已经生效的动作。accepted 后也不凭 response 自行改本地领域状态，而是展示权威读面观察到的变化。
 
 ```mermaid
 sequenceDiagram
     participant U as Operator
     participant G as Gateway
     participant D as Daemon
-    participant S as Status / Events
-    U->>G: 对稳定 identity 执行动作
+    participant R as 权威读面
+    U->>G: 对稳定 identity 执行有限动作
     G->>D: typed mutation
     alt daemon 明确拒绝
         D-->>G: rejected(reason)
         G-->>U: 呈现领域拒绝
     else transport 失败或超时
-        G-->>U: transport unknown/failure
+        G-->>U: transport unknown / failure
         U->>G: 刷新事实，不自动 replay
     else accepted
         D-->>G: accepted
-        G->>S: 重新读取 canonical facts
-        S-->>G: status/events/audit
-        G-->>U: 呈现动作后的领域结果
+        G->>R: 重读 status / events / audit
+        R-->>G: owner-defined facts
+        G-->>U: 呈现动作后的权威结果
     end
 ```
 
-## 5. 命题四：GUI 的价值由诊断闭环时间衡量
+来源：A.md 旧 544 第 4.5 节；division-plan.md“面 7”。
 
-### 5.1 首屏先回答“要不要处理”
+## 6. 命题四：GUI 的价值由诊断闭环时间衡量
 
-首屏不是总览所有数据，而是压缩操作员的第一次判断。它同时显示三项 daemon 证据及采样时间、active runs、最近转移、rate-limit 冷却、当前 gate hold、点名异常、最后事件和已知死因线索。
+### 6.1 首屏先回答“要不要处理”
 
-daemon dead 时，gateway 仍显示 SQLite 终态、events 历史和诊断来源；mesh 断网时，gateway 本身不可达。两者不能共享同一个“离线”标签。
+首屏显示三项 daemon 证据与各自采样时间、active runs、最近 committed transition、rate-limit 冷却、点名异常、最后事件和已知死因线索。没有证据就显示 unknown，不根据旧时间戳、单一退出码或 Git 残迹编造死因。
 
-无证据时显示未知，不根据最后时间戳或进程退出码编造死因。首屏提供下一步入口：进入受影响 chain、查看 attempt 输入、阅读相关事件，或执行当前可用的有限动作。
+daemon dead 时，gateway 仍显示 SQLite 终态、events 历史与诊断来源；mesh 断网时 gateway 本身不可达。两者不能共享同一个“离线”标签。首屏提供进入受影响 chain、查看时态二快照、阅读相关事件或执行当前有限动作的入口。
 
-### 5.2 深入页面按问题而不是按文件组织
+来源：A.md 旧 544 第 5.1 节；A.md 第 0 篇 0.7。
 
-chain 页面解释当前状态、task tree、active run、effective hooks 与 hold；item/run/attempt 页面逐层缩小 identity，并把事件与真实输入放回同一执行语境。compile 页面解释当前定义，context 页面提供旁路原文。用户不需要知道数据来自哪个文件才能导航，但每条事实仍标明自己的 owner 和来源。
+### 6.2 深入页面按问题组织
 
-### 5.3 安装到手机不能改变事实来源
+chain 页解释当前对象域状态、群组消费结构、active run 与 operator hook 声明；item / task / run / attempt 逐层缩小 identity，并把 events、时态二快照、context 快照和副作用证据放回同一执行语境。
 
-移动入口仍是同一个 gateway。桌面与手机共享 route graph、typed clients 和 mutation façade；布局可以重排，但不能为了小屏幕改用简化 API、减少错误 variant 或建立 mobile backend。
+compile 页回答 current source snapshot 的唯一编译判定；context 页回答闭包各时态拥有什么值；副作用页回答进程、worktree、日志与 Git 留下什么。用户无需知道物理文件名，但每项事实必须标明 owner、来源与采样时点。
 
-首屏在窄 viewport 中优先放三证、active runs、异常与动作，并消除横向溢出；深层证据仍可继续钻取。可安装产物明确包含 manifest、icons 与 service worker，使页面可以加入主屏、以 standalone 窗口启动，但安装不会赋予离线读取或离线控制能力。
+来源：A.md 旧 544 第 5.2 节；division-plan.md“面 7”；A.md 面 6 第 4 节。
 
-真实请求只到 loopback 或明确 NetBird 地址。mesh membership 是既定准入边界，所以无需再叠加登录、token、SSO 或 Keycloak；同样也绝不允许 wildcard、LAN 或公网监听。
+### 6.3 移动 PWA 不改变事实来源
 
-响应式收口必须同时验证桌面非回归。PC viewport 要重新走查首屏、层级钻取、prompt/compile/context 页面和控制路径；移动布局不能通过隐藏错误、减少字段或换用不同 API 获得“适配”。
+移动与桌面共享同一个 gateway、route graph、typed clients 与 mutation façade。窄屏可重排布局，却不能改用简化 API、删减错误 variant 或建立 mobile backend。
 
-## 6. 五组反证实验如何证明系统成立
+首屏在窄 viewport 优先三证、active runs、异常与有限动作，消除横向溢出；深层证据仍可钻取。manifest、icons 与 service worker 允许加入主屏并 standalone 启动，但不承诺离线读取或离线控制。
 
-这份 RFC 不能靠“build 通过”关闭。验证应主动制造最容易让系统撒谎的场景。
+真实请求只到 loopback 或明确 NetBird 地址。mesh membership 是准入边界，不叠加应用登录、token、SSO 或 Keycloak，也不开放 wildcard、LAN 或公网监听。
 
-### 6.1 观察是否改变现场
+响应式收口必须验证桌面非回归。PC viewport 重新走首屏、identity 钻取、时态二快照、compile、context 与控制路径；移动适配不能靠隐藏错误、减少字段或切换 API 获得。
 
-准备正常数据库、live-WAL 数据库、daemon-down 数据库、缺盘、只读权限、损坏与不可消费 schema。对每种输入运行真实 CLI 和 production gateway status route，比较读取前后的文件成员、bytes、metadata、journal/schema 状态。
+来源：A.md 旧 544 第 5.3 节；division-plan.md“面 7”的 mesh-only 纪律。
 
-随后在 status 多步读取之间插入 writer barrier。结果只能是完整提交前或提交后，不能出现跨提交混合。CLI 与 HTTP 的最终 JSON 必须通过同一个 exact boundary；非法 extra 或 variant 要在消费边界被拒绝。
+## 7. 反证实验：主动制造系统最容易撒谎的场景
 
-### 6.2 观察者是否真的独立
+1. **只读资格。** 对正常、live-WAL、daemon-down、缺盘、只读权限、损坏与不兼容 schema 运行真实 CLI 和 production gateway route，比较读取前后文件成员、bytes、metadata 与 journal / schema；用 writer barrier 证明一次 status 只属于完整提交前或后。
+2. **观察者独立。** 分别杀 daemon 与 gateway，验证另一进程仍履行自己的生命周期；制造 PID / connect / RPC 三证分裂、半 frame、错误 request id、非法 envelope、deadline 与 cancel，确认原始结果保留且 socket 回收；尝试从各 request 槽切 root，全部拒绝。
+3. **实时链路诚实。** 用普通、timer、fatal writer 触发 rotation，交错 history 与 active offset；杀 daemon 后 SSE 仍存活，断开浏览器后资源释放且 gateway 可继续服务；坏行、partial 与旧 payload 得到明确结果，不伪造通用 migration。
+4. **页面展示执行事实。** 将 runner 实际输入与时态二持久快照对照，修改同名 current preset 并重启后历史内容不变；相邻 attempt 不串 identity。`CompileEnvelope` 的 compiled / rejected 与 transport 失败不混同；context observed 值逐字显示，不重放或解释。operator hook 声明与最小审计按 delivery / execution identity 对账，不做层级合成。
+5. **端到端处置。** 从 production gateway 首屏钻取 chain、item、task、run、attempt，阅读 context 与副作用两面，执行四类有限动作的可用样本，覆盖 accepted、rejected、failed 与 transport unknown，再从 status、events、audit 核验。通过真实 NetBird 手机安装 PWA 并完成至少一个生命周期或解卡动作，随后在 PC viewport 重走主路径。
 
-启动 gateway 和 daemon，记录两个 PID 与两个显式 listener。杀死 daemon，确认 gateway 页面、历史事件、持久队列和三证仍可读；从浏览器执行 start，确认新 daemon 与 gateway 解耦，三证分别翻绿。再退出 gateway，确认 daemon 仍存活。
+每次验证记录冻结 SHA、环境、root / fixture、命令、实际观察与证据位置。局部实现 issue 只证明自己的边界；跨能力 integration 与发布候选 compatibility 由各自 owner 执行，不能用一次宽泛 E2E 替代定向证据。
 
-完整矩阵还要故意制造分裂：保留活 PID 但让 socket 不可达；让假 peer 接受 connect 却不返回 RPC；返回错误 request id 或非法 envelope；删除 pidfile 但保持真实 RPC 可用。页面应分别保留 process、connect 与 RPC 的原始结果、失败原因和采样时间。另从手机断开 NetBird，对照“gateway 不可达”与“gateway 可达但 daemon dead”，证明网络故障没有被折成 daemon 状态。
+仓级红线审计还要证明：生产边界没有 `any`、匿名 domain shape、滞留 `unknown` 或越权类型断言；engine 不依赖 gateway；Web client 的 schema、command 与 parser 均来自 owner export；不存在第二 status builder、第二 compiler、平行 event shape 或裸 socket command 字符串。
 
-transport 本身用真实 Unix socket 负例验证 deadline、caller abort、EOF、半包、非法 envelope、id mismatch 与 daemon rejection。每个超时/cancel 后检查 socket 已销毁，并确认后续请求不受残留连接影响；各领域 façade 的 result/error 必须从 registry 派生，而不是测试专用 parser。
+来源：A.md 旧 544 第 6 节中仍有效的反证实验；division-plan.md“面 7”；A.md 面 1、面 2、面 6 第 4 节。
 
-测试单 root 负例：通过 path、query、body、header 和前端状态尝试切换或逃逸 root，全部拒绝。测试监听半失败：让一个必需地址不可绑定，gateway 必须清理另一个已建立 listener 并整体失败。
+## 8. 设计停止线与交付结果
 
-测试静态资产边界：正常文件可读，traversal、目录与非文件路径拒绝；不存在第二静态 server。最后以 `SIGINT` 停止，`wait` 并确认所有 listener 消失。
+本面不交付完整 CLI parity、chain / item 创建、原生移动应用、public ingress、应用层登录、SSO / token、通用 process supervisor、events replay、通用 schema migration、crash journal、跨介质原子事务、historical compile、认证重构或 durable mutation 平台。
 
-### 6.3 实时链路是否在边界上保持诚实
+这些是需求强度边界，不是实现者可以用“更稳健”为理由追加的候选。调查发现的风险可以影响实验与未来提案，但不能自动引入 outbox、saga、exactly-once、无限 retention、全局事件序或第二审计日志。
 
-用普通、timer、fatal 三类真实 writer 产生事件，触发 day/size rotation，并让 reader 在 active offset 上交错读取。检查 committed events 在正常 append/rotation 下无丢无重，history filter 同时覆盖 chain/item/runId/phase 与时间范围。
+完成后，操作员可以直接区分 gateway 网络故障与 daemon 死亡；在 daemon dead 时读取最后持久状态与 events；查看三证原始分歧；沿 identity 找到一次闭包与 attempt；对照各时态 context、谓词和正常 / fail 路径；阅读 runner 当时真正收到的固化输入；查看 worktree、进程、日志、Git 与 hook 审计；在手机或桌面执行有限动作；最后从权威 status、events 与 audit 判断结果。
 
-保持 SSE 连接后杀 daemon，连接仍存活、历史仍可查询。再强制断开客户端，确认所有 watcher/reader 被回收，gateway 未退出，新的健康请求和 SSE 可以建立。验证不要求 replay 或 restart cursor。
+面 7 建立的不是更多写权威，而是一条不会因 daemon 死亡、时间漂移、前端猜测或控制越权而断裂的人类读面。
 
-构造真实历史中的 bad/partial 或不兼容样本，确认读取结果明确；只对已经观察到的格式做最小兼容，不用合成样本证明一个并不存在的通用 migration framework。
-
-### 6.4 页面展示的是否是执行事实
-
-分别运行 fresh、普通 resume 和 finalizer attempt，记录 runner 实际 argv，并与 artifact route 返回的 prompt/bindings 对照。修改同名 preset、重启 daemon 后再读取历史 attempt，内容不能变化或被 current preset 重建。
-
-注入 artifact 写失败，runner 仍继续，页面显示 write-failed/incomplete 并能跳到 diagnostic。legacy attempt 显示 missing，而不是空 prompt。
-
-在同一 phase 制造多次 attempt，并为相邻 attempt 使用不同 prompt/bindings，逐个通过 URL 与 artifact route 读取，确认 identity 不串联。层级导航负例覆盖不存在、已过期和父子关系错误；同名不同 identity 的 event 不能跳到错误对象。task tree fixture 覆盖 leaf、seq、par、join、reopen、closure variants 以及 v2 退化树，渲染处保持穷尽。
-
-为 hooks 构造 global/chain/preset/item 四层覆盖，验证 effective view 与 source layer；进入真实 gate hold，检查 decision point、开始时间和重问线索，再解除 hold，确认 status current view 与 `hook.*` events 通过同一 identity 对账。
-
-compile 页面以 preset name 经过真实 gateway 调用 owner compiler，同时执行 CLI compile，并核对 schemaVersion 与同次 artifact 的状态图、phase tree、variables、tools、fragments、findings。分别制造 compile rejection、unsupported version、invalid boundary 和 transport failure，确认页面不使用缓存或 partial 内容冒充成功。
-
-context 则通过真实 daemon operator read 写到 gateway 再到浏览器，覆盖 item、chain、group 三种 scope。body 放入 Markdown、状态词和类似命令的文本，确认页面仍按 opaque evidence 显示；pagination/filter 使用 upstream 实际合同，非法 request 与 transport failure 进入各自 typed 状态。
-
-### 6.5 人能否完成一次端到端处置
-
-在真实 production gateway 中，从首屏进入受影响 chain，沿 item、run、attempt 到 prompt，再从事件跳回对象。执行 unblock、chain stop/resume、reorder 以及有 capability 的 decision；覆盖 accepted、rejected、failed 和 transport 未确定结果，并从 status/events/audit 核验。
-
-通过真实 NetBird 手机核对 manifest、icons 与 service worker 均由同一个 gateway 提供，再完成加入主屏、standalone 打开和至少一个生命周期/解卡动作；确认请求到达 mesh listener而不是 LAN/代理。随后在 PC viewport 重走主要页面和控制路径，证明移动改造没有回归桌面。
-
-每次验证记录冻结 SHA、环境、root/fixture、命令、实际观察和证据位置。局部产品 issue 证明自己的行为；跨能力 integration 和发布候选 compatibility 由各自 owner 执行，不能用一次宽泛 E2E 替代所有定向证据。
-
-最终 D14 证据账在同一冻结 SHA 上逐项覆盖十个关闭结果：可靠首屏、daemon-down 观察与恢复、实时推送、prompt 展示、完整层级、移动/PWA、严格 F 控制面、mesh-only、compile 预览和红线不破。某一行失败时回到对应 D1–D13 owner 修复并重跑，不允许在收尾文档中降低 expect。
-
-“红线不破”需要可重跑的仓级审计，而不是一句 code review 结论：对生产边界与新增行扫描 `any`、匿名 `object`/raw record、内部滞留的 `unknown` 和非 `as const` 类型断言；沿 import graph 证明 engine `src/` 不依赖 gateway；核对每个 Web client 的 schema、command 与 parser 都来自 owner export；确认不存在第二 status builder、第二 compiler、平行 event shape 或裸 socket command 字符串。扫描命中必须逐项解释或消除，不能用 allowlist 把新 domain 退化隐藏起来。
-
-## 7. 设计停止线
-
-以下能力不属于本 RFC：完整 CLI parity、chain/item 创建、原生移动应用、public ingress、应用层登录、SSO/token、通用 process supervisor、server/response caps 作为统一交付门槛、events replay、通用 schema migration、crash journal、跨介质原子事务、historical compile、context write recovery、认证重构和 durable mutation 平台。
-
-这些不是待选择的候选，而是需求强度的边界。调查发现的风险可以影响实验、参数或未来提案，但不能自动变成当前保证。实现不得用“更稳健”为理由引入 outbox、saga、exactly-once、无限 retention、全局事件序或第二审计日志。
-
-## 8. 实现完成后，操作员获得什么
-
-操作员不再需要先让 agent 解释系统。他可以直接区分 gateway 网络故障与 daemon 死亡；在 daemon dead 时读取最后持久状态和事件；确认进程、socket、RPC 哪一层失效；沿稳定 identity 找到具体 attempt；阅读 runner 当时真正收到的 prompt；理解 task tree、hooks、gate hold 和当前 compile；在手机或桌面执行有限动作；最后从权威 status、events 和 audit 判断结果。
-
-这就是 RFC #544 实现的核心：它不是把内部数据公开得更多，而是建立一条不会因 daemon 死亡、时间漂移、前端猜测或控制越权而断裂的证据链。
-
-## 9. 事实追溯
-
-本文用当前工作目录中的稳定与纠偏后材料核验事实，但没有沿用其章节顺序：
-
-- `SYNTH-544-gui-observability-gateway.md`：原始目标、操作员裁决与设计材料；
-- `AGG-544-gui-observability-gateway.md`：稳定能力与终态边界；
-- `expected-foundation-544.md`：修补后地基保证与明确排除项；
-- `demand-D01-544.md` 至 `demand-D14-544.md`：各能力的原子需求；
-- `supply-demand-match-544.md`：producer、consumer 与接缝所有权；
-- `rationale-analysis-544.md`、`implementation-analysis-544.md`：独立事实分析，仅作为核验输入，不作为本文结构模板。
-
+来源：A.md 旧 544 第 7、8 节；division-plan.md“面 7”；A.md 第 0 篇 0.7、0.8。
 <!-- 545 -->
 
 # 面 2：函数域运行时——闭包执行语义
