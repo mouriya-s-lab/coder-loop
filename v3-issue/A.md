@@ -6,7 +6,7 @@
 
 v3 正从六篇旧 RFC 重划为八个责任面，但重划不能让各面重新发明一套“值从哪里来、什么时候有效、失败由谁处理”的答案。此前设计的结构性问题，正是缺少共同的时态与领域边界，导致闭包内部的产值、校验和流转事实上浮为 daemon 的 gate、journal 或 finalize 协议。本文先钉住八面共享的公共模型：定义态、函数域运行时、对象域、入站边界、出站边界、hook 与 GUI 都只能消费这里规定的词汇和边界。
 
-本总纲是整个八面方案的词汇权威。标记后的六篇旧 RFC 正文仍是待重写材料，其中与本总纲冲突的部分不构成平行权威；冲突只在其余七个责任面的专属重写轮次中逐篇消解。本轮保留旧正文，不把尚未完成的局部改写伪装成已经统一的规范。
+本总纲是整个八面方案的词汇权威。八面正文已经按新划分完成重写，各面统一使用本总纲规定的词汇与边界。
 
 来源：record-3 第 12、19 轮操作员原话；八面定位与本总纲权威范围来自 division-plan.md“面 0”。
 
@@ -161,7 +161,7 @@ step 与 task 都存在“执行结束后把结果交给下一段”的动作，
 
 编译面进行两侧闭合。来源面要求每个声明值恰有一个来源，并要求所有运行时来源都有签名完整的 map 或 agent 填值声明；消费面要求 prompt 占位符、检查谓词和特殊路由读取都引用已声明且可达的值。没有消费位置的声明值、没有来源的消费值或未补完的 map 骨架都产生 finding；严格模式禁止执行不闭合的 preset。
 
-本总纲只规定值管道的责任分界，不展开 ValueType 的完整递归 ADT、代码生成文件布局、finding schema、publish/pin 或 runtime resolver。这些细节由 #547 的专属重写轮次定义，但不得改变“编译期证明可达，运行时产生结果”的边界。
+本总纲只规定值管道的责任分界，不展开 ValueType 的完整递归 ADT、代码生成文件布局、finding schema、publish/pin 或 runtime resolver。这些细节由面 1 定义，但不得改变“编译期证明可达，运行时产生结果”的边界。
 
 来源：record-3 第 3—5 轮操作员原话；唯一来源与双面 finding 的精确诊断为主 session 推导。
 
@@ -181,7 +181,7 @@ fail 是一个特殊步骤，而不是引擎硬编码的业务失败枚举。pre
 
 ## 0.7 Hook 与 GUI 是公共模型的投影
 
-hook 是挂在五时态转换点上的 **effectful subprocess runtime**，独立于既定主流转。它可以执行带外部副作用的脚本，因此“只读”不是它的能力边界；真正的边界是权威。map 由 preset 声明，产值进入 context，并参与主流转；hook 由 operator 声明，执行结果不进入 context，不拥有检查或路由的裁决权，也不产生领域 mutation 的权威。hook 即使改变了外部世界，该副作用也不能自行改写 daemon 账本或冒充 committed transition。后续 hook 责任面只围绕时态锚点、subprocess primitive、进程所有权与审计展开，不再承担 gate 状态机。
+hook 是挂在五时态转换点上的 **effectful subprocess runtime**，独立于既定主流转。它可以执行带外部副作用的脚本，因此“只读”不是它的能力边界；真正的边界是权威。map 由 preset 声明，产值进入 context，并参与主流转；hook 由 operator 声明，执行结果不进入 context，不拥有检查或路由的裁决权，也不产生领域 mutation 的权威。hook 即使改变了外部世界，该副作用也不能自行改写 daemon 账本或冒充 committed transition。面 6 只围绕时态锚点、subprocess primitive、进程所有权与审计展开，不再承担 gate 状态机。
 
 GUI 的本体是 context 与副作用的可观测手段。context 面展示被提升并参与交接的值、各时态快照、谓词结果、正常/fail 路径和对象域值账本；副作用面展示未进入交接语义但对人仍有诊断价值的 worktree、进程三证、events、日志和 Git 残迹。GUI 读取这些事实，不重建或美化它们。
 
@@ -392,7 +392,7 @@ flowchart LR
 
 ### 3.3 单 root 是进程级不动点
 
-gateway 启动时只解析一个 loop-data root，并把它存入不可变 typed runtime context。URL、query、body、header 与前端状态都不能覆盖、枚举或逃逸该 root；切换 root 只能启动另一个明确配置的 gateway 实例。status、events、时态二快照、context 观测投影、daemon pid / socket 与 gateway 自诊断全部服从同一 root。它不是 UI 默认值，而是 identity、监听面和缓存含义的进程级隔离边界。
+gateway 启动时只解析一个 loop-data root，并把它存入不可变 typed runtime 配置。URL、query、body、header 与前端状态都不能覆盖、枚举或逃逸该 root；切换 root 只能启动另一个明确配置的 gateway 实例。status、events、时态二快照、context 观测投影、daemon pid / socket 与 gateway 自诊断全部服从同一 root。它不是 UI 默认值，而是 identity、监听面和缓存含义的进程级隔离边界。
 
 来源：A.md 旧 544 第 2.3 节。
 
@@ -837,6 +837,8 @@ v2 的队列可以分别为这些问题增加条件分支，但那样得到的�
 
 设计把案例中的实体拆成三个域。对象域只有 task：A、A2、B-check、D、finalizer 都是 task。它们拥有稳定身份、在组合结构中的位置以及运行锁，但不保存 agent 的业务判断。函数域是每个 task 执行时的闭包：A 的 worktree、branch、runner session、scratch 和等待 B-check 时需要保留的现场属于这里。值域是不变数据：创建 A 的 item 是种子参数，phase 是将要调用的函数标签，status tag 是函数返回值的一部分，binding 和 exit 是参数或结果。
 
+值域不是第三个执行领域：总纲的双域对偶指的是对象域与函数域两个执行域，值域是在这两个执行域之间流动的不变数据身份；三域切分与双域对偶并不矛盾。
+
 这个切分最重要的效果是，调度器不再解释业务词。假设 C 的 agent 返回 `needs_revision`。只要它通过声明的返回 union，并由派发表接住，这就是一次正常返回；业务上是否失败由下一个 task 处理。只有 runner 崩溃或 attempts 耗尽、从而没有提交返回值，才是引擎异常。若把两者继续混成“失败状态”，scheduler 就必须知道每个 preset 的词义，并且无法区分“已产生可路由的负面结果”和“没有结果”。
 
 删除对象域与值域的分界，D 的种子数据就可能再次变成一个可变队列单元；删除对象域与函数域的分界，worktree 生命周期便会跟业务 status 绑定；删除函数域和值域的分界，session 中的临时现场可能被误当成可重放的持久输入。三域不是要求实现三个服务，而是要求跨模块数据类型不再用同一个松散 record 冒充三种身份。
@@ -845,9 +847,9 @@ v2 的队列可以分别为这些问题增加条件分支，但那样得到的�
 
 来源：沿用旧 546 §3，并以总纲的对象域、函数域、值与针眼词汇收束。【record 收敛 | record-1 assistant 评价段 | 未反驳】【旧 RFC 候选 | A.md 旧 546 §3 | 待复核】
 
-## 4. 三个时态使“定义”和“正在运行的程序”不再互相改写
+## 4. 三种事实形态使“定义”和“正在运行的程序”不再互相改写
 
-同一个工作流至少有三种不同事实。定义态描述 phase 能返回哪些 variant、每个 variant 接到什么后继、是否会 await 下级任务、chain 使用哪个 base branch，以及 finalizer 是什么。编译态把这些声明解析为精确类型并形成可引用的 compiled product。运行态只实例化已经发布并 pin 的构造，持有锁，追加事实，不修改正在运行实例的定义。定义冻结、publish、pin 与 resolver 的机制归面 1，本篇只消费 exact definition ref。
+同一个工作流至少有定义态、编译态、运行态三种事实形态。定义态描述 phase 能返回哪些 variant、每个 variant 接到什么后继、是否会 await 下级任务、chain 使用哪个 base branch，以及 finalizer 是什么。编译态把这些声明解析为精确类型并形成可引用的 compiled product。运行态只实例化已经发布并 pin 的构造，持有锁，追加事实，不修改正在运行实例的定义。定义冻结、publish、pin 与 resolver 的机制归面 1，本篇只消费 exact definition ref。
 
 这不是“chain 先配置、再编译、最后永远运行”的三段流水线。D 在 chain 已运行后追加，仍需经过自己的定义解析和编译边界。B 运行中派生 B-check 时，B-check 的定义也必须已经被 pin 并通过同样检查。运行中可以实例化新对象，但不能热改旧对象。
 
@@ -909,7 +911,7 @@ C 的 runner 崩溃并耗尽 attempts 时，没有产生函数返回值。其单
 
 业务失败完全不同。假设 A 返回 `{tag: "review_rejected", ...}`，该值是声明 union 的合法成员。派发表可以把它交给 correction task，这就相当于显式 catch。引擎不应内置“review_rejected 要重试”或“失败要通知操作员”。把业务 tag 和 exception 混合会让 validator 无法判断自己收到的是明确否决还是根本没有产出，也会诱使全局兜底绕过 preset 设计。
 
-设计允许一个受审计的前向 decision，但它只对汇合点实施一次推进，并通过与普通返回相同的提交边界。它不是回退、删除、取消、修改 join 或重新打开结束群组。它承认判定 task 自身可能坏死，同时不破坏事件前缀单调性。
+设计允许一个受审计的前向 decision，但它只对汇合点实施一次推进，并通过与普通返回相同的提交边界。它不是回退、删除、取消、修改 join 或重新打开结束群组。它承认判定 task 自身可能坏死，同时不破坏事件前缀单调性。该机制为旧 RFC 候选【旧 RFC 候选 | A.md 旧 546 §9 | 待复核】；操作员在 record-1 中将其列为悬置选择而非设计推论，待复核。
 
 用户看到的 exception 应包含 attempt 和 closure identity，并与业务返回 tag 分栏；没有消费者时界面要显示“结构在此停止”，而非永远 spinning。验证至少包括业务负面返回派生 correction、进程崩溃不产生 correction、群组隔离 exception、无消费者时开放前沿停止，以及前向 decision 只提交一次。
 
@@ -949,7 +951,7 @@ generic `held` 状态本身不被本面消费：它不是面 5 的事实 variant
 
 即使 A、B、C 在调度表中并行，如果它们共享同一可写 checkout，内容仍会互相覆盖。当前合同为每个 task 供给私有 closure：独立 worktree、引擎命名的 closure branch、runner session 和 scratch。B await 时释放运行锁，但这些现场原地保留；恢复从 closure branch tip 和保存的 session 继续，不是回到 chain base 重新开始。
 
-跨 task 的数据只能走声明通道。提交的值、Git 事实、授权 context CLI 和 chain 级 shared prompt 面各有明确用途。共享 Git 对象库、remotes、config 和 hooks 不是 task 私有状态；引擎对其中结构性写操作必须按稳定 repository identity 串行，并限制在自己的 namespace。cwd、remote URL、chain id 和 repository identity 不能互换。
+跨 task 的正式值传递只有针眼路径：`returned` 值经 committed transition 进入后继 item，并形成其初始 context。Git 世界等外部内容若要参与后继判定，必须由声明式 map 采样并提升为值；未被提升的共享文件、对象库内容都属于会被丢弃的副作用面，其结构性写入仍按稳定 repository identity 协调，并限制在引擎 namespace 内。cwd、remote URL、chain id 和 repository identity 不能互换。
 
 Git 的职责还要分清。引擎负责 fetch、解析 `chain.baseBranch` 的新鲜起点、建立 branch/worktree、保存 pin、采样终态和回收；agent 负责内容性的 commit、冲突解决、push 与 PR。base branch 的权威来自 chain 声明，prompt 或 ambient checkout 不能成为第二来源。并行成员从持久 pin 派生，避免各自在不同时间 fetch 后得到不同基底。
 
