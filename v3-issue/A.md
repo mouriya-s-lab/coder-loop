@@ -638,7 +638,7 @@ step 与 task 可以实例化同一份交接合同文法，但 step 现场仍可
 时态一开始时可见的 context 只有 `context₀` 中的 item 死值；前置 map 以当时可见的 context 和自身外部命令结果执行 `map(context, bashscript())`。
 成功返回 `Just<T>` 时，`T` 被加入 context，全部前置值共同形成 `context₁`；返回 `Nothing` 时没有 `T` 可以加入，后续需要该值的消费位置不能把缺席伪装成默认成功。
 脚本无法启动、超时、抛错或输出无法经 map 提升时，结果属于程序面异常。
-同一时态多个前置 map 是否互相可见、是否存在声明顺序，沿用面 1 的开放项；本篇不借执行器顺序替定义作出裁决。
+同一时态多个前置 map 是否互相可见、是否存在声明顺序，沿用面 1 的开放项及其推荐裁决（入口快照、互不可见、all-settled barrier，详见面 1 §2）；执行细节以该推荐裁决为准、待操作员确认，本篇不借执行器顺序替定义作出裁决。
 
 **时态二：prompt 组装。**
 进入条件是时态一已经结束且 `context₁` 可用于声明的 prompt 消费面。
@@ -1090,7 +1090,8 @@ map 骨架不是编译后的附属缓存，而是会进入后续编译、publish
 
 context 的枚举遵守五时态的单调累积。
 前置 map 的 context 只包含 item 死值。
-同一时态内多个前置 map 之间是否相互可见、按何种顺序执行仍是待复核的开放项；本篇不自行定义，也不假设有序或无序。
+同一时态内多个前置 map 之间是否相互可见、按何种顺序执行仍是待复核的开放项；在操作员裁决前，本面记录一份经讨论达成的推荐语义如下。
+**同时态 map 的落定与 barrier（推荐裁决）。** 同一前置或后置 map 时态中的 map 集合由 pinned definition 固定。所有 map 读取该时态入口处的同一份只读 context snapshot，彼此产出不可见，不存在声明顺序；运行时可以采用任意顺序与并行度，但 sibling 结局不得触发取消或跳过。每个 map 最终落为 `produced(T) | absent | fault(MapFault)`。`produced(T)` 在 barrier 前只是待提交值；barrier 收齐全部结局后，先聚合 fault，再按 compiled contract 判定必需值缺席。存在 fault 或必需值缺席时，整个 batch 只产生一次聚合的程序面异常，不发布部分 context；仅当 batch 合法时，才按唯一值名原子形成 `context₁` 或 `context₃`。不提供 preset 级 fail-fast 参数。closure 级 stop、deadline 与进程丢失属于外部中断，不是 sibling 失败传播。前置与后置 map 对称适用本规则。复用代价由观测单元级 product value 消解，不由 map 间可见性补偿。【主 session 裁决（经直连讨论轮达成，待操作员确认）| — | 待复核】
 后置 map 可以读取 item 死值、前置值与已经通过填值校验的 agent 值。
 生成器只为 map source 生成骨架，不为 item source 或 agent source 制造虚假 map，也不让后一个时态覆盖前一时态已经形成的值。
 
