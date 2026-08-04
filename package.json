@@ -3,13 +3,11 @@
 	"private": true,
 	"type": "module",
 	"bin": {
-		"coder-loop": "src/loop.ts"
+		"coder-loop": "src/v3/main.ts"
 	},
 	"scripts": {
 		"typecheck": "bun x tsc --noEmit",
-		"test:unit": "bun test",
-		"test:integration": "bun scripts/run-tests.ts --integration",
-		"test:all": "bun scripts/run-tests.ts"
+		"test:unit": "bun test tests/unit"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
@@ -17,6 +15,6 @@
 	},
 	"dependencies": {
 		"arktype": "^2.2.0",
-		"cmd-ts": "^0.15.0"
+		"effect": "^3"
 	}
 }
