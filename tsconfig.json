@@ -20,9 +20,5 @@
 		"src",
 		"tests",
 		"scripts"
-	],
-	"exclude": [
-		"scripts/issue-558-integration.ts",
-		"scripts/runner-filesystem-grants-integration.ts"
 	]
 }
