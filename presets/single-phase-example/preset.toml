@@ -1,0 +1,33 @@
+name        = "single-phase-example"
+
+[item]
+idField = "id"
+
+[statuses]
+continuable = ["pending"]
+terminal    = ["done", "exhausted"]
+# exhausted (#402): required preset declaration. The single-phase example has no
+# distinct "failure" verdict, so the attempts-exhausted落点 is its own terminal
+# status declared explicitly here and added to `terminal` so the schema validation
+# (`exhausted ∈ terminal`) passes.
+exhausted   = "exhausted"
+
+[[phases]]
+name   = "run"
+prompt = "run-entry.md"
+
+  # #397 default-deny gate: declare the single terminal status this phase writes. The smoke
+  # preset's `run` phase is the only writer, and its sole transition is to `done`. Without this
+  # declaration the default-deny gate would reject the run phase's status write at runtime
+  # (matching the gate behavior tested in daemon.test.ts).
+  [[phases.exits]]
+  status = "done"
+  when   = "The smoke item completed successfully and no further work remains."
+
+  [phases.variables]
+  ITEM_ID    = "item.id"
+  RUN_ID     = "runtime.runId"
+  TARGET_CWD = "runtime.targetCwd"
+
+[agent]
+attemptTimeoutSeconds = 3600
