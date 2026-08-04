@@ -66,7 +66,7 @@ function staleRecoveryRunExtra(worktreePath: string, overrides: JsonObject = {})
 		worktreePath,
 		branchName: "main",
 		baseCommit: "0123456789abcdef",
-		definitionKind: "preset",
+		definitionKind: "chain",
 		definitionContentIdentity: "sha256:daemon-recovery-fixture",
 		definitionPhases: [
 			{ phase: "iteration", definitionNodeId: "task:iteration" },

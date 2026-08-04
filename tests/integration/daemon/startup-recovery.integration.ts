@@ -236,7 +236,7 @@ describe("daemon", () => {
 			expect(recoveryEvents[0]).toMatchObject({
 				runId: "run-stale-217",
 				runtimeNodeId: "closure-node:1:iteration",
-				definitionRef: { kind: "preset", contentIdentity: "sha256:daemon-recovery-fixture" },
+				definitionRef: { kind: "chain", contentIdentity: "sha256:daemon-recovery-fixture" },
 				definitionNodeId: "task:iteration",
 			})
 		} finally {
@@ -326,7 +326,7 @@ describe("daemon", () => {
 				phase: "iteration",
 				pid: null,
 				runtimeNodeId: "closure-node:1:iteration",
-				definitionRef: { kind: "preset", contentIdentity: "sha256:daemon-recovery-fixture" },
+				definitionRef: { kind: "chain", contentIdentity: "sha256:daemon-recovery-fixture" },
 				definitionNodeId: "task:iteration",
 			}])
 		} finally {
