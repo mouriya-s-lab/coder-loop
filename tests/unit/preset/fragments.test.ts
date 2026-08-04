@@ -15,16 +15,16 @@ import {
 describe("issue #400 — fragment index slicing per phase", () => {
 	test("bundled preset declares roles on every phase and the engine slices accordingly", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, [...phase.roles]]))).toEqual({
+		expect(Object.fromEntries(preset.steps.map((phase) => [phase.name, [...phase.roles]]))).toEqual({
 			iteration: ["common", "quality", "iter"],
 			review: ["common", "quality", "review"],
 			"blocked-responder": ["common"],
 			"umbrella-finalizer": ["common"],
 		})
 
-		const iterationIndex = renderFragmentIndex(preset, preset.phases.find((phase) => phase.name === "iteration")!)
-		const reviewIndex = renderFragmentIndex(preset, preset.phases.find((phase) => phase.name === "review")!)
-		const blockedIndex = renderFragmentIndex(preset, preset.phases.find((phase) => phase.name === "blocked-responder")!)
+		const iterationIndex = renderFragmentIndex(preset, preset.steps.find((phase) => phase.name === "iteration")!)
+		const reviewIndex = renderFragmentIndex(preset, preset.steps.find((phase) => phase.name === "review")!)
+		const blockedIndex = renderFragmentIndex(preset, preset.steps.find((phase) => phase.name === "blocked-responder")!)
 
 		// Row #1: iteration index contains no review/* entries.
 		const iterationReviewCount = countLineMatches(iterationIndex, /\breview\//)
@@ -39,7 +39,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		expect(reviewIndex).toContain(" (review):")
 		expect(reviewIndex).toContain(" (quality):")
 		expect(reviewIndex).toContain(" (common):")
-		// Trigger phases: blocked-responder declares only common.
+		// Trigger steps: blocked-responder declares only common.
 		expect(blockedIndex).toContain(" (common):")
 		expect(blockedIndex).not.toContain(" (review):")
 		expect(blockedIndex).not.toContain(" (iter):")
@@ -50,8 +50,8 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		const root: BoundaryRecord = {
 			name: "non-convention",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
-			phases: [
+			routing: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
+			steps: [
 				{ name: "alpha", prompt: "alpha.md", variables: { K: "item.id" }, roles: ["roleA", "shared"] },
 				{ name: "beta", prompt: "beta.md", variables: { K: "item.id" }, roles: ["roleB", "shared"] },
 			],
@@ -63,11 +63,11 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			agent: { binary: "echo" },
 		}
 		const preset = parsePreset(root, "/tmp")
-		const alphaIndex = renderFragmentIndex(preset, preset.phases[0]!)
+		const alphaIndex = renderFragmentIndex(preset, preset.steps[0]!)
 		expect(alphaIndex).toContain("- alpha/only (roleA):")
 		expect(alphaIndex).toContain("- shared/common (shared):")
 		expect(alphaIndex).not.toContain("- beta/only")
-		const betaIndex = renderFragmentIndex(preset, preset.phases[1]!)
+		const betaIndex = renderFragmentIndex(preset, preset.steps[1]!)
 		expect(betaIndex).toContain("- beta/only (roleB):")
 		expect(betaIndex).toContain("- shared/common (shared):")
 		expect(betaIndex).not.toContain("- alpha/only")
@@ -77,8 +77,8 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		const root: BoundaryRecord = {
 			name: "needs-roles",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
-			phases: [
+			routing: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
+			steps: [
 				// `roles` deliberately omitted — engine must NOT infer roles from the phase name.
 				{ name: "alpha", prompt: "alpha.md", variables: { K: "item.id" } },
 			],
@@ -87,15 +87,15 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			],
 			agent: { binary: "echo" },
 		}
-		expect(() => parsePreset(root, "/tmp")).toThrow(/preset\.phases\[0\]\.roles: required when preset declares fragments/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/preset\.steps\[0\]\.roles: required when preset declares fragments/)
 	})
 
 	test("rejects phase.roles entries that name a role no fragment declares", () => {
 		const root: BoundaryRecord = {
 			name: "bad-role",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
-			phases: [
+			routing: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
+			steps: [
 				{ name: "p", prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "ghost"] },
 			],
 			fragments: [
@@ -103,15 +103,15 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			],
 			agent: { binary: "echo" },
 		}
-		expect(() => parsePreset(root, "/tmp")).toThrow(/preset\.phases\[0\]\.roles\[1\]: unrecognized role "ghost"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/preset\.steps\[0\]\.roles\[1\]: unrecognized role "ghost"/)
 	})
 
 	test("rejects duplicate role entries within a single phase", () => {
 		const root: BoundaryRecord = {
 			name: "dup-role",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
-			phases: [
+			routing: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
+			steps: [
 				{ name: "p", prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "roleA"] },
 			],
 			fragments: [
@@ -119,7 +119,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			],
 			agent: { binary: "echo" },
 		}
-		expect(() => parsePreset(root, "/tmp")).toThrow(/preset\.phases\[0\]\.roles\[1\]: duplicate role "roleA"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/preset\.steps\[0\]\.roles\[1\]: duplicate role "roleA"/)
 	})
 
 	test("Row #5: entry-prompt fragment references remain a subset of the per-phase sliced index", async () => {
@@ -136,8 +136,8 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		expect(iterTails.size).toBeGreaterThan(0)
 		expect(reviewTails.size).toBeGreaterThan(0)
 
-		const iterSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "iteration")!)
-		const reviewSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "review")!)
+		const iterSliceTails = sliceTails(preset, preset.steps.find((phase) => phase.name === "iteration")!)
+		const reviewSliceTails = sliceTails(preset, preset.steps.find((phase) => phase.name === "review")!)
 
 		// Each entry tail is satisfied when at least one sliced fragment matches
 		// it: same id, the fragment lives under that folder (entry references a
@@ -157,7 +157,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		// than any single phase slices visible.
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		const maxSliceSize = Math.max(
-			...preset.phases.map((phase) => sliceFragmentsForPhase(preset.fragments, phase.roles).length),
+			...preset.steps.map((phase) => sliceFragmentsForPhase(preset.fragments, phase.roles).length),
 		)
 		expect(maxSliceSize).toBeLessThan(preset.fragments.length)
 	})

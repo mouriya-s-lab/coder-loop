@@ -232,7 +232,7 @@ describe("small parsers", () => {
 	})
 
 	test("phase-scoped runner surfaces include only actually declared runtime binding paths", () => {
-		const phase = makeOptions().preset.phases[0]!
+		const phase = makeOptions().preset.steps[0]!
 		const declared = phaseDeclaredRuntimeBindingPaths({
 			...phase,
 			variables: [

@@ -20,7 +20,7 @@ idField = "issue"
 # resolves via the standard `[item.fields]` pipeline (no engine-builtin fallback after #419).
 issue = "number"
 
-[statuses]
+[routing]
 continuable = ["queued", "in_progress", "changes_requested"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
 success     = ["done"]
@@ -29,34 +29,34 @@ unblockable = ["blocked"]
 # exhausted (#402): required preset declaration for the attempts-exhausted落点.
 exhausted   = "exhausted"
 
-[[phases]]
+[[steps]]
 name   = "iteration"
 prompt = "iteration-entry.md"
 runner = "codex"
 model  = "gpt-5.6-terra"
 
-  [phases.variables]
+  [steps.values]
   REPO        = { source = "chain.repository", label = "GitHub repository" }
   BASE_BRANCH = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE       = { source = "item.issue", label = "Issue number", prefix = "#", suffix = "", style = "code" }
   RUN_ID      = { source = "runtime.runId", label = "Run ID" }
   ISSUE_STATUS = { source = "item.status", label = "Queue status" }
 
-[[phases]]
+[[steps]]
 name   = "review"
 prompt = "review-entry.md"
 runner = "codex"
 model  = "gpt-5.6-terra"
 
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "changes_requested"
   when   = "The PR does not satisfy the issue, or merge failed; iteration must retry."
 
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when   = "The PR was merged and GitHub closed the issue through the closing reference."
 
-  [phases.variables]
+  [steps.values]
   REPO       = { source = "chain.repository", label = "GitHub repository" }
   BASE_BRANCH = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE      = { source = "item.issue", label = "Issue number", prefix = "#", suffix = "", style = "code" }

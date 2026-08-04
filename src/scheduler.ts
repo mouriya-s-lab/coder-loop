@@ -10,7 +10,7 @@ import {
 	buildRunnerInvocation,
 	parseSessionIdFromRunnerStream,
 	phaseDeclaredRuntimeBindingPaths,
-	phaseExitsEpilogue,
+	stepHandoffsEpilogue,
 	renderFragmentIndex,
 	renderPrompt,
 	resolvePresetBusinessKeyValues,
@@ -573,7 +573,7 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		// tick. Running it before chain completion keeps the chain from draining or completing while
 		// an item has just become actionable again. #456: the legacy review-on-empty branch retired
 		// here — chain-drain side effects flow through the DSL chain-complete trigger path
-		// (`runPresetChainCompleteTriggerPhases`), which `completeChainIfReady` consults via
+		// (`runChainCompleteActivatedSteps`), which `completeChainIfReady` consults via
 		// `chainCompletionTriggerAllowsCompletion` below.
 		items = await unblockDependencySatisfiedItems(options, chain, items, chainStatuses)
 
@@ -610,10 +610,10 @@ async function resolvePhasePlanForChainWithItems(
 }
 
 function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerPhasePlan {
-	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
+	const nonTriggerPhases = preset.steps.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
 	const firstPhase = nonTriggerPhases[0]
 	if (firstPhase === undefined) throw new Error(`preset ${preset.name} has no non-trigger phases`)
-	const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
+	const itemTriggerPhases = preset.steps.flatMap((phase): SchedulerItemTriggerPhase[] => {
 		const trigger = phase.trigger
 		if (trigger === null) return []
 		if (!("afterPhase" in trigger)) return []
@@ -1670,8 +1670,8 @@ async function spawnSchedulerRun(
 			resume: resumeDecision,
 			runner: runner.kind,
 		})
-		const finalPrompt = renderedPrompt + phaseExitsEpilogue()
-		const authorizationPhase = loadedPreset.preset.phases.find((entry) => entry.name === phase)
+		const finalPrompt = renderedPrompt + stepHandoffsEpilogue()
+		const authorizationPhase = loadedPreset.preset.steps.find((entry) => entry.name === phase)
 		if (authorizationPhase === undefined) throw new SchedulerError("spawn_failed", `scheduler: preset ${loadedPreset.preset.name} does not define phase ${phase}`)
 		const runnerPlan = buildRunnerInvocation(
 			runner,
@@ -2694,7 +2694,7 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	// #456: the legacy `reviewOnEmptyLockExistsForChain` gate is retired with the review-on-empty
 	// path. Chain-drain side effects (the bundled gh-issue-pr-iteration umbrella finalizer, for
 	// example) now flow through `chainCompletionTriggerAllowsCompletion` below — the preset declares
-	// `trigger = { on = "chain-complete" }` and `runPresetChainCompleteTriggerPhases` runs them with
+	// `trigger = { on = "chain-complete" }` and `runChainCompleteActivatedSteps` runs them with
 	// `keep-active` semantics that delay completion as long as the trigger demands it.
 	options.state.finalizingChainIds.add(chain.id)
 	try {
@@ -2889,13 +2889,13 @@ async function schedulerStatusesForChainWithItems(
 
 function statusesFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerChainStatuses {
 	return {
-		pending: preset.statuses.continuable,
-		terminal: preset.statuses.terminal,
-		success: preset.statuses.success,
-		entry: preset.statuses.entry,
+		pending: preset.routing.continuable,
+		terminal: preset.routing.terminal,
+		success: preset.routing.success,
+		entry: preset.routing.entry,
 		// #402: exhausted落点 flows from the preset declaration. Membership in `terminal` is
 		// load-time-checked, so consumers can use this value directly as a write target.
-		exhausted: preset.statuses.exhausted,
+		exhausted: preset.routing.exhausted,
 	}
 }
 
@@ -3056,7 +3056,7 @@ function sanitizeRunIdPhaseSegment(phase: string): string {
 // spawn / close-handler functions, the related constants, lock helpers and run-id factory) is
 // retired. Side effects on chain-drain flow exclusively through the preset-declared
 // `trigger = { on = "chain-complete" }` phases, driven by
-// `chainCompletionTriggerAllowsCompletion` → `runPresetChainCompleteTriggerPhases`. The bundled
+// `chainCompletionTriggerAllowsCompletion` → `runChainCompleteActivatedSteps`. The bundled
 // gh-issue-pr-iteration preset's `umbrella-finalizer` phase, declared with
 // `trigger = { on = "chain-complete" }`, gives bundled chains the same drain behavior they had
 // before the role-named auto-fire path existed.
@@ -3127,7 +3127,7 @@ export type SchedulerPromptRenderInput = {
 
 export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInput): Promise<string> {
 	const preset = input.preset
-	const presetPhase = preset.phases.find((entry) => entry.name === input.phase)
+	const presetPhase = preset.steps.find((entry) => entry.name === input.phase)
 	if (presetPhase === undefined) return input.rawPrompt
 	const ctx = buildSchedulerResolveContext({
 		preset,
@@ -3436,7 +3436,7 @@ async function git(cwd: string, args: readonly string[]): Promise<{ stdout: stri
 }
 
 export async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {
-	return loaded.preset.sourceHash
+	return loaded.preset.definitionRef.contentIdentity
 }
 
 function errorMessage(error: unknown): string {

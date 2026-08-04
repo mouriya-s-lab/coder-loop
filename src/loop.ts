@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process"
-import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises"
 import { closeSync, createWriteStream, openSync, readFileSync, statSync, type Dirent, type WriteStream } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, relative, resolve, sep as pathSeparator } from "node:path"
@@ -71,9 +71,18 @@ import {
 	type InternalStatus,
 } from "./runtime-data"
 import { TaskTreeSnapshotBoundary, type TaskTreeSnapshot } from "./task-runtime"
-import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
-export { checkPresetDag } from "./preset-dag-check"
-export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
+import {
+	buildCompiledDefinitionEnvelope,
+	presetDefinitionRefFromDigest,
+	publishDefinitionBundle,
+	resolveDefinitionBundle,
+	type CompiledDefinitionEnvelope,
+	type PresetDefinitionRef,
+	type PresetDefinitionResolution,
+	type PublishedPresetDefinition,
+} from "./preset-definition"
+export { parsePresetDefinitionRef, presetDefinitionRefFromDigest } from "./preset-definition"
+export type { PresetDefinitionRef, PresetDefinitionResolution, PublishedPresetDefinition } from "./preset-definition"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -459,7 +468,7 @@ const PRESET_ITEM_FIELD_TYPES = ["string", "number", "boolean", "json"] as const
 type PresetItemFieldType = typeof PRESET_ITEM_FIELD_TYPES[number]
 
 const PresetPhaseTriggerBoundary = arkType({
-	"afterPhase?": "string",
+	"afterStep?": "string",
 	"whenStatus?": "string",
 	"on?": "string",
 })
@@ -492,9 +501,9 @@ const PresetPhaseBoundary = arkType({
 	prompt: "string",
 	"runner?": "string",
 	"model?": "string",
-	"exits?": PresetPhaseExitBoundary.array(),
-	"variables?": "object",
-	"trigger?": PresetPhaseTriggerBoundary,
+	"handoffs?": PresetPhaseExitBoundary.array(),
+	"values?": "object",
+	"activation?": PresetPhaseTriggerBoundary,
 	"roles?": "string[]",
 	"rights?": PresetPhaseRightsBoundary,
 })
@@ -509,8 +518,8 @@ const PresetTomlBoundary = arkType({
 	name: "string",
 	item: { idField: "string", "fields?": "object" },
 	"runtime?": { "businessKeys?": "string[]", "businessKeyValues?": "object" },
-	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]", exhausted: "string", "retry?": "string" },
-	phases: PresetPhaseBoundary.array(),
+	routing: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]", exhausted: "string", "retry?": "string" },
+	steps: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
 	// #433: [agent].binary / [agent].extraArgs retired (zombie schema with no read site). Runner
 	// binaries now resolve from kind→PATH name (claude/codex) inside buildAgentRunnerCommands.
@@ -530,66 +539,49 @@ const StatusSnapshotBoundary = arkType({
 
 const CompileWarningBoundary = arkType({ verdict: arkType.unit("warn"), rule: "string", message: "string" })
 export const PresetCompileErrorDiagnosticBoundary = arkType({ verdict: arkType.unit("error"), rule: "string", message: "string" })
+const DefinitionHandoffBoundary = arkType.or(
+	{ kind: arkType.unit("item-status"), status: "string", when: "string" },
+	{ kind: arkType.unit("chain-action"), action: arkType.unit("stop"), when: "string" },
+)
+const DefinitionActivationBoundary = arkType.or(
+	{ kind: arkType.unit("frontier") },
+	{ kind: arkType.unit("after-step"), step: "string", whenStatus: "string" },
+	{ kind: arkType.unit("chain-complete") },
+)
 export const PresetCompileProjectionBoundary = arkType({
-	schemaVersion: arkType.unit(1),
-	preset: {
-		name: "string", dir: "string", sourceHash: "string",
-		taskTree: { kind: arkType.unit("seq"), identity: "string" },
-	},
-	statuses: {
-		continuable: "string[]", terminal: "string[]", success: "string[]", entry: "string",
-		unblockable: "string[]", exhausted: "string", retry: "string|null",
-	},
-	stateGraph: {
-		nodes: arkType({
-			identity: "string",
-			status: "string",
-			classification: arkType.or(arkType.unit("continuable"), arkType.unit("terminal")),
-		}).array(),
-		edges: arkType.or(
-			{ kind: arkType.unit("engine-entry"), to: "string" },
-			{ kind: arkType.unit("engine-exhausted"), to: "string" },
-			{ kind: arkType.unit("engine-unblock"), from: "string", to: "string" },
-			{ kind: arkType.unit("phase-exit"), phase: "string", to: "string", when: "string" },
-		).array(),
-	},
-	phases: arkType({
-		identity: "string", name: "string",
-		exits: arkType.or(
-			{ kind: arkType.unit("item-status"), status: "string", when: "string" },
-			{ kind: arkType.unit("chain-action"), action: arkType.unit("stop"), when: "string" },
-		).array(),
-		trigger: arkType.or(
-			{ afterPhase: "string", whenStatus: "string" },
-			{ on: arkType.unit("chain-complete") },
-			"null",
-		),
-		runner: arkType.or(AgentRunnerKindBoundary, "null"), model: "string|null",
-		variables: arkType({
-			key: "string",
-			type: arkType.unit("string"),
-			sourceKind: arkType.or(arkType.unit("item"), arkType.unit("chain"), arkType.unit("runtime")),
-		}).array(),
-		toolRequirements: "string[]",
-		rights: { createItems: "boolean", writableFields: "string[]", privilegedOps: "string[]" },
-		taskTree: {
-			kind: arkType.unit("seq"), identity: "string",
-			children: arkType({ kind: arkType.unit("phase"), identity: "string", phase: "string" }).array(),
+	kind: arkType.unit("compiled"),
+	schemaVersion: arkType.unit(2),
+	envelopeIdentity: "string",
+	productIdentity: "string",
+	definitionContentIdentity: "string",
+	definitionRef: { kind: arkType.unit("preset-definition"), schemaVersion: arkType.unit(1), contentIdentity: "string" },
+	definition: {
+		name: "string",
+		item: { idField: "string", fields: arkType({ name: "string", type: "string" }).array() },
+		routing: { continuable: "string[]", terminal: "string[]", success: "string[]", entry: "string", unblockable: "string[]", exhausted: "string", retry: "string|null" },
+		root: {
+			kind: arkType.unit("sequence"), identity: "string",
+			children: arkType({
+				kind: arkType.unit("step"), identity: "string", name: "string", promptAsset: "string",
+				handoffs: DefinitionHandoffBoundary.array(), activation: DefinitionActivationBoundary,
+				runner: "string|null", model: "string|null",
+				values: arkType({ key: "string", type: arkType.unit("string"), sourceKind: arkType.or(arkType.unit("item"), arkType.unit("chain"), arkType.unit("runtime")) }).array(),
+				rights: { createItems: "boolean", writableFields: "string[]", privilegedOps: "string[]" },
+			}).array(),
 		},
-	}).array(),
-	tools: arkType({ id: "string" }).array(),
-	fragments: arkType({ id: "string", role: "string", path: "string" }).array(),
-	findings: CompileWarningBoundary.array(),
+		fragments: arkType({ id: "string", role: "string", asset: "string" }).array(),
+	},
+	findings: arkType({ identity: "string", verdict: arkType.unit("warn"), rule: "string", message: "string" }).array(),
 })
 
 export type CompileWarning = typeof CompileWarningBoundary.infer
 export type PresetCompileErrorDiagnostic = typeof PresetCompileErrorDiagnosticBoundary.infer
-export type PresetCompileProjection = typeof PresetCompileProjectionBoundary.infer
+export type PresetCompileProjection = CompiledDefinitionEnvelope
 export const PresetCompilePublicResultBoundary = arkType.or(
-	{ kind: arkType.unit("compiled"), schemaVersion: arkType.unit(1), projection: PresetCompileProjectionBoundary },
+	PresetCompileProjectionBoundary,
 	{ kind: arkType.unit("rejected"), schemaVersion: arkType.unit(1), diagnostics: arkType([PresetCompileErrorDiagnosticBoundary, "...", PresetCompileErrorDiagnosticBoundary.array()]) },
 )
-export type PresetCompilePublicResult = typeof PresetCompilePublicResultBoundary.infer
+export type PresetCompilePublicResult = PresetCompileProjection | { kind: "rejected"; schemaVersion: 1; diagnostics: readonly [PresetCompileErrorDiagnostic, ...PresetCompileErrorDiagnostic[]] }
 const PresetCompileCliArgsBoundary = arkType([
 	arkType.unit("compile"),
 	"string",
@@ -750,7 +742,7 @@ export type Preset = {
 		// semantics — fulfilling #448 / #422 "新增业务绑定只改 preset 文件".
 		businessKeyValues: ReadonlyMap<string, PresetBusinessKeyValue>
 	}
-		statuses: {
+		routing: {
 			continuable: readonly InternalStatus[]
 			terminal: readonly InternalStatus[]
 			success: readonly InternalStatus[]
@@ -770,7 +762,7 @@ export type Preset = {
 			// concept may omit it; doc builders that need it will render the empty string.
 			retry: InternalStatus | null
 		}
-	phases: readonly PresetPhase[]
+	steps: readonly PresetPhase[]
 	fragments: readonly PresetFragment[]
 	agent: {
 		attemptTimeoutSeconds: number
@@ -783,12 +775,14 @@ export type CompiledTaskTree = { identity: string; kind: "seq"; children: readon
 export type CompiledTaskModel = Preset & {
 	sourceDir: string
 	sourceHash: string
+	definitionRef: PresetDefinitionRef
 	tasks: CompiledTaskTree
 }
 
 export type CompiledPresetProduct = {
 	model: CompiledTaskModel
 	warnings: readonly CompileWarning[]
+	envelope: CompiledDefinitionEnvelope
 }
 
 export type PresetCompileSuccess = CompiledPresetProduct & {
@@ -864,14 +858,20 @@ class PresetStructureError extends Error {
 export function buildCompiledTaskTree(phases: readonly PresetPhase[]): CompiledTaskTree {
 	return {
 		kind: "seq",
-		identity: "tasks:root",
+		identity: compiledDefinitionNodeIdentity("sequence", phases.map((phase) => phase.name).join("\0")),
 		children: phases.map((phase) => ({
 			kind: "seq",
-			identity: `phase:${phase.name}`,
+			identity: compiledDefinitionNodeIdentity("step-group", phase.name),
 			phase: phase.name,
-			children: [{ kind: "phase", identity: `task:${phase.name}`, phase: phase.name }],
+			children: [{ kind: "phase", identity: compiledDefinitionNodeIdentity("step", phase.name), phase: phase.name }],
 		})),
 	}
+}
+
+function compiledDefinitionNodeIdentity(kind: "sequence" | "step-group" | "step", value: string): string {
+	const hasher = new Bun.CryptoHasher("sha256")
+	hasher.update(value)
+	return `definition-${kind}-sha256:${hasher.digest("hex")}`
 }
 
 export type PresetItemField = {
@@ -2772,7 +2772,7 @@ function formatItemExitsResult(result: JsonObject): string {
 			case "chain-action":
 				return `  - chain-action ${exit.action} (writer: coder-loop item exit-action --action ${exit.action}): ${exit.when}`
 			default:
-				return assertNeverPhaseExit(exit)
+				return assertNeverStepHandoff(exit)
 		}
 	}).join("\n")
 	return `phase: ${parsed.phase}\nexits:\n${rows}\n`
@@ -2898,72 +2898,57 @@ async function runQueueCommand(args: string[]): Promise<void> {
 }
 
 export function projectCompiledPreset(model: CompiledTaskModel, findings: readonly CompileWarning[]): PresetCompileProjection {
-	const statusNodes = [...model.statuses.continuable, ...model.statuses.terminal].map((status) => ({
-		identity: `status:${status}`,
-		status,
-		classification: model.statuses.continuable.includes(status) ? "continuable" as const : "terminal" as const,
-	}))
-	const phaseEdges = model.phases.flatMap((phase) => phase.exits
-		.filter((exit): exit is PresetPhaseExitItemStatus => exit.kind === "item-status")
-		.map((exit) => ({ kind: "phase-exit" as const, phase: phase.name, to: exit.status, when: exit.when })))
-	const projection = {
-		schemaVersion: 1 as const,
-		preset: {
-			name: model.name,
-			dir: model.sourceDir,
-			sourceHash: model.sourceHash,
-			taskTree: { kind: model.tasks.kind, identity: model.tasks.identity },
+	const projection = buildCompiledDefinitionEnvelope({
+		name: model.name,
+		sourceHash: model.sourceHash,
+		item: {
+			idField: model.item.idField,
+			fields: [...model.item.fields.entries()].map(([name, field]) => ({ name, type: field.type })),
 		},
-		statuses: {
-			continuable: [...model.statuses.continuable],
-			terminal: [...model.statuses.terminal],
-			success: [...model.statuses.success],
-			entry: model.statuses.entry,
-			unblockable: [...model.statuses.unblockable],
-			exhausted: model.statuses.exhausted,
-			retry: model.statuses.retry,
+		routing: {
+			continuable: [...model.routing.continuable],
+			terminal: [...model.routing.terminal],
+			success: [...model.routing.success],
+			entry: model.routing.entry,
+			unblockable: [...model.routing.unblockable],
+			exhausted: model.routing.exhausted,
+			retry: model.routing.retry,
 		},
-		stateGraph: {
-			nodes: statusNodes,
-			edges: [
-				{ kind: "engine-entry" as const, to: model.statuses.entry },
-				{ kind: "engine-exhausted" as const, to: model.statuses.exhausted },
-				...model.statuses.unblockable.map((from) => ({ kind: "engine-unblock" as const, from, to: model.statuses.entry })),
-				...phaseEdges,
-			],
-		},
-		phases: model.phases.map((phase) => {
-			const taskTree = model.tasks.children.find((candidate) => candidate.phase === phase.name)
-			if (taskTree === undefined) throw new CoderLoopError(`compiled task tree missing phase ${phase.name}`)
-			return ({
-			identity: taskTree.identity,
+		steps: model.steps.map((phase) => ({
 			name: phase.name,
-			exits: [...phase.exits],
-			trigger: phase.trigger,
+			promptAsset: relative(model.presetDir, phase.prompt),
+			handoffs: [...phase.exits],
+			activation: phase.trigger === null
+				? { kind: "frontier" as const }
+				: "on" in phase.trigger
+					? { kind: "chain-complete" as const }
+					: { kind: "after-step" as const, step: phase.trigger.afterPhase, whenStatus: phase.trigger.whenStatus },
 			runner: phase.defaultRunner,
 			model: phase.defaultModel,
-			variables: phase.variables.map((variable) => ({ key: variable.key, type: "string" as const, sourceKind: variable.source.kind })),
-			toolRequirements: [],
+			values: phase.variables.map((variable) => ({ key: variable.key, type: "string" as const, sourceKind: variable.source.kind })),
 			rights: { createItems: phase.rights.createItems, writableFields: [...phase.rights.writableFields], privilegedOps: [...phase.rights.privilegedOps] },
-			taskTree: {
-				kind: taskTree.kind,
-				identity: taskTree.identity,
-				children: taskTree.children.map((child) => ({ ...child })),
-			},
-		})}),
-		tools: [],
-		fragments: model.fragments.map((fragment) => ({ id: fragment.id, role: fragment.role, path: relative(model.presetDir, fragment.path) })),
-		findings: [...findings],
-	}
+		})),
+		fragments: model.fragments.map((fragment) => ({ id: fragment.id, role: fragment.role, asset: relative(model.presetDir, fragment.path) })),
+		findings,
+	})
 	PresetCompileProjectionBoundary.assert(projection)
 	return projection
 }
 
 export function projectPresetCompileResult(result: CompileResult): PresetCompilePublicResult {
 	const projected = result.kind === "compiled"
-		? { kind: "compiled" as const, schemaVersion: 1 as const, projection: projectCompiledPreset(result.model, result.warnings) }
+		? result.envelope
 		: { kind: "rejected" as const, schemaVersion: 1 as const, diagnostics: result.diagnostics }
-	return PresetCompilePublicResultBoundary.assert(projected)
+	PresetCompilePublicResultBoundary.assert(projected)
+	return projected
+}
+
+export async function publishPresetDefinition(result: PresetCompileSuccess, storeRoot: string): Promise<PublishedPresetDefinition> {
+	return await publishDefinitionBundle(result.envelope, result.model.sourceDir, storeRoot)
+}
+
+export async function resolvePresetDefinition(ref: PresetDefinitionRef, storeRoot: string): Promise<PresetDefinitionResolution> {
+	return await resolveDefinitionBundle(ref, storeRoot)
 }
 
 function parsePresetCompileCliArgs(args: string[]): PresetCompileCliArgs {
@@ -2998,7 +2983,7 @@ async function runPresetCommand(args: string[]): Promise<void> {
 	}
 	const publicResult = projectPresetCompileResult(result)
 	if (publicResult.kind !== "compiled") throw new CoderLoopError("compiled result projection changed variant")
-	process.stdout.write(`${JSON.stringify(publicResult.projection)}\n`)
+	process.stdout.write(`${JSON.stringify(publicResult)}\n`)
 }
 
 async function main() {
@@ -3086,7 +3071,7 @@ function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: Chain
 	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(resolved)
-	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, runnerCommands)
+	const defaultRunner = selectPhaseDefaultRunner(firstFrontierStepForDefinition(preset), preset, runnerCommands)
 
 	return {
 		targetCwd,
@@ -3339,11 +3324,11 @@ function pickFirstSelectableStatusItem(
 	itemPresets: StatusItemPresetResolver,
 ): SelectedIssue | null {
 	// #412: continuable membership is a per-item preset question — different items in a mixed-preset
-	// chain may have entirely disjoint status vocabularies. Reading `options.preset.statuses` here
+	// chain may have entirely disjoint status vocabularies. Reading `options.preset.routing` here
 	// (the chain seed) makes foreign-preset items unselectable once chain-preset items finish.
 	const currentItem = current === null ? null : findCurrentItem(current, items, itemPresets)
 	const isContinuableForItem = (item: ItemRecord): boolean =>
-		itemPresets.presetForItem(item).statuses.continuable.includes(item.status)
+		itemPresets.presetForItem(item).routing.continuable.includes(item.status)
 	const selected = currentItem !== null && isContinuableForItem(currentItem)
 		? currentItem
 		: items.find(isContinuableForItem) ?? null
@@ -3355,7 +3340,7 @@ function pickFirstSelectableStatusItem(
 	const evidenceDir = resolveChainEvidenceDir(options, chain, selected, selectedId, "Selected evidence directory")
 	const agentCwd = selected.agentCwd ?? options.targetCwd
 	const selectedInput = phaseRunnerSelectionInputForPreset(options, selectedPreset)
-	const runner = selectRunnerForPhase(firstNonTriggerPhaseForPreset(selectedPreset).name, selected, selectedInput)
+	const runner = selectRunnerForPhase(firstFrontierStepForDefinition(selectedPreset).name, selected, selectedInput)
 	return { item: selected, issueFile, evidenceDir, agentCwd, runner }
 }
 
@@ -3383,7 +3368,7 @@ function findCurrentItem(
 
 function phaseRunnerSelectionInputForPreset(options: LoopOptions, preset: Preset): PhaseRunnerSelectionInput {
 	if (preset === options.preset) return options
-	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, options.runnerCommands)
+	const defaultRunner = selectPhaseDefaultRunner(firstFrontierStepForDefinition(preset), preset, options.runnerCommands)
 	return { preset, defaultRunner, runnerCommands: options.runnerCommands }
 }
 
@@ -3397,8 +3382,8 @@ function buildStatusQueueSnapshotFromRecords(
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
 	// #412: in a mixed-preset chain, a single status name (e.g. `pending`) can be continuable
 	// under one preset and absent under another. Decide per item, against the item's own preset.
-	const isContinuable = (item: ItemRecord): boolean => itemPresets.presetForItem(item).statuses.continuable.includes(item.status)
-	const isTerminal = (item: ItemRecord): boolean => itemPresets.presetForItem(item).statuses.terminal.includes(item.status)
+	const isContinuable = (item: ItemRecord): boolean => itemPresets.presetForItem(item).routing.continuable.includes(item.status)
+	const isTerminal = (item: ItemRecord): boolean => itemPresets.presetForItem(item).routing.terminal.includes(item.status)
 	const selectedPreset = selected === null ? null : itemPresets.presetForItem(selected.item)
 	return {
 		total: items.length,
@@ -4383,129 +4368,15 @@ function findOwnedLiveProcess(snapshot: CoderLoopStatusSnapshot): StatusProcessI
 	return snapshot.processes.live.find((entry) => entry.alive && entry.matchesTarget) ?? null
 }
 
-// --- preset materialization ---
-//
-// `{{PRESET_ROOT}}` is an engine-owned template token that preset source md
-// files use for cross-file references. Fragments and phase entries live in
-// the same preset tree but reference each other via absolute paths (agents
-// run in random worktrees, so relative references cannot resolve). The
-// engine materializes the entire preset directory to
-// `<loopDataRoot>/preset-materialized/<name>-<hash>/`, replacing every
-// occurrence of the token with the target directory's absolute path in all
-// `.md` files. Non-md files (e.g. `preset.toml`, `templates/*`) are copied
-// verbatim. Hash is derived from the sorted (relpath, contents) tuple so
-// unchanged sources reuse the same target; a source change produces a new
-// target directory. Materialization is preset-agnostic: the engine only
-// knows the reserved token and the copy layout, not any preset-specific
-// file name or structure.
-//
-// Materialization is opt-in via `LoadPresetOptions.materialize`. Daemon
-// callers pass `{ root: this.paths.root }`; direct unit tests that only
-// exercise the parser can omit it (the token is substituted in-memory at
-// prompt-read time — `readPresetPhasePrompt` + daemon prompt read use
-// `substitutePresetRootToken` unconditionally so both modes yield prompts
-// that never contain the token when validation or rendering sees them).
+// `{{PRESET_ROOT}}` resolves against the verified immutable bundle's asset
+// root for daemon consumers and against the source snapshot for one-shot
+// compile consumers. The token is interpreted only after the definition has
+// been compiled; it never creates a second path-keyed definition authority.
 export const PRESET_ROOT_TOKEN = "{{PRESET_ROOT}}"
-export const PRESET_MATERIALIZED_DIRNAME = "preset-materialized"
 
-export type PresetMaterializeResult = {
-	promptRoot: string
-	contentHash: string
-	dirName: string
-}
-
-export async function materializePreset(sourceDir: string, materializeRoot: string): Promise<PresetMaterializeResult> {
-	const sourceAbs = resolve(sourceDir)
-	const name = basename(sourceAbs)
-	const files = await collectPresetSourceFiles(sourceAbs)
-	const hasher = new Bun.CryptoHasher("sha256")
-	for (const rel of files) {
-		hasher.update(rel)
-		hasher.update("\0")
-		hasher.update(await readPresetSourceBytes(resolve(sourceAbs, rel)))
-		hasher.update("\0")
-	}
-	const contentHash = hasher.digest("hex").slice(0, 16)
-	const rootDir = resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME)
-	const dirName = `${name}-${contentHash}`
-	const target = resolve(rootDir, dirName)
-	const marker = resolve(target, PRESET_MATERIALIZED_MARKER_FILENAME)
-	try {
-		if ((await stat(marker)).isFile()) return { promptRoot: target, contentHash, dirName }
-	} catch (error) {
-		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
-	}
-	// A previous partial materialization (marker missing) needs to be wiped
-	// before we recreate the target — the source may have changed in a way
-	// that removed files, and a leftover copy would leak into the fresh view.
-	await rm(target, { recursive: true, force: true })
-	const stagingDir = resolve(rootDir, `.staging-${name}-${contentHash}-${process.pid}-${Date.now().toString(36)}`)
-	await mkdir(stagingDir, { recursive: true })
-	try {
-		for (const rel of files) {
-			const src = resolve(sourceAbs, rel)
-			const dst = resolve(stagingDir, rel)
-			await mkdir(dirname(dst), { recursive: true })
-			if (rel.endsWith(".md")) {
-				const content = await readPresetSourceText(src)
-				await writeFile(dst, substitutePresetRootToken(content, target))
-			} else {
-				const bytes = await readPresetSourceBytes(src)
-				await writeFile(dst, bytes)
-			}
-		}
-		await writeFile(resolve(stagingDir, PRESET_MATERIALIZED_MARKER_FILENAME), "")
-		try {
-			await rename(stagingDir, target)
-		} catch (error) {
-			// Race: another process finalized the same content-hash target
-			// concurrently. Discard our staging copy and reuse theirs.
-			try {
-				if ((await stat(marker)).isFile()) {
-					await rm(stagingDir, { recursive: true, force: true })
-					return { promptRoot: target, contentHash, dirName }
-				}
-			} catch {
-				// fall through
-			}
-			throw error
-		}
-	} finally {
-		// Best-effort cleanup on failure — if rename succeeded, the staging
-		// dir is already gone, so rm on the missing path is a no-op.
-		await rm(stagingDir, { recursive: true, force: true }).catch(() => {})
-	}
-	// Prune older materialized copies of the same preset name so a series
-	// of source edits doesn't grow the loop-data footprint without bound.
-	// Only siblings that share the `<name>-` prefix (a different hash for
-	// the same preset) are removed; other presets in the shared root
-	// (`gh-issue-pr-iteration-*`, `engine-integration-*`, `real-e2e-minimal-*`, …) stay untouched.
-	// Runs from concurrent daemons on a shared root would race here, but
-	// the daemon is singleton per loop-data-root by design.
-	await prunePresetSiblingsForName(rootDir, name, dirName)
-	return { promptRoot: target, contentHash, dirName }
-}
-
-async function prunePresetSiblingsForName(rootDir: string, name: string, currentDirName: string): Promise<void> {
-	let entries: string[]
-	try {
-		entries = await readdir(rootDir)
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return
-		throw error
-	}
-	const prefix = `${name}-`
-	for (const entry of entries) {
-		if (entry === currentDirName) continue
-		if (!entry.startsWith(prefix)) continue
-		await rm(resolve(rootDir, entry), { recursive: true, force: true }).catch(() => {})
-	}
-}
-
-const PRESET_MATERIALIZED_MARKER_FILENAME = ".materialized-complete"
-
-async function collectPresetSourceFiles(sourceDir: string): Promise<string[]> {
+async function collectPresetSourceFiles(sourceDir: string, excludedRoot?: string): Promise<string[]> {
 	const out: string[] = []
+	const excluded = excludedRoot === undefined ? null : resolve(excludedRoot)
 	const walk = async (dir: string): Promise<void> => {
 		let entries: Dirent[]
 		try {
@@ -4515,14 +4386,9 @@ async function collectPresetSourceFiles(sourceDir: string): Promise<string[]> {
 			throw error
 		}
 		for (const entry of entries) {
-			// Skip nothing — `.md` files, `preset.toml`, `templates/*`, and any
-			// author-supplied auxiliary file should all appear in the materialized
-			// copy. The one carve-out is our own marker file, which cannot be
-			// present in a source tree by construction but we defensively drop it
-			// anyway to keep hash stable if an author ever creates a colliding
-			// filename.
-			if (entry.name === PRESET_MATERIALIZED_MARKER_FILENAME) continue
+			// Every author-supplied file is part of the immutable definition asset set.
 			const full = resolve(dir, entry.name)
+			if (excluded !== null && (full === excluded || full.startsWith(`${excluded}${pathSeparator}`))) continue
 			if (entry.isDirectory()) {
 				await walk(full)
 			} else if (entry.isFile()) {
@@ -4535,57 +4401,22 @@ async function collectPresetSourceFiles(sourceDir: string): Promise<string[]> {
 	return out
 }
 
-// Substitute the engine-owned `{{PRESET_ROOT}}` token with the given absolute
-// directory. Called both physically at materialization time (writing the copied
-// md files) and in-memory at prompt-read time (so tests that skip materialize
-// still get post-substitution content). Idempotent: content without the token
-// short-circuits, and re-invoking on already-substituted content is a no-op
-// (materialized files contain no token).
+// Substitute the engine-owned `{{PRESET_ROOT}}` token with the selected verified
+// asset root. Idempotent for content that has already been resolved.
 export function substitutePresetRootToken(text: string, presetDir: string): string {
 	return text.includes(PRESET_ROOT_TOKEN) ? text.replaceAll(PRESET_ROOT_TOKEN, presetDir) : text
 }
 
-// Prune stale materialized dirs. Called from daemon start so a series of
-// preset edits doesn't grow the loop-data footprint without bound. `keep` is
-// the set of dir basenames the daemon has just materialized (or wants to
-// preserve). Staging dirs from prior crashes are also removed unless
-// currently in flight — daemon start runs after any prior process died, so
-// none should be live.
-export async function prunePresetMaterializedRoot(
-	materializeRoot: string,
-	keep: ReadonlySet<string>,
-): Promise<void> {
-	const rootDir = resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME)
-	let entries: string[]
-	try {
-		entries = await readdir(rootDir)
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return
-		throw error
-	}
-	for (const entry of entries) {
-		if (keep.has(entry)) continue
-		await rm(resolve(rootDir, entry), { recursive: true, force: true }).catch(() => {})
-	}
-}
-
 export type LoadPresetOptions = {
 	onValidationFinding?: (finding: PresetPlaceholderFinding) => void
-	// #408 cross-table DAG checker callback. Invoked once per finding before
-	// loadPreset throws (for error verdicts) so daemons can record warn AND
-	// error findings on the unified observability stream alongside the
-	// placeholder findings — both run in the same load attempt, both feed the
-	// same audit surface.
-	onDagFinding?: (finding: PresetDagFinding) => void
-	// Materialize the preset directory to `<root>/preset-materialized/<name>-<hash>/`
-	// before parsing. When set, `preset.presetDir` and every fragment/prompt path
-	// resolves to that materialized copy — `{{PRESET_ROOT}}` in md files has been
-	// physically substituted with the target absolute path. When omitted, the
-	// source directory is parsed directly and `{{PRESET_ROOT}}` is substituted
-	// only in-memory at prompt-read time. Daemon callers must set this so agents
-	// spawned in random worktrees read stable materialized paths.
-	materialize?: { root: string }
+	// Daemon consumers publish the compiled source snapshot here and read prompts
+	// from the verified exact-ref bundle. One-shot compile consumers may omit it.
+	definitionStore?: { root: string }
 }
+
+export type ResolvedPresetLoad =
+	| { kind: "loaded"; preset: CompiledTaskModel; envelope: CompiledDefinitionEnvelope; bundleDir: string }
+	| Extract<PresetDefinitionResolution, { kind: "corrupt" }>
 
 export async function compilePreset(sourceDir: string, options: LoadPresetOptions = {}): Promise<CompileResult> {
 	try {
@@ -4605,11 +4436,28 @@ export async function loadPreset(sourceDir: string, options: LoadPresetOptions =
 	return result.model
 }
 
+export async function loadPresetFromDefinition(ref: PresetDefinitionRef, storeRoot: string): Promise<ResolvedPresetLoad> {
+	const resolved = await resolveDefinitionBundle(ref, storeRoot)
+	if (resolved.kind === "corrupt") return resolved
+	const assetRoot = resolve(resolved.bundleDir, "assets")
+	const product = await compilePresetOrThrow(assetRoot, {})
+	if (
+		product.envelope.productIdentity !== resolved.envelope.productIdentity
+		|| product.envelope.definitionContentIdentity !== resolved.envelope.definitionContentIdentity
+	) {
+		return {
+			kind: "corrupt",
+			ref,
+			reason: "identity-mismatch",
+			detail: "verified assets do not hydrate the manifest's compiled product identity",
+		}
+	}
+	return { kind: "loaded", preset: product.model, envelope: resolved.envelope, bundleDir: resolved.bundleDir }
+}
+
 async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOptions): Promise<CompiledPresetProduct> {
 	const sourceAbs = resolve(sourceDir)
-	const presetDir = options.materialize
-		? (await materializePreset(sourceDir, options.materialize.root)).promptRoot
-		: sourceAbs
+	const presetDir = sourceAbs
 	const tomlPath = resolve(presetDir, "preset.toml")
 	const raw = await readPresetSourceText(tomlPath)
 	let parsed: BoundaryValue
@@ -4634,29 +4482,10 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		}
 		throw error
 	}
-	// #408 cross-table DAG check runs immediately after `parsePreset` returns
-	// the parsed shape and BEFORE per-phase prompt template validation. Order
-	// matters for the operator-facing error: a deadlock or dead-vocabulary
-	// finding is structural metadata drift (a phase-exit table missing an
-	// edge) and is more actionable than a placeholder typo in a prompt the
-	// drift would have made unreachable anyway.
-	const dagFindings = checkPresetDag(preset)
 	const warnings: CompileWarning[] = []
-	const dagErrors: PresetDagFinding[] = []
-	for (const finding of dagFindings) {
-		options.onDagFinding?.(finding)
-		if (finding.verdict === "error") dagErrors.push(finding)
-		else warnings.push({ verdict: "warn", rule: finding.kind, message: finding.message })
-	}
-	if (dagErrors.length > 0) {
-		const diagnostics = dagErrors.map((finding): PresetCompileErrorDiagnostic => ({ verdict: "error", rule: finding.kind, message: finding.message }))
-		const first = diagnostics[0]
-		if (first === undefined) throw new CoderLoopError("non-empty DAG errors lost during conversion")
-		throw new PresetCompileFailure([first, ...diagnostics.slice(1)])
-	}
 	const phases: PresetPhase[] = []
 	const placeholderErrors: PresetPlaceholderFinding[] = []
-	for (const phase of preset.phases) {
+	for (const phase of preset.steps) {
 		const prompt = await readPresetPhasePrompt(phase, presetDir)
 		assertRoleEntryHasNoFrontmatter(prompt, `preset phase "${phase.name}" prompt`)
 		const findings = validatePresetPhaseTemplate(prompt, phase, phase.prompt)
@@ -4683,22 +4512,31 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 	for (const fragment of preset.fragments) {
 		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
 	}
-	const sourceHash = await hashPresetSource(sourceAbs)
-	return {
-		model: {
-			...preset,
-			phases,
-			sourceDir: sourceAbs,
-			sourceHash,
-			tasks: buildCompiledTaskTree(phases),
-		},
-		warnings,
+	const sourceHash = await hashPresetSource(sourceAbs, options.definitionStore?.root)
+	const sourceModel: CompiledTaskModel = {
+		...preset,
+		steps: phases,
+		sourceDir: sourceAbs,
+		sourceHash,
+		definitionRef: presetDefinitionRefFromDigest(sourceHash),
+		tasks: buildCompiledTaskTree(phases),
 	}
+	const envelope = projectCompiledPreset(sourceModel, warnings)
+	if (options.definitionStore === undefined) return { model: sourceModel, warnings, envelope }
+	const published = await publishDefinitionBundle(envelope, sourceAbs, options.definitionStore.root)
+	const assetRoot = resolve(published.bundleDir, "assets")
+	const model: CompiledTaskModel = {
+		...sourceModel,
+		presetDir: assetRoot,
+		steps: sourceModel.steps.map((step) => ({ ...step, prompt: resolve(assetRoot, relative(sourceAbs, step.prompt)) })),
+		fragments: sourceModel.fragments.map((fragment) => ({ ...fragment, path: resolve(assetRoot, relative(sourceAbs, fragment.path)) })),
+	}
+	return { model, warnings, envelope }
 }
 
-async function hashPresetSource(sourceDir: string): Promise<string> {
+async function hashPresetSource(sourceDir: string, excludedRoot?: string): Promise<string> {
 	const hasher = new Bun.CryptoHasher("sha256")
-	for (const rel of await collectPresetSourceFiles(sourceDir)) {
+	for (const rel of await collectPresetSourceFiles(sourceDir, excludedRoot)) {
 		hasher.update(rel)
 		hasher.update("\0")
 		hasher.update(await readPresetSourceBytes(resolve(sourceDir, rel)))
@@ -4710,46 +4548,46 @@ async function hashPresetSource(sourceDir: string): Promise<string> {
 export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	const root = assertArk(PresetTomlBoundary, value, "preset")
 
-	for (const status of root.statuses.continuable) {
-		if (root.statuses.terminal.includes(status)) presetError(`preset.statuses: "${status}" appears in both continuable and terminal`)
+	for (const status of root.routing.continuable) {
+		if (root.routing.terminal.includes(status)) presetError(`preset.routing: "${status}" appears in both continuable and terminal`)
 	}
-	const continuableStatuses = root.statuses.continuable.map((status, index) => parseInternalStatus(status, `preset.statuses.continuable[${index}]`))
-	const terminalStatuses = root.statuses.terminal.map((status, index) => parseInternalStatus(status, `preset.statuses.terminal[${index}]`))
-	const successStatusNames = root.statuses.success ?? []
-	const successStatuses = successStatusNames.map((status, index) => parseInternalStatus(status, `preset.statuses.success[${index}]`))
+	const continuableStatuses = root.routing.continuable.map((status, index) => parseInternalStatus(status, `preset.routing.continuable[${index}]`))
+	const terminalStatuses = root.routing.terminal.map((status, index) => parseInternalStatus(status, `preset.routing.terminal[${index}]`))
+	const successStatusNames = root.routing.success ?? []
+	const successStatuses = successStatusNames.map((status, index) => parseInternalStatus(status, `preset.routing.success[${index}]`))
 	for (const status of successStatusNames) {
-		if (!root.statuses.terminal.includes(status)) presetError(`preset.statuses.success: "${status}" must be one of statuses.terminal`)
+		if (!root.routing.terminal.includes(status)) presetError(`preset.routing.success: "${status}" must be one of routing.terminal`)
 	}
-	const entryStatusName = root.statuses.entry ?? root.statuses.continuable[0]
-	if (entryStatusName === undefined) presetError("preset.statuses: continuable must declare at least one status")
-	if (!root.statuses.continuable.includes(entryStatusName)) presetError(`preset.statuses.entry: "${entryStatusName}" must be one of statuses.continuable`)
-	const entryStatus = parseInternalStatus(entryStatusName, "preset.statuses.entry")
-	const unblockableStatusNames = root.statuses.unblockable ?? []
-	const unblockableStatuses = unblockableStatusNames.map((status, index) => parseInternalStatus(status, `preset.statuses.unblockable[${index}]`))
+	const entryStatusName = root.routing.entry ?? root.routing.continuable[0]
+	if (entryStatusName === undefined) presetError("preset.routing: continuable must declare at least one status")
+	if (!root.routing.continuable.includes(entryStatusName)) presetError(`preset.routing.entry: "${entryStatusName}" must be one of routing.continuable`)
+	const entryStatus = parseInternalStatus(entryStatusName, "preset.routing.entry")
+	const unblockableStatusNames = root.routing.unblockable ?? []
+	const unblockableStatuses = unblockableStatusNames.map((status, index) => parseInternalStatus(status, `preset.routing.unblockable[${index}]`))
 	const seenUnblockableStatuses = new Set<string>()
 	for (const status of unblockableStatusNames) {
-		if (!root.statuses.terminal.includes(status)) presetError(`preset.statuses.unblockable: "${status}" must be one of statuses.terminal`)
-		if (seenUnblockableStatuses.has(status)) presetError(`preset.statuses.unblockable: duplicate status "${status}"`)
+		if (!root.routing.terminal.includes(status)) presetError(`preset.routing.unblockable: "${status}" must be one of routing.terminal`)
+		if (seenUnblockableStatuses.has(status)) presetError(`preset.routing.unblockable: duplicate status "${status}"`)
 		seenUnblockableStatuses.add(status)
 	}
 	// #402: exhaustedStatus is a required preset declaration (D2 verdict). The arktype boundary
 	// already rejects a missing field with the field path, but the value must also be a member of
 	// the terminal vocabulary so the engine can write it without re-validating the contract on
 	// each transition.
-	if (!root.statuses.terminal.includes(root.statuses.exhausted)) {
-		presetError(`preset.statuses.exhausted: "${root.statuses.exhausted}" must be one of statuses.terminal`)
+	if (!root.routing.terminal.includes(root.routing.exhausted)) {
+		presetError(`preset.routing.exhausted: "${root.routing.exhausted}" must be one of routing.terminal`)
 	}
-	const exhaustedStatus = parseInternalStatus(root.statuses.exhausted, "preset.statuses.exhausted")
+	const exhaustedStatus = parseInternalStatus(root.routing.exhausted, "preset.routing.exhausted")
 	// #404: preset declares the retry status name so doc builders never carry it as a literal.
-	const retryStatusName = root.statuses.retry ?? null
+	const retryStatusName = root.routing.retry ?? null
 	let retryStatus: InternalStatus | null = null
 	if (retryStatusName !== null) {
-		if (!root.statuses.continuable.includes(retryStatusName)) {
-			presetError(`preset.statuses.retry: "${retryStatusName}" must be one of statuses.continuable`)
+		if (!root.routing.continuable.includes(retryStatusName)) {
+			presetError(`preset.routing.retry: "${retryStatusName}" must be one of routing.continuable`)
 		}
-		retryStatus = parseInternalStatus(retryStatusName, "preset.statuses.retry")
+		retryStatus = parseInternalStatus(retryStatusName, "preset.routing.retry")
 	}
-	const statusNames = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
+	const statusNames = new Set<string>([...root.routing.continuable, ...root.routing.terminal])
 	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
 	// #419: post-#419 the `idField` value lives inside the per-item `extra` JSON under the same key
 	// (the items physical-shape retire moved `issue_number` integer column → `item_id` opaque string
@@ -4787,17 +4625,17 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 
 	const phaseNames = new Set<string>()
 	const phases: PresetPhase[] = []
-	for (const [index, entry] of root.phases.entries()) {
-		if (phaseNames.has(entry.name)) presetError(`preset.phases[${index}].name: duplicate name "${entry.name}"`)
+	for (const [index, entry] of root.steps.entries()) {
+		if (phaseNames.has(entry.name)) presetError(`preset.steps[${index}].name: duplicate name "${entry.name}"`)
 		phaseNames.add(entry.name)
-		const variablesRaw = entry.variables ?? {}
-		if (!isObjectRecord(variablesRaw)) presetError(`preset.phases[${index}].variables: must be an object`)
+		const variablesRaw = entry.values ?? {}
+		if (!isObjectRecord(variablesRaw)) presetError(`preset.steps[${index}].values: must be an object`)
 		const variables: PresetPhaseVariable[] = []
 		for (const [key, val] of Object.entries(variablesRaw)) {
-			const variable = parseVariableBinding(val, `preset.phases[${index}].variables.${key}`)
-			const parsedSource = parseVariableSource(variable.source, `preset.phases[${index}].variables.${key}`)
+			const variable = parseVariableBinding(val, `preset.steps[${index}].values.${key}`)
+			const parsedSource = parseVariableSource(variable.source, `preset.steps[${index}].values.${key}`)
 			if (parsedSource.kind !== "chain" && variable.chainFallback.kind !== "none") {
-				presetError(`preset.phases[${index}].variables.${key}.default: defaults are only supported for chain bindings`)
+				presetError(`preset.steps[${index}].values.${key}.default: defaults are only supported for chain bindings`)
 			}
 			const baseSource: PresetVariableSource = parsedSource.kind === "chain"
 				? { ...parsedSource, fallback: variable.chainFallback }
@@ -4805,35 +4643,35 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			if (baseSource.kind === "item") {
 				const itemField = itemFieldRoot(baseSource.field)
 				if (!isKnownPresetItemField(itemField, root.item.idField, itemFields)) {
-					presetError(`preset.phases[${index}].variables.${key}: unrecognized item field "${baseSource.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
+					presetError(`preset.steps[${index}].values.${key}: unrecognized item field "${baseSource.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
 				}
 			}
 			let source: PresetVariableSource = baseSource
 			if (baseSource.kind === "runtime" && !isEngineRuntimeBindingKey(baseSource.key)) {
 				if (!runtimeBusinessKeySet.has(baseSource.key)) {
-					presetError(`preset.phases[${index}].variables.${key}: unknown runtime key "${baseSource.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
+					presetError(`preset.steps[${index}].values.${key}: unknown runtime key "${baseSource.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
 				}
 				source = { ...baseSource, ownership: "preset" }
 			}
 			variables.push({ key, source, doc: variable.doc })
 		}
-			const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
-			const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
-			const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
-			const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
+			const trigger = parseStepActivation(entry.activation ?? null, `preset.steps[${index}].activation`)
+			const runner = parsePhaseRunner(entry.runner ?? null, `preset.steps[${index}].runner`)
+			const model = parsePhaseModel(entry.model ?? null, `preset.steps[${index}].model`)
+			const exits = parseStepHandoffs(entry.handoffs ?? [], `preset.steps[${index}].handoffs`)
 		const roles = parsePresetPhaseRoles(
 			entry.roles ?? null,
 			fragments.length > 0,
 			fragmentRoles,
-			`preset.phases[${index}].roles`,
+			`preset.steps[${index}].roles`,
 		)
 		// #407 normalize the optional `[phases.rights]` segment to a default-deny runtime record.
 		// Missing segment → every field false / empty set; the gate downstream never has to branch
 		// on "rights absent". Schema parsing is the only place that knows about the toml-side shape.
-		const rights = parsePresetPhaseRights(entry.rights ?? null, `preset.phases[${index}].rights`)
+		const rights = parsePresetPhaseRights(entry.rights ?? null, `preset.steps[${index}].rights`)
 		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
 	}
-	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
+	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.steps: must include at least one non-trigger phase")
 
 		for (const [index, phase] of phases.entries()) {
 			const phaseExitStatuses = new Set<string>()
@@ -4842,40 +4680,40 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 				switch (exit.kind) {
 					case "item-status": {
 						if (!statusNames.has(exit.status)) {
-							presetError(`preset.phases[${index}].exits.status: unrecognized status "${exit.status}"`)
+							presetError(`preset.steps[${index}].handoffs.status: unrecognized status "${exit.status}"`)
 						}
 						if (phaseExitStatuses.has(exit.status)) {
-							presetError(`preset.phases[${index}].exits.status: duplicate status "${exit.status}"`)
+							presetError(`preset.steps[${index}].handoffs.status: duplicate status "${exit.status}"`)
 						}
 						phaseExitStatuses.add(exit.status)
 						break
 					}
 					case "chain-action": {
 						if (phaseExitChainActions.has(exit.action)) {
-							presetError(`preset.phases[${index}].exits.chainAction: duplicate action "${exit.action}"`)
+							presetError(`preset.steps[${index}].handoffs.chainAction: duplicate action "${exit.action}"`)
 						}
 						phaseExitChainActions.add(exit.action)
 						break
 					}
 					default:
-						assertNeverPhaseExit(exit)
+						assertNeverStepHandoff(exit)
 				}
 			}
 			if (phase.trigger === null) continue
-			if (isChainCompleteTrigger(phase.trigger)) continue
+			if (isChainCompleteActivation(phase.trigger)) continue
 			const trigger = phase.trigger
 			if (!phaseNames.has(trigger.afterPhase)) {
-				presetError(`preset.phases[${index}].trigger.afterPhase: unrecognized phase "${trigger.afterPhase}"`)
+				presetError(`preset.steps[${index}].activation.afterStep: unrecognized step "${trigger.afterPhase}"`)
 			}
 			if (!statusNames.has(trigger.whenStatus)) {
-				presetError(`preset.phases[${index}].trigger.whenStatus: unrecognized status "${trigger.whenStatus}"`)
+				presetError(`preset.steps[${index}].activation.whenStatus: unrecognized status "${trigger.whenStatus}"`)
 			}
 			const triggerSourcePhase = phases.find((candidate) => candidate.name === trigger.afterPhase)
 			// #405: trigger linkage is keyed on item-status only (no chain-action exit can be
 			// the `whenStatus` of another phase — chain-action exits do not write item status).
 			const triggerSourceExits = new Set((triggerSourcePhase?.exits ?? []).flatMap((exit) => exit.kind === "item-status" ? [exit.status] : []))
 			if (!triggerSourceExits.has(trigger.whenStatus)) {
-				presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" item-status exits`)
+				presetError(`preset.steps[${index}].activation.whenStatus: status "${trigger.whenStatus}" is not declared by step "${trigger.afterPhase}" item-status handoffs`)
 			}
 		}
 
@@ -4884,8 +4722,8 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
 		runtime: { businessKeys: runtimeBusinessKeys, businessKeyValues: runtimeBusinessKeyValues },
-			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses, exhausted: exhaustedStatus, retry: retryStatus },
-		phases,
+		routing: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses, exhausted: exhaustedStatus, retry: retryStatus },
+		steps: phases,
 		fragments,
 		agent: { attemptTimeoutSeconds },
 	}
@@ -5160,7 +4998,7 @@ function parsePhaseModel(value: BoundaryValue, label: string): string | null {
 	return value
 }
 
-function parsePresetPhaseExits(value: BoundaryValue, label: string): PresetPhaseExit[] {
+function parseStepHandoffs(value: BoundaryValue, label: string): PresetPhaseExit[] {
 	// #405 ADT: arktype's `or` returns a union — narrow per entry on the
 	// discriminating field present in the wire shape. The discriminated TS shape
 	// (`kind`) is inserted here so downstream consumers stay union-switching
@@ -5207,9 +5045,9 @@ function itemFieldRoot(field: string): string {
 	return field.split(".")[0] ?? field
 }
 
-function parsePresetPhaseTrigger(value: typeof PresetPhaseTriggerBoundary.infer | null, label: string): PresetPhaseTrigger | null {
+function parseStepActivation(value: typeof PresetPhaseTriggerBoundary.infer | null, label: string): PresetPhaseTrigger | null {
 	if (value === null) return null
-	const hasAfterPhase = value.afterPhase !== undefined
+	const hasAfterPhase = value.afterStep !== undefined
 	const hasWhenStatus = value.whenStatus !== undefined
 	const hasOn = value.on !== undefined
 	if (hasOn) {
@@ -5217,11 +5055,11 @@ function parsePresetPhaseTrigger(value: typeof PresetPhaseTriggerBoundary.infer 
 		if (hasAfterPhase || hasWhenStatus) presetError(`${label}: chain-complete trigger cannot also declare afterPhase/whenStatus`)
 		return { on: "chain-complete" }
 	}
-	if (hasAfterPhase && hasWhenStatus) return { afterPhase: value.afterPhase!, whenStatus: parseInternalStatus(value.whenStatus!, `${label}.whenStatus`) }
-	presetError(`${label}: trigger must declare either afterPhase + whenStatus or on = "chain-complete"`)
+	if (hasAfterPhase && hasWhenStatus) return { afterPhase: value.afterStep!, whenStatus: parseInternalStatus(value.whenStatus!, `${label}.whenStatus`) }
+	presetError(`${label}: activation must declare either afterStep + whenStatus or on = "chain-complete"`)
 }
 
-function isChainCompleteTrigger(trigger: PresetPhaseTrigger): trigger is { on: "chain-complete" } {
+function isChainCompleteActivation(trigger: PresetPhaseTrigger): trigger is { on: "chain-complete" } {
 	return "on" in trigger
 }
 
@@ -5302,7 +5140,7 @@ function selectRunnerForItemOverride(item: Pick<ItemRecord, "runner">, input: Pi
 }
 
 function phaseByName(preset: Preset, phaseName: string): PresetPhase {
-	const phase = preset.phases.find((entry) => entry.name === phaseName)
+	const phase = preset.steps.find((entry) => entry.name === phaseName)
 	if (phase === undefined) fail(`preset ${preset.name} does not define phase "${phaseName}"`)
 	return phase
 }
@@ -5348,13 +5186,13 @@ export function selectPhaseDefaultRunner(phase: PresetPhase, _preset: Preset, co
 
 export function selectPhaseDefaultRunners(preset: Preset, commands: AgentRunnerCommands): Record<string, AgentRunnerSelection> {
 	const runners: Record<string, AgentRunnerSelection> = {}
-	for (const phase of preset.phases) runners[phase.name] = selectPhaseDefaultRunner(phase, preset, commands)
+	for (const phase of preset.steps) runners[phase.name] = selectPhaseDefaultRunner(phase, preset, commands)
 	return runners
 }
 
 export function selectPhaseRunnersForItem(preset: Preset, item: Pick<ItemRecord, "runner">, commands: AgentRunnerCommands): Record<string, AgentRunnerSelection> {
 	const runners: Record<string, AgentRunnerSelection> = {}
-	for (const phase of preset.phases) {
+	for (const phase of preset.steps) {
 		const override = allowsItemRunnerOverride(phase) ? selectRunnerForItemOverride(item, { runnerCommands: commands }) : null
 		runners[phase.name] = override === null ? selectPhaseDefaultRunner(phase, preset, commands) : applyPhaseDefaultModel(override, phase)
 	}
@@ -5376,7 +5214,7 @@ export type BuildPhaseRunnerSelectionFromChainInput = {
 export function buildPhaseRunnerSelectionFromChain(input: BuildPhaseRunnerSelectionFromChainInput): PhaseRunnerSelectionInput {
 	const resolved = chainResolvedFromChain(input.chain, input.loopDataRoot)
 	const runnerCommands = buildAgentRunnerCommands(resolved)
-	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(input.preset), input.preset, runnerCommands)
+	const defaultRunner = selectPhaseDefaultRunner(firstFrontierStepForDefinition(input.preset), input.preset, runnerCommands)
 	return { preset: input.preset, defaultRunner, runnerCommands }
 }
 
@@ -5390,18 +5228,18 @@ export function resolvePhaseRunnerFromChain(input: ResolvePhaseRunnerFromChainIn
 	return selectRunnerForPhase(input.phase, input.item, selection)
 }
 
-export function firstNonTriggerPhaseForPreset(preset: Preset): PresetPhase {
-	const phase = preset.phases.find((entry) => entry.trigger === null) ?? preset.phases[0]
+export function firstFrontierStepForDefinition(preset: Preset): PresetPhase {
+	const phase = preset.steps.find((entry) => entry.trigger === null) ?? preset.steps[0]
 	if (phase === undefined) fail("preset must define at least one phase")
 	return phase
 }
 
-export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: InternalStatus): readonly PresetPhase[] {
-	return preset.phases.filter((phase) => phase.trigger !== null && !isChainCompleteTrigger(phase.trigger) && phase.trigger.afterPhase === afterPhase && phase.trigger.whenStatus === status)
+export function stepsActivatedAfter(preset: Preset, afterPhase: string, status: InternalStatus): readonly PresetPhase[] {
+	return preset.steps.filter((phase) => phase.trigger !== null && !isChainCompleteActivation(phase.trigger) && phase.trigger.afterPhase === afterPhase && phase.trigger.whenStatus === status)
 }
 
-export function chainCompleteTriggerPhases(preset: Preset): readonly PresetPhase[] {
-	return preset.phases.filter((phase) => phase.trigger !== null && isChainCompleteTrigger(phase.trigger))
+export function chainCompleteActivatedSteps(preset: Preset): readonly PresetPhase[] {
+	return preset.steps.filter((phase) => phase.trigger !== null && isChainCompleteActivation(phase.trigger))
 }
 
 export type PresetChainCompleteDecision =
@@ -5423,14 +5261,14 @@ export type RunPresetChainCompleteTriggerPhasesInput = {
 	onStatusPersistenceFailure?: (failure: RunnerStatusPersistenceFailure) => void
 }
 
-export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainCompleteTriggerPhasesInput): Promise<PresetChainCompleteDecision | null> {
+export async function runChainCompleteActivatedSteps(input: RunPresetChainCompleteTriggerPhasesInput): Promise<PresetChainCompleteDecision | null> {
 	const rawTargetCwd = input.targetCwd ?? input.items[0]?.repoCwd
 	if (rawTargetCwd === undefined || rawTargetCwd.trim() === "") throw new Error(`chain ${input.chain.id} has no item repoCwd for chain-complete trigger`)
 	const targetCwd = resolve(rawTargetCwd)
 	const resolved = chainResolvedFromChain(input.chain, input.loopDataRoot)
 	const presetDir = input.presetDir ?? resolvePresetDir(resolved, PKG_ROOT, targetCwd)
 	const preset = input.preset ?? await loadPreset(presetDir)
-	const phases = chainCompleteTriggerPhases(preset)
+	const phases = chainCompleteActivatedSteps(preset)
 	if (phases.length === 0) return null
 
 	const options = buildOptions(targetCwd, {
@@ -5599,11 +5437,11 @@ async function collectStatusRuntimeErrors(
 		// gate in a mixed-preset chain. id duplication is checked per item-preset idField rather than
 		// per chain-seed idField because two different presets may use different idField names.
 		const itemPreset = itemPresets.presetForItem(item)
-		const allowedStatusesForItem = new Set<string>([...itemPreset.statuses.continuable, ...itemPreset.statuses.terminal])
+		const allowedStatusesForItem = new Set<string>([...itemPreset.routing.continuable, ...itemPreset.routing.terminal])
 		const idAsString = getItemId(item, itemPreset)
 		if (seenIds.has(idAsString)) pushCheckError(errors, `${label}.${itemPreset.item.idField}`, `duplicate id "${idAsString}"`)
 		seenIds.add(idAsString)
-		if (!allowedStatusesForItem.has(item.status)) pushCheckError(errors, `${label}.status`, `status "${item.status}" is not in preset.statuses (continuable + terminal)`)
+		if (!allowedStatusesForItem.has(item.status)) pushCheckError(errors, `${label}.status`, `status "${item.status}" is not in preset.routing (continuable + terminal)`)
 		if (!Number.isInteger(item.attempts) || item.attempts < 0) pushCheckError(errors, `${label}.attempts`, "must be a non-negative integer")
 		if (item.title !== null && item.title.trim() === "") pushCheckError(errors, `${label}.title`, "must be null or non-empty")
 		if (item.priority !== null && item.priority.trim() === "") pushCheckError(errors, `${label}.priority`, "must be null or non-empty")
@@ -5635,11 +5473,11 @@ async function collectStatusRuntimeErrors(
 		// the scheduler spawned the run from that preset's phase plan.
 		const currentItem = findCurrentItem(current, items, itemPresets)
 		const currentItemPreset = currentItem === null ? options.preset : itemPresets.presetForItem(currentItem)
-		const allowedPhasesForCurrent = new Set<string>(currentItemPreset.phases.map((phase) => phase.name))
+		const allowedPhasesForCurrent = new Set<string>(currentItemPreset.steps.map((phase) => phase.name))
 		const currentIdField = currentItemPreset.item.idField
 		if (currentItem === null) pushCheckError(errors, `state.current.${currentIdField}`, "current item is not present in queue")
-		else if (!currentItemPreset.statuses.continuable.includes(currentItem.status)) pushCheckError(errors, `state.current.${currentIdField}`, `id "${getItemId(currentItem, currentItemPreset)}" has non-continuable status ${currentItem.status}`)
-		if (!allowedPhasesForCurrent.has(current.phase)) pushCheckError(errors, "state.current.phase", `phase "${current.phase}" is not declared in preset.phases`)
+		else if (!currentItemPreset.routing.continuable.includes(currentItem.status)) pushCheckError(errors, `state.current.${currentIdField}`, `id "${getItemId(currentItem, currentItemPreset)}" has non-continuable status ${currentItem.status}`)
+		if (!allowedPhasesForCurrent.has(current.phase)) pushCheckError(errors, "state.current.phase", `phase "${current.phase}" is not declared in preset.steps`)
 		if (current.runId.trim() === "") pushCheckError(errors, "state.current.runId", "must not be empty")
 	}
 
@@ -5808,7 +5646,7 @@ function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, c
 		assertRuntimeSourceDeclared(source)
 		switch (source.key) {
 			case "runtimeInputsDoc": return renderRuntimeInputsDoc(phase, ctx)
-			case "phaseExitsDoc": return renderPhaseExitsDoc(phase)
+			case "phaseExitsDoc": return renderStepHandoffsDoc(phase)
 			// #404: per-phase-sliced docs. The render function owns the slice policy
 			// (caller does not pre-slice) so a new phase added to a preset cannot
 			// silently widen the visibility surface.
@@ -5835,7 +5673,7 @@ export function renderRuntimeInputsDoc(phase: PresetPhase, ctx: ResolveContext):
 	return lines.join("\n")
 }
 
-export function renderPhaseExitsDoc(phase: PresetPhase): string {
+export function renderStepHandoffsDoc(phase: PresetPhase): string {
 	if (phase.exits.length === 0) return ""
 	// #405 ADT: doc renders both branches with stable, distinguishable shapes —
 	// item-status branches show the status word the agent must write; chain-action
@@ -5847,7 +5685,7 @@ export function renderPhaseExitsDoc(phase: PresetPhase): string {
 			case "chain-action":
 				return `- chain-action \`${exit.action}\`: ${exit.when}`
 			default:
-				return assertNeverPhaseExit(exit)
+				return assertNeverStepHandoff(exit)
 		}
 	}).join("\n")
 }
@@ -5870,8 +5708,8 @@ export function renderPhaseExitsDoc(phase: PresetPhase): string {
 // the slice spans both halves; a single bullet when it's one status. Render
 // the empty string only when no status falls in the slice.
 export function renderStatusVocabularyDoc(phase: PresetPhase, preset: Preset): string {
-	const continuable = new Set<string>(preset.statuses.continuable)
-	const terminal = new Set<string>(preset.statuses.terminal)
+	const continuable = new Set<string>(preset.routing.continuable)
+	const terminal = new Set<string>(preset.routing.terminal)
 	const slice = statusVocabularySlice(phase, preset)
 	if (slice.size === 0) return ""
 	const actionable = [...slice].filter((status) => continuable.has(status))
@@ -5883,13 +5721,13 @@ export function renderStatusVocabularyDoc(phase: PresetPhase, preset: Preset): s
 }
 
 function statusVocabularySlice(phase: PresetPhase, preset: Preset): ReadonlySet<string> {
-	if (phase.trigger !== null && !isChainCompleteTrigger(phase.trigger)) {
+	if (phase.trigger !== null && !isChainCompleteActivation(phase.trigger)) {
 		return new Set<string>([phase.trigger.whenStatus])
 	}
 	if (phase.exits.length > 0) {
-		return new Set<string>([...preset.statuses.continuable, ...preset.statuses.terminal])
+		return new Set<string>([...preset.routing.continuable, ...preset.routing.terminal])
 	}
-	return new Set<string>(preset.statuses.continuable)
+	return new Set<string>(preset.routing.continuable)
 }
 
 function joinStatusList(statuses: readonly string[]): string {
@@ -5901,7 +5739,7 @@ function joinStatusList(statuses: readonly string[]): string {
 // render the empty string — their prompts should not bind this key.
 export function renderTriggerStatusDoc(phase: PresetPhase): string {
 	if (phase.trigger === null) return ""
-	if (isChainCompleteTrigger(phase.trigger)) return ""
+	if (isChainCompleteActivation(phase.trigger)) return ""
 	return phase.trigger.whenStatus
 }
 
@@ -5909,25 +5747,25 @@ export function renderTriggerStatusDoc(phase: PresetPhase): string {
 //   - phases that classify items (review): full terminal vocabulary.
 //   - all other phases: terminal vocabulary they must not write themselves
 //     (boundary-statement doc) — useful for iteration's MUST-NOT prose.
-// Always renders the full `preset.statuses.terminal` list because there is no
+// Always renders the full `preset.routing.terminal` list because there is no
 // meaningful narrower slice (a phase's "you must not write these" set is the
 // whole terminal set, by definition of terminal). Empty when the preset
 // declares no terminal statuses.
 export function renderTerminalStatusesDoc(phase: PresetPhase, preset: Preset): string {
 	// `phase` is part of the signature for symmetry with the other builders and to
 	// keep call-sites uniform; the slice policy is preset-wide today.
-	if (preset.statuses.terminal.length === 0) return ""
+	if (preset.routing.terminal.length === 0) return ""
 	void phase
-	return joinStatusList(preset.statuses.terminal)
+	return joinStatusList(preset.routing.terminal)
 }
 
-// Single retry status doc. Renders `preset.statuses.retry` verbatim (backticks
+// Single retry status doc. Renders `preset.routing.retry` verbatim (backticks
 // added) so md fragments can reference the "previous attempt requires another
 // iteration" status without copying the string. A preset that did not declare
 // `[statuses].retry` renders the empty string — fragments that bind this key
 // require the preset to declare the field.
 export function renderRetryStatusDoc(preset: Preset): string {
-	const retry = preset.statuses.retry
+	const retry = preset.routing.retry
 	if (retry === null) return ""
 	return `\`${retry}\``
 }
@@ -5946,14 +5784,14 @@ export function phaseWritableStatuses(phase: PresetPhase): readonly InternalStat
 	return phase.exits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])
 }
 
-export function phaseChainActions(phase: PresetPhase): readonly PresetPhaseChainAction[] {
+export function stepChainActions(phase: PresetPhase): readonly PresetPhaseChainAction[] {
 	// #405 narrow: chain-action branches the agent may select via the dedicated
 	// exit-action CLI. Used by the engine to gate `coder-loop item exit-action`
 	// against the phase's declared options.
 	return phase.exits.flatMap((exit) => exit.kind === "chain-action" ? [exit.action] : [])
 }
 
-function assertNeverPhaseExit(value: never): never {
+function assertNeverStepHandoff(value: never): never {
 	throw new Error(`unhandled phase-exit kind: ${JSON.stringify(value)}`)
 }
 
@@ -5972,7 +5810,7 @@ function assertNeverPhaseExit(value: never): never {
 // (#409); the engine maps the selected `chain-action: stop` exit to the same
 // code path operator `chain stop` runs (D1: scheduler stops selecting from this
 // chain, in-flight runs naturally complete, `chain resume` reversible).
-export function phaseExitsEpilogue(): string {
+export function stepHandoffsEpilogue(): string {
 	return [
 		"",
 		"",

@@ -8,9 +8,11 @@ import { type as arkType } from "arktype"
 import {
 	buildPhaseRunnerSelectionFromChain,
 	loadPreset,
-	phaseChainActions,
+	loadPresetFromDefinition,
+	parsePresetDefinitionRef,
+	stepChainActions,
 	phaseWritableStatuses,
-	runPresetChainCompleteTriggerPhases,
+	runChainCompleteActivatedSteps,
 	substitutePresetRootToken,
 	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
@@ -18,7 +20,6 @@ import {
 	type JsonObject,
 	type JsonValue,
 	type LoadPresetOptions,
-	type PresetDagFinding,
 	type PresetPhaseChainAction,
 	type PresetPhaseRights,
 	type PresetPlaceholderFinding,
@@ -1149,6 +1150,15 @@ function collectTaskClosures(node: TaskNodeSnapshot): ClosureSnapshot[] {
 	return node.children.flatMap(collectTaskClosures)
 }
 
+function findItemDefinitionRef(node: TaskNodeSnapshot, itemRowId: number): TaskNodeIdentity["definitionRef"] | null {
+	if (node.kind === "leaf") return node.closure.itemRowId === itemRowId ? node.identity.definitionRef : null
+	for (const child of node.children) {
+		const ref = findItemDefinitionRef(child, itemRowId)
+		if (ref !== null) return ref
+	}
+	return null
+}
+
 function assertNeverTaskNode(node: never): never {
 	throw new DaemonError("internal_error", `unhandled task node: ${JSON.stringify(node)}`)
 }
@@ -1184,7 +1194,6 @@ export class CoderLoopDaemon {
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
 	private readonly decisionFingerprints = new DecisionFingerprintState()
-	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
 	private latestLifecycleEventPersistenceFailure: ObservabilityEvent | null = null
 	private latestRunnerStatusPersistenceFailure: ObservabilityEvent | null = null
 	private globalHookDeclarations: readonly HookDeclaration[] = []
@@ -2074,7 +2083,7 @@ export class CoderLoopDaemon {
 					})
 					throw resolveError
 				}
-				const presetPhase = preset.phases.find((entry) => entry.name === caller.phase)
+				const presetPhase = preset.steps.find((entry) => entry.name === caller.phase)
 				const presetName = preset.name
 				// Narrow the engine's audit-vocabulary `PrivilegedOpAuditOp` (8 ops total) down
 				// to the preset's grantable subset `PresetPhasePrivilegedOp` (today: only
@@ -2464,10 +2473,10 @@ export class CoderLoopDaemon {
 			: null
 		const pendingStatusSet = presetForStatus === null
 			? new Set<InternalStatus>()
-			: new Set(presetForStatus.preset.statuses.continuable)
+			: new Set(presetForStatus.preset.routing.continuable)
 		const terminalStatusSet = presetForStatus === null
 			? new Set<InternalStatus>()
-			: new Set(presetForStatus.preset.statuses.terminal)
+			: new Set(presetForStatus.preset.routing.terminal)
 		const continuableStatusNames = [...pendingStatusSet]
 		const terminalStatusNames = [...terminalStatusSet]
 		const dependencyWaits = listDependencyWaitReasons(items, { statuses: continuableStatusNames, terminalStatusNames })
@@ -2757,7 +2766,7 @@ export class CoderLoopDaemon {
 			if (item === null) {
 				throw new DaemonError("not_found", `queue.unblock: item ${issue} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
 			}
-			if (!preset.statuses.unblockable.includes(item.status)) {
+			if (!preset.routing.unblockable.includes(item.status)) {
 				return {
 					mutation: {
 						changed: false,
@@ -2767,7 +2776,7 @@ export class CoderLoopDaemon {
 					},
 				}
 			}
-			const entryStatus = preset.statuses.entry
+			const entryStatus = preset.routing.entry
 			const current = store.listCurrentRuns(chain.id).find((run) => run.extra.itemId === item.id) ?? null
 			// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
 			// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
@@ -2779,7 +2788,7 @@ export class CoderLoopDaemon {
 			if (!dryRun) {
 				store.updateItem(item.id, {
 					// #397: queue.unblock is operator-issued — restore the item to the preset's entry
-					// status. The value comes from preset.statuses.entry (engine-derived), so we brand
+					// status. The value comes from preset.routing.entry (engine-derived), so we brand
 					// through the narrow engine-lifecycle constructor.
 					status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
 					updatedAt: unixSeconds(),
@@ -3131,7 +3140,7 @@ export class CoderLoopDaemon {
 		if (status !== null) {
 			assignOptional(input, "status", await this.admitItemStatusForRequest(chain, item, status, caller.subject))
 			const { preset } = await this.loadedPresetForItem(chain, item, "item.update.terminal-statuses")
-			terminalStatusesForUpdate = new Set(preset.statuses.terminal)
+			terminalStatusesForUpdate = new Set(preset.routing.terminal)
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
@@ -3303,9 +3312,9 @@ export class CoderLoopDaemon {
 		const chain = store.getChain(item.chainId)
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		const { preset } = await this.loadedPresetForItem(chain, item, "item.exits")
-		const presetPhase = preset.phases.find((entry) => entry.name === agentPhase)
+		const presetPhase = preset.steps.find((entry) => entry.name === agentPhase)
 		if (presetPhase === undefined) {
-			const knownPhases = preset.phases.map((entry) => entry.name)
+			const knownPhases = preset.steps.map((entry) => entry.name)
 			throw new DaemonError(
 				"invalid_request",
 				`item.exits: phase "${agentPhase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
@@ -3319,7 +3328,7 @@ export class CoderLoopDaemon {
 		// into a fake status string.
 		const exits: JsonValue[] = presetPhase.exits.map((exit) => phaseExitToJsonValue(exit))
 		const allowedStatuses = phaseWritableStatuses(presetPhase).slice().sort()
-		const allowedChainActions = phaseChainActions(presetPhase).slice().sort()
+		const allowedChainActions = stepChainActions(presetPhase).slice().sort()
 		return { phase: agentPhase, exits, allowedStatuses, allowedChainActions }
 	}
 
@@ -3362,16 +3371,16 @@ export class CoderLoopDaemon {
 		const caller = await this.admitItemMutationCaller(chain, item, args)
 		const attribution = resolveItemExitActionAttribution(caller, agentRunId, agentPhase)
 		const { preset } = await this.loadedPresetForItem(chain, item, "item.exitAction")
-		const presetPhase = preset.phases.find((entry) => entry.name === attribution.phase)
+		const presetPhase = preset.steps.find((entry) => entry.name === attribution.phase)
 		if (presetPhase === undefined) {
-			const knownPhases = preset.phases.map((entry) => entry.name)
+			const knownPhases = preset.steps.map((entry) => entry.name)
 			throw new DaemonError(
 				"invalid_request",
 				`item.exitAction: phase "${attribution.phase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
 				{ phase: attribution.phase, knownPhases },
 			)
 		}
-		const declaredActions = phaseChainActions(presetPhase)
+		const declaredActions = stepChainActions(presetPhase)
 		const declaredActionList = declaredActions.slice().sort()
 		if (attribution.kind === "agent-mismatch") {
 			await this.recordExitSelectionAuditEvent(chain, {
@@ -3787,7 +3796,7 @@ export class CoderLoopDaemon {
 		else {
 			const explicitRunnerOverride = scheduler.runner !== undefined ? fallbackRunner : null
 			options.chainCompleteTriggerForChain = async (context) =>
-				await runPresetChainCompleteTriggerPhases({
+				await runChainCompleteActivatedSteps({
 					...context,
 					loopDataRoot: this.paths.root,
 					terminalStatusNames: context.terminalStatusNames,
@@ -3859,7 +3868,7 @@ export class CoderLoopDaemon {
 			? (isAbsolute(spec.presetPath) ? spec.presetPath : resolve(spec.presetPath))
 			: bundledPresetDir(spec.preset ?? "")
 		const { preset } = await this.loadedPresetFromDirForChain(chain, presetDir, "item.create.default-status")
-		return engineLifecycleAdmittedItemStatus(preset.statuses.entry, "item.created-default-from-preset")
+		return engineLifecycleAdmittedItemStatus(preset.routing.entry, "item.created-default-from-preset")
 	}
 
 	// #397 default-deny: when the active phase is unknown to the preset, or when the phase has
@@ -3906,7 +3915,7 @@ export class CoderLoopDaemon {
 
 	private async allowedItemStatusesForPhase(chain: ChainRecord, phase: string): Promise<Set<string> | null> {
 		const { preset } = await this.loadedPresetForChain(chain, "item.status.admit-phase")
-		const presetPhase = preset.phases.find((entry) => entry.name === phase)
+		const presetPhase = preset.steps.find((entry) => entry.name === phase)
 		if (presetPhase === undefined) return null
 		return new Set(phaseWritableStatuses(presetPhase))
 	}
@@ -4171,7 +4180,7 @@ export class CoderLoopDaemon {
 			? (isAbsolute(presetSpec.presetPath) ? presetSpec.presetPath : resolve(presetSpec.presetPath))
 			: bundledPresetDir(presetSpec.preset ?? "")
 		const { preset } = await this.loadedPresetFromDirForChain(chain, presetDir, `${label}.rights`)
-		const callerPhase = preset.phases.find((entry) => entry.name === caller.phase)
+		const callerPhase = preset.steps.find((entry) => entry.name === caller.phase)
 		if (callerPhase === undefined) {
 			// The caller's bound phase is not declared in the new item's preset — treat as
 			// default-deny since a phase we don't know cannot have been granted createItems.
@@ -4291,7 +4300,7 @@ export class CoderLoopDaemon {
 		// Agent path: load the item's preset to find the caller-phase's writableFields. Routes
 		// load failures through the standard preset_load_failed path.
 		const { preset } = await this.loadedPresetForItem(chain, item, "item.update.field-rights")
-		const callerPhase = preset.phases.find((entry) => entry.name === caller.phase)
+		const callerPhase = preset.steps.find((entry) => entry.name === caller.phase)
 		const presetName = preset.name
 		// Phase missing from the new item's preset — the caller phase cannot have grants in a
 		// preset that does not declare it. Default-deny via the same `no-rights-segment` reason
@@ -4401,12 +4410,12 @@ export class CoderLoopDaemon {
 
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
 		const { preset } = await this.loadedPresetForChain(chain, "item.status.allowed")
-		return new Set([...preset.statuses.continuable, ...preset.statuses.terminal])
+		return new Set([...preset.routing.continuable, ...preset.routing.terminal])
 	}
 
 	private async resolveLoadedPresetPhasePrompt(ctx: SchedulerSpawnContext): Promise<string> {
 		const { preset, presetDir } = ctx.loadedPreset
-		const presetPhase = preset.phases.find((entry) => entry.name === ctx.phase)
+		const presetPhase = preset.steps.find((entry) => entry.name === ctx.phase)
 		if (presetPhase === undefined) {
 			throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase: ctx.phase, presetDir }))
 		}
@@ -4441,44 +4450,46 @@ export class CoderLoopDaemon {
 	// #412 per-item preset loader. Resolves preset from item.preset / item.presetPath, falling back
 	// to the chain-level resolver for legacy items.
 	private async loadedPresetForItem(chain: ChainRecord, item: ItemRecord, operation: string): Promise<SchedulerLoadedPreset> {
+		const taskTree = this.requireStore().getTaskTree(chain.id)
+		const persisted = taskTree === null ? null : findItemDefinitionRef(taskTree.root, item.id)
+		if (persisted?.kind === "preset") {
+			const ref = parsePresetDefinitionRef({
+				kind: "preset-definition",
+				schemaVersion: 1,
+				contentIdentity: persisted.contentIdentity,
+			})
+			if (ref === null) throw new DaemonError("invalid_request", `persisted preset definition ref is malformed: ${persisted.contentIdentity}`, { chainId: chain.id, itemId: item.id })
+			const resolved = await loadPresetFromDefinition(ref, this.paths.root)
+			if (resolved.kind === "corrupt") {
+				await this.recordPresetLoadFailure(chain, persisted.contentIdentity, operation, new Error(`${resolved.reason}: ${resolved.detail}`))
+				throw new DaemonError(
+					"invalid_request",
+					`failed to resolve pinned definition for chain ${chain.name} item ${item.itemId} (operation ${operation}, ref ${persisted.contentIdentity}): ${resolved.reason}: ${resolved.detail}`,
+					{ chainId: chain.id, itemId: item.id, definitionRef: ref, reason: resolved.reason, detail: resolved.detail },
+				)
+			}
+			return { presetDir: resolve(resolved.bundleDir, "assets"), preset: resolved.preset }
+		}
 		const presetDir = this.presetDirForItem(chain, item)
 		return await this.loadedPresetFromDirForChain(chain, presetDir, operation)
 	}
 
 	private async loadedPresetFromDirForChain(chain: ChainRecord, presetDir: string, operation: string): Promise<SchedulerLoadedPreset> {
-		const key = this.loadedPresetCacheKey(presetDir)
-		const cached = this.loadedPresetCache.get(key)
 		const collectedFindings: PresetPlaceholderFinding[] = []
-		// #408 cross-table DAG findings flow alongside the placeholder findings — both warn AND error
-		// findings need to land on the unified observability stream, so the collector runs even when
-		// the load eventually throws (error-verdict findings always come WITH the throw, but the
-		// warn-verdict findings are real informational events the operator must still see).
-		const collectedDagFindings: PresetDagFinding[] = []
-		// Findings are emitted only when the cache is cold so we don't double-write per chain.
-		// Materialize into the daemon's loop-data root so agents spawned in
-		// random worktrees read from `<loopDataRoot>/preset-materialized/<name>-<hash>/`
-		// with `{{PRESET_ROOT}}` in md files already substituted.
-		const loading = cached ?? loadSchedulerPresetFromDirMaterialized(presetDir, this.paths.root, {
+		// Compile and publish the source snapshot into the immutable definition store.
+		// A path-keyed process cache cannot become definition authority.
+		const loading = loadSchedulerPresetDefinition(presetDir, this.paths.root, {
 			onValidationFinding: (finding) => collectedFindings.push(finding),
-			onDagFinding: (finding) => collectedDagFindings.push(finding),
 		})
-		if (cached === undefined) this.loadedPresetCache.set(key, loading)
 		try {
 			const loaded = await loading
 			for (const finding of collectedFindings) {
 				await this.recordPlaceholderFinding(chain, finding)
 			}
-			for (const finding of collectedDagFindings) {
-				await this.recordDagFinding(chain, finding)
-			}
 			return loaded
 		} catch (error) {
-			this.loadedPresetCache.delete(key)
 			for (const finding of collectedFindings) {
 				await this.recordPlaceholderFinding(chain, finding)
-			}
-			for (const finding of collectedDagFindings) {
-				await this.recordDagFinding(chain, finding)
 			}
 			await this.recordPresetLoadFailure(chain, presetDir, operation, error)
 			// #403: the error message names chain, target (chainName), preset, presetDir, and the
@@ -4532,28 +4543,6 @@ export class CoderLoopDaemon {
 		}))
 	}
 
-	// #408 cross-table DAG checker emitter. Mirrors `recordPlaceholderFinding`'s
-	// shape so the unified observability stream carries both preset-validation
-	// families side-by-side. The error path additionally produces a
-	// `daemon.preset_load_failed` event via `recordPresetLoadFailure`; auditors
-	// looking at a deadlock see the structural finding first, then the generic
-	// load-failure event with the operation context.
-	private async recordDagFinding(chain: ChainRecord, finding: PresetDagFinding): Promise<void> {
-		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
-			kind: "validation",
-			type: "preset.dag_check",
-			chain: chain.name,
-			subject: { kind: "engine" },
-			payload: {
-				kind: finding.kind,
-				verdict: finding.verdict,
-				table: finding.table,
-				status: finding.status,
-				message: finding.message,
-			},
-		}))
-	}
-
 	private presetDirForChain(chain: ChainRecord): string {
 		// Chain-wide preset resolver — used by code paths that operate on a chain without an item
 		// context (e.g. chain-complete trigger eval, listing chain-level status vocab). Per-item
@@ -4603,9 +4592,6 @@ export class CoderLoopDaemon {
 		return this.presetDirForChain(chain)
 	}
 
-	private loadedPresetCacheKey(presetDir: string): string {
-		return isAbsolute(presetDir) ? presetDir : resolve(presetDir)
-	}
 }
 
 function lifecycleEventPersistenceFailureToJson(event: ObservabilityEvent): JsonObject {
@@ -5476,18 +5462,15 @@ function bundledPresetDir(presetName: string): string {
 	return resolve(BUNDLED_PRESETS_DIR, presetName)
 }
 
-// #530: daemon-side entrypoint that always materializes the preset into
-// `<loopDataRoot>/preset-materialized/<name>-<hash>/` so agents spawned in
-// random worktrees read a stable absolute prompt root. Called by
-// `loadedPresetFromDirForChain`; the tracker of active materialized dir
-// names on the daemon instance drives `prunePresetMaterializedRoot` at
-// start-of-day.
-async function loadSchedulerPresetFromDirMaterialized(
+// Daemon-side entrypoint that compiles and publishes an immutable definition
+// bundle so agents spawned in arbitrary worktrees read a verified absolute
+// prompt root.
+async function loadSchedulerPresetDefinition(
 	presetDir: string,
 	loopDataRoot: string,
 	options: LoadPresetOptions = {},
 ): Promise<SchedulerLoadedPreset> {
-	const merged: LoadPresetOptions = { ...options, materialize: { root: loopDataRoot } }
+	const merged: LoadPresetOptions = { ...options, definitionStore: { root: loopDataRoot } }
 	return { presetDir, preset: await loadPreset(presetDir, merged) }
 }
 
@@ -5693,7 +5676,7 @@ function resolveItemExitActionAttribution(
 
 // #405 exhaustiveness guards: forces consumers to update every site when the
 // `PresetPhaseExit` / `PresetPhaseChainAction` ADTs gain a new branch.
-function assertNeverPhaseExitInDaemon(value: never): never {
+function assertNeverStepHandoffInDaemon(value: never): never {
 	throw new DaemonError("internal_error", `unhandled phase-exit kind: ${JSON.stringify(value)}`)
 }
 
@@ -5708,7 +5691,7 @@ function phaseExitToJsonValue(exit: { kind: "item-status"; status: string; when:
 		case "chain-action":
 			return { kind: "chain-action", action: exit.action, when: exit.when }
 		default:
-			return assertNeverPhaseExitInDaemon(exit)
+			return assertNeverStepHandoffInDaemon(exit)
 	}
 }
 

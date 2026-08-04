@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
 	buildRunnerInvocation, chmod, createChain, createFixture, createItem, fixtureCaptureRoots, fixturePresetDirs,
 	loadPreset, makeChainFixture, mkdir, optionsWithoutRunner, readFile, REPO_ROOT, resolve,
-	resolveChainRuntimePaths, resolvePhaseRunnerFromChain, runPresetChainCompleteTriggerPhases,
+	resolveChainRuntimePaths, resolvePhaseRunnerFromChain, runChainCompleteActivatedSteps,
 	runnerAuthorizationForTest, runtimeStatus, schedulerTick, seedSessionClosure, stopFixture, storedChainMetadata,
 	writeBunMarkerRunner, writeFile, writeShellFinalizerMarkerScript, writeShellMarkerScript,
 	type AgentRunnerSelection, type SchedulerPhaseRunner,
@@ -416,7 +416,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 	// stayed on `BINARY:codex` encoded the retired role-name carve-out (`selectReviewRunner` /
 	// `lastNonTriggerPhaseForPreset`); after #456's policy unification, every non-trigger phase
 	// honors the same override. Phase-name-based gating, when a preset wants it, belongs to preset
-	// declaration (e.g., setting `[[phases]].runner` on `review` makes the preset default explicit
+	// declaration (e.g., setting `[[steps]].runner` on `review` makes the preset default explicit
 	// — but item override still wins because `trigger === null`).
 	test("AC5 integration: chain-based phaseRunner honors item claude override on every non-trigger phase (iteration + review), regardless of phase name", async () => {
 		const fixture = await createFixture("ac5-integration")
@@ -488,7 +488,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 	})
 })
 
-describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue #287 retry)", () => {
+describe("runChainCompleteActivatedSteps per-phase runner selection (issue #287 retry)", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
 	test("streams chain-complete runner output without retaining full history", async () => {
@@ -503,7 +503,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			const item = createItem(fixture.store, chain, { issueNumber: 630_002, repoCwd: targetCwd })
 			fixture.store.updateItem(item.id, { evidenceDir: null })
 			const runId = `trigger-${chain.id}-large`
-			const decision = await runPresetChainCompleteTriggerPhases({
+			const decision = await runChainCompleteActivatedSteps({
 				chain,
 				items: fixture.store.listItems(chain.id),
 				runId,
@@ -545,7 +545,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			const items = fixture.store.listItems(chain.id)
 
 			const runId = `trigger-${chain.id}-default`
-			const decision = await runPresetChainCompleteTriggerPhases({
+			const decision = await runChainCompleteActivatedSteps({
 				chain,
 				items,
 				runId,
@@ -601,7 +601,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			}
 
 			const runId = `trigger-${chain.id}-override`
-			const decision = await runPresetChainCompleteTriggerPhases({
+			const decision = await runChainCompleteActivatedSteps({
 				chain,
 				items,
 				runId,

@@ -155,29 +155,29 @@ async function createManualUnblockPreset(root: string): Promise<string> {
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["ready", "retry"]
 terminal = ["parked", "finished"]
 entry = "ready"
 unblockable = ["parked"]
 exhausted = "parked"
 
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
 
   # #408: minimal leaving edges so R2 passes for both continuable statuses.
   # The manual-unblock test surface is unchanged — these exits are inert from
   # the test's perspective (the test drives status directly through the store).
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "finished"
   when = "Run finished and the item should land in the success-terminal vocabulary."
 
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "parked"
   when = "Run failed structurally and the item should park for manual unblock."
 
-  [phases.variables]
+  [steps.values]
   ISSUE = "item.issue"
 
 [agent]

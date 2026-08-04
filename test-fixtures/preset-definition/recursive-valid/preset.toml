@@ -1,0 +1,32 @@
+name = "recursive-valid"
+
+[item]
+idField = "id"
+
+[routing]
+continuable = ["pending"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "pending"
+exhausted = "exhausted"
+
+[[steps]]
+name = "prepare"
+prompt = "prepare.md"
+
+  [steps.values]
+  ITEM_ID = "item.id"
+
+[[steps]]
+name = "finish"
+prompt = "finish.md"
+
+  [[steps.handoffs]]
+  status = "done"
+  when = "The requested work is complete."
+
+  [steps.values]
+  ITEM_ID = "item.id"
+
+[agent]
+attemptTimeoutSeconds = 60

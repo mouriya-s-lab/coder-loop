@@ -333,22 +333,22 @@ describe("daemon", () => {
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued"]
 terminal = ["done", "exhausted"]
 success = ["done"]
 entry = "queued"
 exhausted = "exhausted"
 
-[[phases]]
+[[steps]]
 name = "review"
 prompt = "review.md"
 
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when = "The review completed successfully."
 
-  [[phases.exits]]
+  [[steps.handoffs]]
   chainAction = "stop"
   when = "The chain must leave the active scheduling lifecycle."
 `)
@@ -1100,7 +1100,7 @@ process.exitCode = 0
 	// The recycle window is tiny (60ms) so the fake runner — sleeping 800ms after the
 	// state write — cannot exit naturally before the window expires.
 	// Note: scheduler `phase: "review"` so the only spawned phase declares
-	// `[[phases.exits]]` for `done`. The iteration phase has no `[[phases.exits]]`
+	// `[[steps.handoffs]]` for `done`. The iteration phase has no `[[steps.handoffs]]`
 	// declared (#397 default-deny) and would reject the agent-attributed write,
 	// defeating the recycle test by preventing the markRunPendingRecycle hook.
 
@@ -1387,7 +1387,7 @@ process.exitCode = 0
 		}
 	})
 
-	// #407 acceptance row #1 — iteration phase has no `[phases.rights]` segment in
+	// #407 acceptance row #1 — iteration phase has no `[steps.rights]` segment in
 	// gh-issue-pr-iteration preset.toml, so an item.add request bearing an iteration-phase
 	// agentCredential is rejected with the rights-segment-default-deny branch. The audit
 	// event must record outcome=deny / reason=no-rights-segment (iteration has zero rights
@@ -1463,7 +1463,7 @@ process.exitCode = 0
 			})))
 
 			// Wait until the review credential is captured — only review-phase has `item.reorder`
-			// in its `[phases.rights] privilegedOps`, so we need that credential to even reach
+			// in its `[steps.rights] privilegedOps`, so we need that credential to even reach
 			// the per-phase pre-grant resolution chain.
 			await waitFor(async () => {
 				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }

@@ -85,7 +85,7 @@ async function writeCredentialedFixturePreset(root: string): Promise<string> {
 	const presetToml = await readFile(presetTomlPath, "utf-8")
 	const iterationHeader = 'roles  = ["common", "quality", "iter"]'
 	const exits = ["changes_requested", "blocked", "moot", "done", "exhausted", "in_progress"]
-		.map((status) => `\n  [[phases.exits]]\n  status = "${status}"\n  when = "daemon credentialed fixture status"\n`)
+		.map((status) => `\n  [[steps.handoffs]]\n  status = "${status}"\n  when = "daemon credentialed fixture status"\n`)
 		.join("")
 	await writeFile(presetTomlPath, presetToml.replace(iterationHeader, iterationHeader + exits))
 	return presetDir
@@ -149,7 +149,7 @@ const FAKE_RUNNER_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "stri
 // specific runId, so this branch fires only when the scheduler injected
 // `CODER_LOOP_RUN_CRED` into the spawn env — which it always does in production, but is
 // gated by the test fixture installing a presetDir whose target phase declares
-// `[[phases.exits]]` for the requested status (otherwise the #397 default-deny gate
+// `[[steps.handoffs]]` for the requested status (otherwise the #397 default-deny gate
 // rejects the write before the recycle hook can fire).
 const FAKE_RUNNER_CREDENTIALED_STATUS_WRITE_SNIPPET = FAKE_RUNNER_STATUS_WRITE_SNIPPET
 
@@ -984,7 +984,7 @@ async function writeSinglePhasePromptPreset(presetDir: string, prompt: string): 
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued"]
 terminal = ["done", "exhausted"]
 success = ["done"]
@@ -994,14 +994,14 @@ exhausted = "exhausted"
 [agent]
 binary = "codex"
 
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
 
   # #408: minimal leaving edge so R2 passes for "queued". The scheduler-prompt
   # override harness only inspects the rendered prompt, so the exits set is
   # inert from this test's perspective.
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when = "Run finished and the item should land in success-terminal vocabulary."
 `,

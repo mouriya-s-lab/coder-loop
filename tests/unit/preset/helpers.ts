@@ -5,22 +5,18 @@ import { tmpdir } from "node:os"
 import {
 	DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
 	ENGINE_RUNTIME_BINDING_KEYS,
-	PRESET_MATERIALIZED_DIRNAME,
 	PRESET_ROOT_TOKEN,
-	chainCompleteTriggerPhases,
+	chainCompleteActivatedSteps,
 	loadPreset,
-	materializePreset,
 	parsePreset,
-	prunePresetMaterializedRoot,
 	renderFragmentIndex,
 	renderRuntimeInputsDoc,
 	resolveBinding,
 	sliceFragmentsForPhase,
 	substitutePresetRootToken,
-	triggeredPhasesAfter,
+	stepsActivatedAfter,
 	type Preset,
 	type PresetPhase,
-	type PresetDagFinding,
 	type PresetPlaceholderFinding,
 	type PresetVariableSource,
 	type ResolveContext,
@@ -143,6 +139,5 @@ export const EXPECTED_VARIABLE_KEYS = [
 ] as const
 
 
-export { resolve, mkdir, mkdtemp, readFile, readdir, stat, writeFile, tmpdir, DEFAULT_ATTEMPT_TIMEOUT_SECONDS, ENGINE_RUNTIME_BINDING_KEYS, PRESET_MATERIALIZED_DIRNAME, PRESET_ROOT_TOKEN, chainCompleteTriggerPhases, loadPreset, materializePreset, parsePreset, prunePresetMaterializedRoot, renderFragmentIndex, renderRuntimeInputsDoc, resolveBinding, sliceFragmentsForPhase, substitutePresetRootToken, triggeredPhasesAfter, parseInternalStatus, storedItemExtra }
-export type { Preset, PresetPhase, PresetDagFinding, PresetPlaceholderFinding, PresetVariableSource, ResolveContext, RuntimeBindings, ItemRecord, BoundaryRecord }
-
+export { resolve, mkdir, mkdtemp, readFile, readdir, stat, writeFile, tmpdir, DEFAULT_ATTEMPT_TIMEOUT_SECONDS, ENGINE_RUNTIME_BINDING_KEYS, PRESET_ROOT_TOKEN, chainCompleteActivatedSteps, loadPreset, parsePreset, renderFragmentIndex, renderRuntimeInputsDoc, resolveBinding, sliceFragmentsForPhase, substitutePresetRootToken, stepsActivatedAfter, parseInternalStatus, storedItemExtra }
+export type { Preset, PresetPhase, PresetPlaceholderFinding, PresetVariableSource, ResolveContext, RuntimeBindings, ItemRecord, BoundaryRecord }

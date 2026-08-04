@@ -27,7 +27,7 @@ describe("runner and daemon helpers", () => {
 		const base = makePreset()
 		const preset: Preset = {
 			...base,
-			phases: base.phases.map((phase) =>
+			steps: base.steps.map((phase) =>
 				phase.name === "iteration"
 					? { ...phase, defaultRunner: "codex" as const }
 					: { ...phase, defaultRunner: "claude" as const },
@@ -56,27 +56,27 @@ describe("runner and daemon helpers", () => {
 
 	test("parsePreset reads phase model and rejects blank values", () => {
 		const preset = makePreset({
-			phases: [
+			steps: [
 				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
 			],
 		})
-		expect(preset.phases[0]?.defaultModel).toBeNull()
-		expect(preset.phases[1]?.defaultModel).toBe("gpt-5.5")
+		expect(preset.steps[0]?.defaultModel).toBeNull()
+		expect(preset.steps[1]?.defaultModel).toBe("gpt-5.5")
 
 		expect(() =>
 			makePreset({
-				phases: [
+				steps: [
 					{ name: "iteration", prompt: "iteration.md", model: "  ", variables: { ISSUE: "item.issue" } },
 					{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
 				],
 			}),
-		).toThrow(/preset\.phases\[0\]\.model: must be a non-empty string/)
+		).toThrow(/preset\.steps\[0\]\.model: must be a non-empty string/)
 	})
 
 	test("selectRunnerForPhase resolves the preset phase model when config declares none", () => {
 		const preset = makePreset({
-			phases: [
+			steps: [
 				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
 			],
@@ -91,7 +91,7 @@ describe("runner and daemon helpers", () => {
 
 	test("explicit config model overrides the preset phase model", () => {
 		const preset = makePreset({
-			phases: [
+			steps: [
 				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
 			],
@@ -104,7 +104,7 @@ describe("runner and daemon helpers", () => {
 
 	test("item runner override to a different kind does not inherit the preset phase model", () => {
 		const preset = makePreset({
-			phases: [
+			steps: [
 				{ name: "iteration", prompt: "iteration.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
 			],

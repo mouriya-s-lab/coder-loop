@@ -1,0 +1,18 @@
+name = "recursive-invalid"
+
+[item]
+idField = "id"
+
+[routing]
+continuable = ["pending"]
+terminal = ["done", "exhausted"]
+entry = "pending"
+exhausted = "exhausted"
+
+[[steps]]
+name = "broken"
+prompt = "broken.md"
+
+  [[steps.handoffs]]
+  status = "missing-from-routing"
+  when = "This invalid successor must be rejected."

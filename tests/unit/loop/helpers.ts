@@ -132,17 +132,17 @@ export function minimalPresetRoot(overrides: BoundaryRecord = {}): BoundaryRecor
 	return {
 		name: "fixture",
 		item: { idField: "issue" },
-		statuses: { continuable: ["queued", "changes_requested"], terminal: ["done", "blocked"], exhausted: "blocked" },
-		phases: [
+		routing: { continuable: ["queued", "changes_requested"], terminal: ["done", "blocked"], exhausted: "blocked" },
+		steps: [
 			{
 				name: "iteration",
 				prompt: "iteration.md",
-				variables: { ISSUE: "item.issue" },
+				values: { ISSUE: "item.issue" },
 			},
 			{
 				name: "review",
 				prompt: "review.md",
-				variables: { ISSUE: "item.issue" },
+				values: { ISSUE: "item.issue" },
 			},
 		],
 		...overrides,

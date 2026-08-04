@@ -353,25 +353,25 @@ describe("daemon", () => {
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued", "needs_work"]
 terminal = ["custom_done"]
 entry = "queued"
 success = ["custom_done"]
 exhausted = "custom_done"
 
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
 
   # #408: minimal leaving edge so R2 (deadlock-continuable) passes for the
   # fixture. The status-validation test surface is unchanged; "run → custom_done"
   # only matters to the new checker, not to this test's assertions.
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "custom_done"
   when = "Run finished and the item reached the success-terminal vocabulary."
 
-  [phases.variables]
+  [steps.values]
   ISSUE = "item.issue"
 
 [agent]
@@ -570,25 +570,25 @@ attemptTimeoutSeconds = 3600
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued", "pending", "dead_word"]
 terminal    = ["done", "exhausted"]
 entry       = "queued"
 success     = ["done"]
 exhausted   = "exhausted"
 
-[[phases]]
+[[steps]]
 name   = "run"
 prompt = "run.md"
 
   # \`pending\` has no leaving edge (the only exit writes pending itself), so
   # R2 fires with deadlock-continuable on \`pending\`. \`dead_word\` is never
   # produced anywhere → R3 fires with dead-vocabulary as a warn.
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "pending"
   when   = "Always re-asserts pending — the deadlock."
 
-  [phases.variables]
+  [steps.values]
   ISSUE = "item.issue"
 
 [agent]
@@ -609,7 +609,7 @@ attemptTimeoutSeconds = 3600
 			if (!statusResponse.ok) {
 				expect(statusResponse.error.code).toBe("invalid_request")
 				expect(statusResponse.error.message).toContain(`failed to load preset for chain ${chain.name}`)
-				expect(statusResponse.error.message).toContain("preset.statuses.continuable")
+				expect(statusResponse.error.message).toContain("preset.routing.continuable")
 				expect(statusResponse.error.message).toContain("has no leaving phase-exit edge")
 				expect(statusResponse.error.message).toContain("pending")
 			}
@@ -964,10 +964,10 @@ attemptTimeoutSeconds = 3600
 				store.close()
 			}
 
-			// #508: `in_progress` rejoined `[statuses].continuable` so daemon recovery can leave
+			// #508: `in_progress` rejoined `[routing].continuable` so daemon recovery can leave
 			// it untouched and the scheduler can re-pick interrupted items. Vocab gate now
 			// admits it, so the rejection comes from the phase-exits gate (iteration declares
-			// no `[[phases.exits]]`, so every status is denied here) — same shape as the other
+			// no `[[steps.handoffs]]`, so every status is denied here) — same shape as the other
 			// vocab-valid statuses below.
 			for (const status of ["in_progress", "changes_requested", "blocked", "moot", "done", "exhausted"]) {
 				const rejected = await request(fixture, "item.update", { itemId: iterationItemId, status })
@@ -977,7 +977,7 @@ attemptTimeoutSeconds = 3600
 			expect((await readItem(fixture.loopDataRoot, chainId, 34701))?.phase).toBe("iteration")
 
 			// #397: review write that exits the phase's declared exits set (queued is vocab-valid but
-			// not in review's [[phases.exits]]) is rejected under default-deny.
+			// not in review's [[steps.handoffs]]) is rejected under default-deny.
 			const reviewExitOutsideItem = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				itemId: "34715",
@@ -1308,7 +1308,7 @@ attemptTimeoutSeconds = 3600
 
 			// Scenario 2b: vocabulary-valid but phase-undeclared action is rejected by the per-phase
 			// admission gate (default-deny per #397 pattern). Iteration declares no chain-action exits
-			// at all (its `[[phases.exits]]` is empty), so `action=stop` against `agentPhase=iteration`
+			// at all (its `[[steps.handoffs]]` is empty), so `action=stop` against `agentPhase=iteration`
 			// is admitted at the vocabulary leg and denied at the per-phase leg — producing the
 			// `item.exit.selected` audit event with `outcome=deny reason=phase-exits`.
 			const undeclared = await request(fixture, "item.exitAction", {

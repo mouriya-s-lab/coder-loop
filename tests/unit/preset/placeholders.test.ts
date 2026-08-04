@@ -28,12 +28,12 @@ idField = "id"
 [item.fields]
 title = "string"
 
-[statuses]
+[routing]
 continuable = ["pending"]
 terminal    = ["done"]
 exhausted   = "done"
 
-[[phases]]
+[[steps]]
 name   = "run"
 prompt = "${entryRef}"
 
@@ -41,11 +41,11 @@ prompt = "${entryRef}"
   # cross-table DAG check rejects the fixture before the placeholder validator
   # ever runs. These placeholder tests only inspect the entry md, so the exit
   # is inert from their perspective.
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when = "Run finished; item lands in success-terminal vocabulary."
 
-  [phases.variables]
+  [steps.values]
   KEY = "item.id"
   TITLE = "item.title"
 

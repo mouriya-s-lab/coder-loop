@@ -23,7 +23,7 @@ idField = "key"
 # the standard `[item.fields]` pipeline (mirrors the #419 idField convention).
 key = "string"
 
-[statuses]
+[routing]
 continuable = ["queued", "changes_requested"]
 terminal    = ["done", "exhausted"]
 success     = ["done"]
@@ -31,32 +31,32 @@ entry       = "queued"
 # exhausted (#402): required preset declaration for the attempts-exhausted落点.
 exhausted   = "exhausted"
 
-[[phases]]
+[[steps]]
 name   = "iteration"
 prompt = "iteration-entry.md"
 runner = "claude"
-# No [[phases.exits]]: iteration writes no status; the scheduler advances to `review`
+# No [[steps.handoffs]]: iteration writes no status; the scheduler advances to `review`
 # by phase array order once the runner exits 0.
 
-  [phases.variables]
+  [steps.values]
   CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }
   ITEM_KEY   = { source = "item.key", label = "Item key" }
   RUN_ID     = { source = "runtime.runId", label = "Run ID" }
 
-[[phases]]
+[[steps]]
 name   = "review"
 prompt = "review-entry.md"
 runner = "claude"
 
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when   = "The iteration phase committed the run marker on its engine-owned closure branch."
 
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "changes_requested"
   when   = "The run marker commit is missing from the iteration closure branch; iteration must retry."
 
-  [phases.variables]
+  [steps.values]
   CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }
   ITEM_KEY   = { source = "item.key", label = "Item key" }
   RUN_ID     = { source = "runtime.runId", label = "Run ID" }

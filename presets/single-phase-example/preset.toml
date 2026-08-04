@@ -3,7 +3,7 @@ name        = "single-phase-example"
 [item]
 idField = "id"
 
-[statuses]
+[routing]
 continuable = ["pending"]
 terminal    = ["done", "exhausted"]
 # exhausted (#402): required preset declaration. The single-phase example has no
@@ -12,7 +12,7 @@ terminal    = ["done", "exhausted"]
 # (`exhausted ∈ terminal`) passes.
 exhausted   = "exhausted"
 
-[[phases]]
+[[steps]]
 name   = "run"
 prompt = "run-entry.md"
 
@@ -20,11 +20,11 @@ prompt = "run-entry.md"
   # preset's `run` phase is the only writer, and its sole transition is to `done`. Without this
   # declaration the default-deny gate would reject the run phase's status write at runtime
   # (matching the gate behavior tested in daemon.test.ts).
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when   = "The smoke item completed successfully and no further work remains."
 
-  [phases.variables]
+  [steps.values]
   ITEM_ID    = "item.id"
   RUN_ID     = "runtime.runId"
   TARGET_CWD = "runtime.targetCwd"

@@ -138,7 +138,7 @@ describe("scheduler", () => {
 
 			expect(tick.spawnedRuns).toHaveLength(0)
 			const stored = fixture.store.getItem(item.id)
-			// The落点 comes from preset.statuses.exhausted ("custom_exhausted"), not the retired
+			// The落点 comes from preset.routing.exhausted ("custom_exhausted"), not the retired
 			// engine literal "exhausted" — the engine no longer holds a literal.
 			expect(stored?.status).toBe("custom_exhausted")
 			expect(stored?.extra.schedulerBackoff).toBeUndefined()

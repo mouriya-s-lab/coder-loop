@@ -25,9 +25,9 @@ describe("ItemRecord prompt bindings", () => {
 	test("getItemId still honors explicit extra id fields", () => {
 		const preset = makePreset({
 			item: { idField: "slug" },
-			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.slug" } },
-				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.slug" } },
+			steps: [
+				{ name: "iteration", prompt: "iteration.md", values: { ISSUE: "item.slug" } },
+				{ name: "review", prompt: "review.md", values: { ISSUE: "item.slug" } },
 			],
 		})
 		expect(getItemId(makeItem({ extra: { slug: "custom-id" } }), preset)).toBe("custom-id")
@@ -105,16 +105,16 @@ describe("ItemRecord prompt bindings", () => {
 	test("parsePreset accepts nested ItemRecord fields but rejects unknown roots", () => {
 		const preset = makePreset({
 			item: { idField: "issue", fields: { sessionIds: "json" } },
-			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { SESSION: "item.sessionIds.iteration.codex" } },
-				{ name: "review", prompt: "review.md", variables: { PHASE: "item.phase" } },
+			steps: [
+				{ name: "iteration", prompt: "iteration.md", values: { SESSION: "item.sessionIds.iteration.codex" } },
+				{ name: "review", prompt: "review.md", values: { PHASE: "item.phase" } },
 			],
 		})
-		expect(preset.phases[0]?.variables[0]).toEqual({ key: "SESSION", source: { kind: "item", field: "sessionIds.iteration.codex" }, doc: null })
+		expect(preset.steps[0]?.variables[0]).toEqual({ key: "SESSION", source: { kind: "item", field: "sessionIds.iteration.codex" }, doc: null })
 
 		expect(() =>
 			makePreset({
-				phases: [{ name: "iteration", prompt: "iteration.md", variables: { BAD: "item.notARecordField.value" } }],
+				steps: [{ name: "iteration", prompt: "iteration.md", values: { BAD: "item.notARecordField.value" } }],
 			}),
 		).toThrow(/unrecognized item field/)
 	})
@@ -122,7 +122,7 @@ describe("ItemRecord prompt bindings", () => {
 
 
 describe("renderPrompt placeholder validation (issue #399)", () => {
-	function makePhase(variables: ReadonlyArray<readonly [string, ReturnType<typeof parsePreset>["phases"][number]["variables"][number]["source"]]>): PresetPhase {
+	function makePhase(variables: ReadonlyArray<readonly [string, ReturnType<typeof parsePreset>["steps"][number]["variables"][number]["source"]]>): PresetPhase {
 		return {
 			name: "iteration",
 			prompt: "iteration.md",

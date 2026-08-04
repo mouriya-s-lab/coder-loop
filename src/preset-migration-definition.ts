@@ -19,7 +19,7 @@ async function main(): Promise<void> {
 	if (encoded === undefined) throw new Error("missing migration preset input")
 	const input = MigrationPresetInputBoundary.assert(JSON.parse(encoded))
 	const presetDir = resolvePresetDir({ preset: input.preset, presetPath: input.presetPath }, resolve(import.meta.dir, ".."), input.repoCwd)
-	const preset = await loadPreset(presetDir, { materialize: { root: input.materializeRoot } })
+	const preset = await loadPreset(presetDir, { definitionStore: { root: input.materializeRoot } })
 	const definitionContentIdentity = await presetExecutionContentIdentity({ presetDir, preset })
 	process.stdout.write(JSON.stringify({
 		definitionKind: "preset",

@@ -1,14 +1,14 @@
 name = "warning"
 [item]
 idField = "id"
-[statuses]
+[routing]
 continuable = ["pending", "unused"]
 terminal = ["done", "exhausted"]
 entry = "pending"
 exhausted = "exhausted"
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
-[[phases.exits]]
+[[steps.handoffs]]
 status = "done"
 when = "done"

@@ -70,12 +70,12 @@ describe("runtime binding helpers", () => {
 	test("preset-declared runtime business keys render without engine whitelist changes", () => {
 		const preset = makePreset({
 			runtime: { businessKeys: ["customBusiness"] },
-			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
-				{ name: "review", prompt: "review.md", variables: { RUN_ID: "runtime.runId" } },
+			steps: [
+				{ name: "iteration", prompt: "iteration.md", values: { CUSTOM: "runtime.customBusiness" } },
+				{ name: "review", prompt: "review.md", values: { RUN_ID: "runtime.runId" } },
 			],
 		})
-		const phase = preset.phases[0]!
+		const phase = preset.steps[0]!
 		const ctx: ResolveContext = {
 			item: makeItem(),
 			chain: makeChainBindings(),
@@ -91,8 +91,8 @@ describe("runtime binding helpers", () => {
 	test("parsePreset rejects undeclared runtime business keys", () => {
 		expect(() =>
 			makePreset({
-				phases: [
-					{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
+				steps: [
+					{ name: "iteration", prompt: "iteration.md", values: { CUSTOM: "runtime.customBusiness" } },
 				],
 			}),
 		).toThrow(/unknown runtime key "customBusiness"/)
@@ -107,11 +107,11 @@ describe("runtime binding helpers", () => {
 				businessKeys: ["auditDemo"],
 				businessKeyValues: { auditDemo: { literal: "preset-literal-ok" } },
 			},
-			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { AUDIT_DEMO: "runtime.auditDemo" } },
+			steps: [
+				{ name: "iteration", prompt: "iteration.md", values: { AUDIT_DEMO: "runtime.auditDemo" } },
 			],
 		})
-		const phase = preset.phases[0]!
+		const phase = preset.steps[0]!
 		const options = { ...makeOptions(), preset }
 		const issueRun: IssueRunContext = {
 			runIdGeneration: "new",
@@ -135,7 +135,7 @@ describe("runtime binding helpers", () => {
 
 	test("buildRuntimeBindings maps issue run context into strings", () => {
 		const options = makeOptions()
-		const phase = options.preset.phases[0]!
+		const phase = options.preset.steps[0]!
 		const issueRun: IssueRunContext = {
 			runIdGeneration: "resumed",
 			resumedFromPhase: "iteration",
@@ -158,7 +158,7 @@ describe("runtime binding helpers", () => {
 
 	test("runtime bindings keep per-issue handoff optional", () => {
 		const options = makeOptions()
-		const phase = options.preset.phases[0]!
+		const phase = options.preset.steps[0]!
 		const issueRun: IssueRunContext = {
 			runIdGeneration: "new",
 			resumedFromPhase: null,
@@ -206,9 +206,9 @@ describe("runtime binding helpers", () => {
 
 	test("renderFragmentIndex slices fragments to roles declared by the phase (issue #400)", () => {
 		const preset = makePreset({
-			phases: [
-				{ name: "iteration", prompt: "iteration.md", roles: ["common", "iter"], variables: { ISSUE: "item.issue" } },
-				{ name: "review", prompt: "review.md", roles: ["common", "review"], variables: { ISSUE: "item.issue" } },
+			steps: [
+				{ name: "iteration", prompt: "iteration.md", roles: ["common", "iter"], values: { ISSUE: "item.issue" } },
+				{ name: "review", prompt: "review.md", roles: ["common", "review"], values: { ISSUE: "item.issue" } },
 			],
 			fragments: [
 				{ id: "common/runtime-contract", role: "common", path: "common/runtime-contract.md" },
@@ -216,7 +216,7 @@ describe("runtime binding helpers", () => {
 				{ id: "review/actions/retry", role: "review", path: "review/actions/retry.md" },
 			],
 		})
-		const [iterPhase, reviewPhase] = preset.phases
+		const [iterPhase, reviewPhase] = preset.steps
 		const iter = renderFragmentIndex(preset, iterPhase!)
 		expect(iter).toContain("- common/runtime-contract (common):")
 		expect(iter).toContain("- iter/steps/implement (iter):")
@@ -229,13 +229,13 @@ describe("runtime binding helpers", () => {
 
 	test("renderFragmentIndex returns empty string when the phase declares no roles", () => {
 		const preset = makePreset({
-			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
-				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
+			steps: [
+				{ name: "iteration", prompt: "iteration.md", values: { ISSUE: "item.issue" } },
+				{ name: "review", prompt: "review.md", values: { ISSUE: "item.issue" } },
 			],
 		})
-		expect(preset.phases[0]!.roles).toEqual([])
-		expect(renderFragmentIndex(preset, preset.phases[0]!)).toBe("")
+		expect(preset.steps[0]!.roles).toEqual([])
+		expect(renderFragmentIndex(preset, preset.steps[0]!)).toBe("")
 	})
 })
 

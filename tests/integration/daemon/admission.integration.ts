@@ -627,7 +627,7 @@ process.exitCode = 0
 			expect(credential.length).toBeGreaterThan(0)
 
 			// Issue the item.add with the iteration agent's credential. Iteration phase has NO
-			// `[phases.rights]` segment in preset.toml → classifyNoCreateGrantReason yields
+			// `[steps.rights]` segment in preset.toml → classifyNoCreateGrantReason yields
 			// `no-rights-segment` (createItems=false AND writableFields empty AND privilegedOps empty).
 			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
@@ -673,7 +673,7 @@ process.exitCode = 0
 		}
 	})
 
-	// #407 acceptance row #2 — review phase declares `[phases.rights] createItems = true` in
+	// #407 acceptance row #2 — review phase declares `[steps.rights] createItems = true` in
 	// gh-issue-pr-iteration preset.toml, so an item.add request bearing a review-phase agent
 	// credential is admitted. The audit event records outcome=allow / reason=agent-allowed.
 	// item.list cross-check confirms the child WAS inserted into the queue. Pipeline reaches
@@ -870,7 +870,7 @@ process.exitCode = 0
 		}
 	})
 
-	// #407 acceptance row #4 — single-phase-example preset has no `[phases.rights]` segment
+	// #407 acceptance row #4 — single-phase-example preset has no `[steps.rights]` segment
 	// anywhere (the run phase omits it). An agent credential bound to its `run` phase that
 	// tries item.add against the same chain is rejected with reason=no-rights-segment. The
 	// operator-variant inside the same test confirms operator path is unaffected (mirrors
@@ -1121,7 +1121,7 @@ process.exitCode = 0
 	// against the hard-deny list (`chain.delete`, `chain.stop`, `daemon.down`, `logs.query`,
 	// `queue.unblock`, `chain.create`, `chain.resume`) must be rejected before any handler-side
 	// work, with an error message that names NO preset grammar (the operator cannot flip the
-	// gate via a `[phases.rights]` declaration — the contract forbids it). Every rejection emits
+	// gate via a `[steps.rights]` declaration — the contract forbids it). Every rejection emits
 	// one `privileged_op.caller_admission` audit event with `outcome=deny / reason=hard-deny-for-agent`.
 
 	test("daemon hard-denies chain.delete / chain.stop / daemon.down for agent credentials with no-preset-grammar message (#409 row 1)", async () => {
@@ -1239,7 +1239,7 @@ process.exitCode = 0
 
 	// #409 acceptance row #2 — per-phase authorized op. `item.reorder` is the only entry in the
 	// `PRESET_PHASE_PRIVILEGED_OPS` tuple today; the bundled `gh-issue-pr-iteration` preset
-	// declares it on review's `[phases.rights] privilegedOps`. An iteration-phase agent
+	// declares it on review's `[steps.rights] privilegedOps`. An iteration-phase agent
 	// credential issuing item.reorder must be rejected (no grant on iteration's rights segment);
 	// a review-phase agent credential must succeed. Both outcomes emit `privileged_op.caller_admission`.
 
@@ -1888,7 +1888,7 @@ process.exitCode = 0
 	// `presetPath` (the per-item preset declaration site since #412) so the parse failure
 	// surfaces through the normal item.add load chain.
 
-	test("preset load rejects control-plane field in [phases.rights] writableFields (#410 parse-side)", async () => {
+	test("preset load rejects control-plane field in [steps.rights] writableFields (#410 parse-side)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-preset-parse-control-plane`)
 		const presetDir = resolve(root, "broken-preset")
 		await mkdir(presetDir, { recursive: true })
@@ -1899,18 +1899,18 @@ idField = "issue"
 
 [item.fields]
 
-[statuses]
+[routing]
 continuable = ["queued"]
 terminal    = ["done"]
 success     = ["done"]
 entry       = "queued"
 exhausted   = "done"
 
-[[phases]]
+[[steps]]
 name   = "iteration"
 prompt = "iter.md"
 
-  [phases.rights]
+  [steps.rights]
   writableFields = ["runner"]
 `)
 		await writeFile(resolve(presetDir, "iter.md"), "minimal entry\n")

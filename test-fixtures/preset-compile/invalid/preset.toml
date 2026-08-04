@@ -1,12 +1,12 @@
 name = "invalid"
 [item]
 idField = "id"
-[statuses]
+[routing]
 continuable = ["pending"]
 terminal = ["done"]
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
-[[phases.exits]]
+[[steps.handoffs]]
 status = "done"
 when = "done"

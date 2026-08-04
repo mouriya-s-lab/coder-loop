@@ -40,7 +40,7 @@ async function startCredentialedSchedulerRuntime(root: string, loopDataRoot: str
 	const presetToml = await readFile(presetTomlPath, "utf-8")
 	const iterationHeader = 'roles  = ["common", "quality", "iter"]'
 	const exits = ["changes_requested", "blocked", "moot", "done", "exhausted"]
-		.map((status) => `\n  [[phases.exits]]\n  status = "${status}"\n  when = "scheduler integration fixture status"\n`)
+		.map((status) => `\n  [[steps.handoffs]]\n  status = "${status}"\n  when = "scheduler integration fixture status"\n`)
 		.join("")
 	await writeFile(presetTomlPath, presetToml.replace(iterationHeader, iterationHeader + exits))
 	const loadedPreset = await loadPreset(presetDir).then((preset) => ({ presetDir, preset }))

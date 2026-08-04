@@ -4,11 +4,11 @@ import {
 	resolve,
 	readFile,
 	stat,
-	chainCompleteTriggerPhases,
+	chainCompleteActivatedSteps,
 	loadPreset,
 	renderRuntimeInputsDoc,
 	resolveBinding,
-	triggeredPhasesAfter,
+	stepsActivatedAfter,
 	storedItemExtra,
 	Preset,
 	PresetVariableSource,
@@ -98,38 +98,38 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// that was mid-flight when the previous daemon process died. Daemon recovery (#508)
 		// no longer rewrites `items.status` / `phase` / `sessionIds`, so the post-crash
 		// `in_progress` rowid is what the scheduler now consumes on the next tick.
-		expect([...preset.statuses.continuable]).toEqual(["queued", "changes_requested", "in_progress"])
-		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
-		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
+		expect([...preset.routing.continuable]).toEqual(["queued", "changes_requested", "in_progress"])
+		expect([...preset.routing.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
+		expect([...preset.routing.unblockable]).toEqual(["blocked"])
 		// #402: bundled preset declares the attempts-exhausted落点 explicitly; engine no longer
 		// owns the "exhausted" literal.
-		expect(preset.statuses.exhausted).toBe("exhausted")
+		expect(preset.routing.exhausted).toBe("exhausted")
 		// #404: bundled preset declares the retry continuable status so md doc builders
 		// can inject it instead of fragments naming the literal.
 		// #456: the role-shaped `summaryMarker` field on `PresetPhase` was retired with the
 		// taxonomy; #452 will lift the summary-injection redesign on a DSL-declared hook. The
 		// previous "marker is null for every phase" assertion is now unrepresentable (no field) and
 		// has been dropped.
-		expect(preset.statuses.retry).toBe("changes_requested")
-		expect(preset.phases.find((phase) => phase.name === "iteration")?.exits).toEqual([])
+		expect(preset.routing.retry).toBe("changes_requested")
+		expect(preset.steps.find((phase) => phase.name === "iteration")?.exits).toEqual([])
 		// #405: review's exits now include a chain-action branch (`stop`) alongside the
 		// item-status branches. The projection below narrows on the ADT discriminator so a future
 		// extra chain-action exit will land in the chain-action assertion automatically.
-		const reviewExits = preset.phases.find((phase) => phase.name === "review")?.exits ?? []
+		const reviewExits = preset.steps.find((phase) => phase.name === "review")?.exits ?? []
 		expect(reviewExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
 		expect(reviewExits.flatMap((exit) => exit.kind === "chain-action" ? [exit.action] : [])).toEqual(["stop"])
 	})
 
 	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
-		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
+		expect(preset.steps.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
+		expect(Object.fromEntries(preset.steps.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
 			iteration: "codex",
 			review: "codex",
 			"blocked-responder": "codex",
 			"umbrella-finalizer": "codex",
 		})
-		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultModel]))).toEqual({
+		expect(Object.fromEntries(preset.steps.map((phase) => [phase.name, phase.defaultModel]))).toEqual({
 			iteration: "gpt-5.6-sol",
 			review: "gpt-5.6-sol",
 			"blocked-responder": "gpt-5.6-sol",
@@ -140,9 +140,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// taxonomy retired the engine no longer cares about that position. The preset's phase
 		// ordering (asserted above) keeps "review" before the trigger phases by preset declaration
 		// — no engine helper needed.
-		expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["blocked-responder"])
-		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
-		for (const phase of preset.phases) {
+		expect(stepsActivatedAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["blocked-responder"])
+		expect(chainCompleteActivatedSteps(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
+		for (const phase of preset.steps) {
 			expect(phase.prompt.startsWith(BUNDLED_PRESET_DIR)).toBe(true)
 			const info = await stat(phase.prompt)
 			expect(info.isFile()).toBe(true)
@@ -170,7 +170,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			"blocked-responder": ["TRIGGER_STATUS_DOC"],
 			"umbrella-finalizer": [],
 		}
-		for (const phase of preset.phases) {
+		for (const phase of preset.steps) {
 			const keys = phase.variables.map((variable) => variable.key)
 			const expectedExtras = PHASE_EXTRA_KEYS[phase.name] ?? []
 			const expected = [...EXPECTED_VARIABLE_KEYS, ...expectedExtras]
@@ -184,7 +184,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 
 	test("specific variable bindings reflect renderPrompt source mapping", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		const iterVars = new Map(preset.phases[0]!.variables.map((variable) => [variable.key, variable.source] as const))
+		const iterVars = new Map(preset.steps[0]!.variables.map((variable) => [variable.key, variable.source] as const))
 		const expectedItem = (field: string): PresetVariableSource => ({ kind: "item", field })
 		const expectedChain = (field: string): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "none" } })
 		const expectedChainDefault = (field: string, value: boolean): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "value", value } })
@@ -214,7 +214,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			loadPreset(BUNDLED_PRESET_DIR),
 			loadPreset(REAL_E2E_MINIMAL_PRESET_DIR),
 		])
-		const decoratedIssueBindings = presets.flatMap((preset) => preset.phases.flatMap((phase) => {
+		const decoratedIssueBindings = presets.flatMap((preset) => preset.steps.flatMap((phase) => {
 			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
 			return variable === undefined ? [] : [{ preset, phase, variable }]
 		}))
@@ -241,7 +241,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	// strings via the declared `default = ""` fallback (no crash).
 	test("bundled umbrella binding flows through declared chain-binding mechanism (acceptance row 2)", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		const iterPhase = preset.phases.find((entry) => entry.name === "iteration")
+		const iterPhase = preset.steps.find((entry) => entry.name === "iteration")
 		expect(iterPhase).toBeDefined()
 		const variableByKey = new Map(iterPhase!.variables.map((variable) => [variable.key, variable] as const))
 		const umbrellaRepoVar = variableByKey.get("CHAIN_UMBRELLA_REPO")

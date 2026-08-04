@@ -26,13 +26,13 @@ businessKeys = ["auditDemo"]
   [runtime.businessKeyValues]
   auditDemo = { literal = "business-key-e2e-ok" }
 
-[statuses]
+[routing]
 continuable = ["pending"]
 terminal    = ["done", "exhausted"]
 # exhausted (#402): required preset declaration for the attempts-exhausted落点.
 exhausted   = "exhausted"
 
-[[phases]]
+[[steps]]
 name   = "audit"
 prompt = "audit-entry.md"
 
@@ -43,11 +43,11 @@ prompt = "audit-entry.md"
   # Declaring the single terminal exit the fixture would naturally write keeps
   # the render-test path identical and makes the fixture a positive bundled
   # example for the new checker.
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when   = "Audit rendering complete; the business-key fixture has nothing else to do."
 
-  [phases.variables]
+  [steps.values]
   ITEM_ID    = "item.id"
   RUN_ID     = "runtime.runId"
   AUDIT_DEMO = "runtime.auditDemo"

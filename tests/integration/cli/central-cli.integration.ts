@@ -455,14 +455,14 @@ describe("central chain/item CLI", () => {
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued", "needs_work"]
 terminal = ["custom_done"]
 entry = "queued"
 success = ["custom_done"]
 exhausted = "custom_done"
 
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
 
@@ -470,11 +470,11 @@ prompt = "run.md"
   # leaving phase-exit edge. The fixture's run phase had no exits declared —
   # this minimal exit keeps the status-snapshot test surface unchanged while
   # satisfying R2 (both continuable statuses can leave via "run → custom_done").
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "custom_done"
   when = "Run finished and the item reached the success-terminal vocabulary."
 
-  [phases.variables]
+  [steps.values]
   ISSUE = "item.issue"
 
 [agent]

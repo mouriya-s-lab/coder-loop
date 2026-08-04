@@ -34,7 +34,7 @@ import {
 	buildRunnerInvocation,
 	loadPreset,
 	resolvePhaseRunnerFromChain,
-	runPresetChainCompleteTriggerPhases,
+	runChainCompleteActivatedSteps,
 	substitutePresetRootToken,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -403,7 +403,7 @@ export async function createFixture(name: string): Promise<Fixture> {
 	const presetToml = await readFile(presetTomlPath, "utf-8")
 	const iterationHeader = 'roles  = ["common", "quality", "iter"]'
 	const fixtureExits = ["changes_requested", "blocked", "moot", "done", "exhausted"]
-		.map((status) => `\n  [[phases.exits]]\n  status = "${status}"\n  when = "scheduler fixture status"\n`)
+		.map((status) => `\n  [[steps.handoffs]]\n  status = "${status}"\n  when = "scheduler fixture status"\n`)
 		.join("")
 	await writeFile(presetTomlPath, presetToml.replace(iterationHeader, iterationHeader + fixtureExits))
 
@@ -417,7 +417,7 @@ export async function createFixture(name: string): Promise<Fixture> {
 	const worktreeCalls: string[] = []
 	const defaultPresetDir = fixturePresetDir
 	const defaultLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
-	if (defaultLoadedPreset.preset.phases.find((phase) => phase.name === "iteration")?.exits.length === 0) throw new Error("scheduler fixture preset did not declare iteration exits")
+	if (defaultLoadedPreset.preset.steps.find((phase) => phase.name === "iteration")?.exits.length === 0) throw new Error("scheduler fixture preset did not declare iteration exits")
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
 		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
@@ -682,7 +682,7 @@ description = "Three non-trigger phase fixture."
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued", "changes_requested"]
 terminal = ["done", "exhausted"]
 success = ["done"]
@@ -692,31 +692,31 @@ exhausted = "exhausted"
 [agent]
 binary = "codex"
 
-	[[phases]]
+	[[steps]]
 	name = "alpha"
 	prompt = "alpha.md"
 
-	  [phases.variables]
+	  [steps.values]
 	  ISSUE = "item.issue"
 	  LOG_DIR = "runtime.logDir"
 
-	[[phases]]
+	[[steps]]
 	name = "beta"
 	prompt = "beta.md"
 
-	  [phases.variables]
+	  [steps.values]
 	  ISSUE = "item.issue"
 	  LOG_DIR = "runtime.logDir"
 
-	[[phases]]
+	[[steps]]
 	name = "gamma"
 	prompt = "gamma.md"
 
-	  [[phases.exits]]
+	  [[steps.handoffs]]
 	  status = "done"
 	  when = "gamma accepted"
 
-	  [phases.variables]
+	  [steps.values]
 	  ISSUE = "item.issue"
 	  LOG_DIR = "runtime.logDir"
 `,
@@ -735,7 +735,7 @@ description = "Fixture preset with no success terminal statuses."
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued"]
 terminal = ["blocked", "done", "exhausted"]
 success = []
@@ -745,14 +745,14 @@ exhausted = "exhausted"
 [agent]
 binary = "codex"
 
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
 
   # #408: minimal leaving edge so R2 passes for "queued". The empty-success
   # test asserts dependency-unblock semantics; the exit set is inert from the
   # test's perspective.
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when = "Run finished cleanly; item lands in a terminal status."
 	`,
@@ -774,7 +774,7 @@ description = "Fixture preset whose attempts-exhausted落点 is a non-default te
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued"]
 terminal = ["done", "custom_exhausted"]
 success = ["done"]
@@ -784,7 +784,7 @@ exhausted = "custom_exhausted"
 [agent]
 binary = "codex"
 
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
 
@@ -792,7 +792,7 @@ prompt = "run.md"
   # attempts-exhausted test only cares about the engine writing
   # custom_exhausted via the retry-budget sink, which is independent of this
   # preset-declared phase exit.
-  [[phases.exits]]
+  [[steps.handoffs]]
   status = "done"
   when = "Run finished cleanly; item lands in success-terminal vocabulary."
 `,
@@ -815,7 +815,7 @@ description = "Fixture preset that omits the required statuses.exhausted declara
 [item]
 idField = "issue"
 
-[statuses]
+[routing]
 continuable = ["queued"]
 terminal = ["done"]
 success = ["done"]
@@ -824,7 +824,7 @@ entry = "queued"
 [agent]
 binary = "codex"
 
-[[phases]]
+[[steps]]
 name = "run"
 prompt = "run.md"
 `,
@@ -951,7 +951,7 @@ export async function createPresetPromptIntegrationFixture(name: string): Promis
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: makeAttemptTrackingRunIdFactory(),
 			prompt: async (ctx) => {
-				const phase = ctx.loadedPreset.preset.phases.find((entry) => entry.name === ctx.phase)
+				const phase = ctx.loadedPreset.preset.steps.find((entry) => entry.name === ctx.phase)
 				if (phase === undefined) throw new Error(`fixture preset ${ctx.loadedPreset.preset.name} does not define phase ${ctx.phase}`)
 				const raw = await readFile(phase.prompt, "utf-8")
 				return substitutePresetRootToken(raw, ctx.loadedPreset.preset.presetDir)
@@ -1001,7 +1001,7 @@ export {
 	selectNextPendingItemFromSnapshot,
 	resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent, startCoderLoopDaemon,
 	buildRunnerFilesystemAuthorization, buildRunnerInvocation, loadPreset, resolvePhaseRunnerFromChain,
-	runPresetChainCompleteTriggerPhases, substitutePresetRootToken,
+	runChainCompleteActivatedSteps, substitutePresetRootToken,
 	resolveChainRuntimePaths, resolveLoopDataPaths, openSqliteStateStore,
 	appendObservabilityEvent, queryObservabilityEvents,
 	chainMetadataToJsonObject, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus,
