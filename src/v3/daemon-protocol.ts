@@ -28,8 +28,10 @@ export type DaemonCommand =
 	| ChainBootstrapCommand
 	| { readonly kind: "status-read"; readonly chain: ChainIdentity }
 	| { readonly kind: "events-read"; readonly chain: ChainIdentity; readonly since: number }
+	| { readonly kind: "audit-read" }
 	| { readonly kind: "task-admit"; readonly chain: ChainIdentity; readonly request: AdmissionRequest }
 	| { readonly kind: "task-unhold"; readonly task: TaskIdentity; readonly commandIdentity: string }
+	| { readonly kind: "agent-await"; readonly site: string; readonly sessionIdentity: string; readonly child: AdmissionRequest }
 	| { readonly kind: "agent-submit"; readonly values: Readonly<Record<string, unknown>> }
 
 export type DaemonRequest = {
@@ -83,7 +85,7 @@ const AdmissionBoundary = arkType({
 	task: {
 		identity: TaskBoundary,
 		group: GroupBoundary,
-		input: { definition: DefinitionRefBoundary, basePin: "string > 0", value: "unknown", valueIdentity: "string > 0", "+": "reject" },
+		input: { definition: DefinitionRefBoundary, entrypoint: "string > 0", basePin: "string > 0", value: "unknown", valueIdentity: "string > 0", "+": "reject" },
 		dependsOn: TaskBoundary.array(),
 		priority: "number.integer",
 		"+": "reject",
@@ -139,6 +141,10 @@ function parseCommand(candidate: unknown): CommandParseResult {
 		const parsed = arkType({ kind: "'events-read'", chain: ChainBoundary, since: "number", "+": "reject" })(candidate)
 		return parsed instanceof arkType.errors ? rejectedCommand(parsed.summary) : { kind: "accepted-command", command: parsed }
 	}
+	if (isCommandKind(candidate, "audit-read")) {
+		const parsed = arkType({ kind: "'audit-read'", "+": "reject" })(candidate)
+		return parsed instanceof arkType.errors ? rejectedCommand(parsed.summary) : { kind: "accepted-command", command: parsed }
+	}
 	if (isCommandKind(candidate, "task-admit")) {
 		const parsed = arkType({ kind: "'task-admit'", chain: ChainBoundary, request: AdmissionBoundary, "+": "reject" })(candidate)
 		if (parsed instanceof arkType.errors) return rejectedCommand(parsed.summary)
@@ -150,6 +156,13 @@ function parseCommand(candidate: unknown): CommandParseResult {
 		const parsed = arkType({ kind: "'task-unhold'", task: TaskBoundary, commandIdentity: "string > 0", "+": "reject" })(candidate)
 		return parsed instanceof arkType.errors ? rejectedCommand(parsed.summary) : { kind: "accepted-command", command: parsed }
 	}
+	if (isCommandKind(candidate, "agent-await")) {
+		const parsed = arkType({ kind: "'agent-await'", site: "string > 0", sessionIdentity: "string > 0", child: AdmissionBoundary, "+": "reject" })(candidate)
+		if (parsed instanceof arkType.errors) return rejectedCommand(parsed.summary)
+		const value = parseDeclaredValue({ kind: "json" }, parsed.child.task.input.value)
+		if (value.kind === "rejected") return rejectedCommand("await child input is not JSON")
+		return { kind: "accepted-command", command: { ...parsed, child: { ...parsed.child, task: { ...parsed.child.task, input: { ...parsed.child.task.input, value: value.value } } } } }
+	}
 	if (isCommandKind(candidate, "agent-submit")) {
 		const parsed = arkType({ kind: "'agent-submit'", values: { "[string]": "unknown" }, "+": "reject" })(candidate)
 		return parsed instanceof arkType.errors ? rejectedCommand(parsed.summary) : { kind: "accepted-command", command: { kind: "agent-submit", values: parsed.values } }
@@ -160,11 +173,30 @@ function parseCommand(candidate: unknown): CommandParseResult {
 
 function authorize(request: DaemonRequest): DaemonRequestRejection | null {
 	if (request.command.kind === "agent-submit") return request.caller.kind === "agent" ? null : { kind: "request-rejected", reason: "unauthorized", issues: ["agent-submit requires agent authority"] }
+	if (request.command.kind === "agent-await") {
+		if (request.caller.kind !== "agent" || request.command.child.authority.kind !== "internal") {
+			return { kind: "request-rejected", reason: "unauthorized", issues: ["agent-await requires matching internal agent authority"] }
+		}
+		const run = request.command.child.authority.run
+		const caller = request.caller.authority
+		const expectedClosure = `${taskKey(run.closure.task)}/${run.closure.attempt}`
+		const matches = caller.chainId === run.closure.task.chain.value
+			&& caller.taskId === taskKey(run.closure.task)
+			&& caller.closureId === expectedClosure
+			&& caller.runId === run.value
+		return matches ? null : { kind: "request-rejected", reason: "unauthorized", issues: ["caller authority does not match the await parent run"] }
+	}
 	if (request.command.kind === "task-admit" && request.command.request.authority.kind === "internal") {
 		if (request.caller.kind !== "agent") return { kind: "request-rejected", reason: "unauthorized", issues: ["internal admission requires agent authority"] }
 		const run = request.command.request.authority.run
-		if (request.caller.authority.runId !== run.value || request.caller.authority.taskId !== taskKey(run.closure.task)) return { kind: "request-rejected", reason: "unauthorized", issues: ["caller authority does not match admission run"] }
-		return null
+		const expectedClosure = `${taskKey(run.closure.task)}/${run.closure.attempt}`
+		const caller = request.caller.authority
+		const matches = caller.chainId === run.closure.task.chain.value
+			&& caller.taskId === taskKey(run.closure.task)
+			&& caller.closureId === expectedClosure
+			&& caller.runId === run.value
+			&& request.command.chain.value === caller.chainId
+		return matches ? null : { kind: "request-rejected", reason: "unauthorized", issues: ["caller authority does not match the complete admission run identity"] }
 	}
 	return request.caller.kind === "operator" ? null : { kind: "request-rejected", reason: "unauthorized", issues: ["operator command requires operator authority"] }
 }
