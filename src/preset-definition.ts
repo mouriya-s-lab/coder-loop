@@ -209,7 +209,7 @@ export async function publishDefinitionBundle(
 		try {
 			await rename(stagingDir, bundleDir)
 		} catch (error) {
-			if (!isNodeError(error) || error.code !== "EEXIST") throw error
+			if (!isNodeError(error) || (error.code !== "EEXIST" && error.code !== "ENOTEMPTY")) throw error
 			const raced = await resolveDefinitionBundle(ref, storeRoot)
 			if (raced.kind === "corrupt") throw new Error(`definition publish race resolved to corrupt bundle: ${raced.reason}: ${raced.detail}`)
 		}

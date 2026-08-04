@@ -58,8 +58,12 @@ describe("pinned recursive preset definition", () => {
 		expect(compiled.kind).toBe("compiled")
 		if (compiled.kind !== "compiled") return
 
-		const first = await publishPresetDefinition(compiled, storeRoot)
+		const [first, raced] = await Promise.all([
+			publishPresetDefinition(compiled, storeRoot),
+			publishPresetDefinition(compiled, storeRoot),
+		])
 		const second = await publishPresetDefinition(compiled, storeRoot)
+		expect(raced).toEqual(first)
 		expect(second).toEqual(first)
 		const resolved = await resolvePresetDefinition(first.ref, storeRoot)
 		expect(resolved.kind).toBe("resolved")

@@ -54,7 +54,7 @@ describe("daemon", () => {
 				// #405: pin the iteration write so the test's single-phase event assertion stays
 				// single-phase (previously the retired stdout verdict mapper coincidentally landed
 				// iteration at done via the default REVIEW SUMMARY token).
-				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
+				extra: { sleepMs: 50, exitCode: 0, writeStatus: "done" },
 			})
 
 			// The run's events file must end with chain.completed, which the scheduler appends last.
@@ -616,8 +616,10 @@ prompt = "review.md"
 			const spawnEvent = fixture.schedulerEvents.find((event) => event.type === "agent.spawn")
 			if (spawnEvent?.type !== "agent.spawn") throw new Error("expected agent.spawn event")
 			expect(spawnEvent.chainId).toBe(chainId)
-			expect(spawnEvent.presetDir.startsWith(resolve(fixture.loopDataRoot, "preset-materialized") + "/")).toBe(true)
-			expect(spawnEvent.presetDir.split("/").at(-1)?.startsWith("single-phase-example-")).toBe(true)
+			expect(spawnEvent.presetDir.startsWith(resolve(fixture.loopDataRoot, "definitions") + "/")).toBe(true)
+			expect(spawnEvent.presetDir.split("/").at(-1)).toBe("assets")
+			const manifest = record(JSON.parse(await readFile(resolve(spawnEvent.presetDir, "..", "manifest.json"), "utf8")))
+			expect(record(record(manifest.envelope).definition).name).toBe("single-phase-example")
 		} finally {
 			await fixture.daemon.stop()
 		}
