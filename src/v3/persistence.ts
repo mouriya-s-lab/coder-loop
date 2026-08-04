@@ -27,6 +27,8 @@ const DefinitionRefBoundary = arkType({
 const AgentAuthorityBoundary = arkType({ kind: "'agent-run'", chainId: "string > 0", taskId: "string > 0", closureId: "string > 0", runId: "string > 0", "+": "reject" })
 const CheckpointBoundary = arkType({
 	run: AgentAuthorityBoundary,
+	stepId: "string > 0",
+	runnerSessionIdentity: "string | null",
 	context0: arkType.or({ stage: "'context-0'", values: "unknown", "+": "reject" }, "null"),
 	context1: arkType.or({ stage: "'context-1'", values: "unknown", "+": "reject" }, "null"),
 	context2: arkType.or({ stage: "'context-2'", values: "unknown", "+": "reject" }, "null"),
@@ -96,7 +98,7 @@ const TaskStateBoundary = arkType.or(
 const TaskBoundary = arkType({
 	identity: TaskIdentityBoundary,
 	group: GroupIdentityBoundary,
-	input: { definition: DefinitionRefBoundary, basePin: "string > 0", value: "unknown", valueIdentity: "string > 0" },
+	input: { definition: DefinitionRefBoundary, entrypoint: "string > 0", basePin: "string > 0", value: "unknown", valueIdentity: "string > 0" },
 	dependsOn: TaskIdentityBoundary.array(),
 	priority: "number.integer",
 	state: TaskStateBoundary,
@@ -112,12 +114,19 @@ const GroupStateBoundary = arkType.or(
 	{ kind: "'open'" },
 	{ kind: "'waiting'", deadline: "number", memberVersion: "number.integer >= 0" },
 	{ kind: "'terminated'", reason: "'immediate' | 'deadline'", memberVersion: "number.integer >= 0", terminatedAt: "number" },
+	{
+		kind: "'consuming'",
+		consumerTask: TaskIdentityBoundary,
+		consumerGroup: GroupIdentityBoundary,
+		settlementsDigest: "string > 0",
+		startedAt: "number",
+	},
 	{ kind: "'consumed'", consumption: { kind: "'consumption'", group: GroupIdentityBoundary, value: "string > 0" }, consumedAt: "number" },
 )
 const GroupConsumerBoundary = arkType.or(
 	{ kind: "'drain'" },
-	{ kind: "'validator'", definition: DefinitionRefBoundary },
-	{ kind: "'finalizer'", definition: DefinitionRefBoundary },
+	{ kind: "'validator'", definition: DefinitionRefBoundary, entrypoint: "string > 0" },
+	{ kind: "'finalizer'", definition: DefinitionRefBoundary, entrypoint: "string > 0" },
 )
 const TaskGroupBoundary = arkType({
 	identity: GroupIdentityBoundary,
@@ -137,6 +146,15 @@ const AwaitRecordBoundary = arkType.or(
 		child: TaskIdentityBoundary,
 		settlement: TaskSettlementBoundary,
 		token: "string > 0",
+	},
+	{
+		kind: "'consumed'",
+		identity: AwaitIdentityBoundary,
+		parentClosure: ClosureIdentityBoundary,
+		child: TaskIdentityBoundary,
+		settlement: TaskSettlementBoundary,
+		token: "string > 0",
+		consumedAt: "number",
 	},
 	{ kind: "'continuation-lost'", identity: AwaitIdentityBoundary, parentClosure: ClosureIdentityBoundary, child: TaskIdentityBoundary },
 )
@@ -181,7 +199,7 @@ export function parsePersistedGroup(candidate: unknown): PersistenceParseResult<
 export function parsePersistedAwait(candidate: unknown): PersistenceParseResult<AwaitRecord> {
 	const parsed = AwaitRecordBoundary(candidate)
 	if (parsed instanceof arkType.errors) return rejected("await", parsed.summary)
-	if (parsed.kind !== "delivered") return { kind: "accepted", value: parsed }
+	if (parsed.kind !== "delivered" && parsed.kind !== "consumed") return { kind: "accepted", value: parsed }
 	const settlement = parseSettlement(parsed.settlement)
 	if (settlement.kind === "rejected") return settlement
 	return { kind: "accepted", value: { ...parsed, settlement: settlement.value } }
@@ -231,6 +249,8 @@ export function parseFunctionCheckpoint(candidate: unknown): PersistenceParseRes
 		kind: "accepted",
 		value: {
 			run: parsed.run,
+			stepId: parsed.stepId,
+			runnerSessionIdentity: parsed.runnerSessionIdentity,
 			context0: context0Values.value === null ? null : { stage: "context-0", values: context0Values.value },
 			context1: context1Values.value === null ? null : { stage: "context-1", values: context1Values.value },
 			context2: context2Values.value === null ? null : { stage: "context-2", values: context2Values.value },
