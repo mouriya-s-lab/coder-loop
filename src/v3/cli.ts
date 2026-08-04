@@ -77,6 +77,10 @@ async function parseInvocation(argv: readonly string[]): Promise<CliInvocation> 
 		assertNoArgs(args)
 		return { socket, caller: { kind: "operator" }, command: { kind: "events-read", chain: { kind: "chain", value: chain }, since } }
 	}
+	if (resource === "audit" && action === undefined) {
+		assertNoArgs(args)
+		return { socket, caller: { kind: "operator" }, command: { kind: "audit-read" } }
+	}
 	if (resource === "task" && action === "admit") {
 		const chain = requiredOption(args, "--chain")
 		const request = await readJsonOption(args, "--file")
@@ -90,6 +94,27 @@ async function parseInvocation(argv: readonly string[]): Promise<CliInvocation> 
 		assertNoArgs(args)
 		return { socket, caller: { kind: "operator" }, command: { kind: "task-unhold", task: { kind: "task", chain: { kind: "chain", value: chain }, value: task }, commandIdentity } }
 	}
+	if (resource === "agent" && action === "admit") {
+		const authorityPath = takeOption(args, "--authority")
+		const authority: unknown = authorityPath === null
+			? parseEnvironmentJson("CODER_LOOP_AGENT_AUTHORITY")
+			: JSON.parse(await readFile(authorityPath, "utf8"))
+		const chain = requiredOption(args, "--chain")
+		const request = await readJsonOption(args, "--file")
+		assertNoArgs(args)
+		return { socket, caller: { kind: "agent", authority }, command: { kind: "task-admit", chain: { kind: "chain", value: chain }, request } }
+	}
+	if (resource === "agent" && action === "await") {
+		const authorityPath = takeOption(args, "--authority")
+		const authority: unknown = authorityPath === null
+			? parseEnvironmentJson("CODER_LOOP_AGENT_AUTHORITY")
+			: JSON.parse(await readFile(authorityPath, "utf8"))
+		const site = requiredOption(args, "--site")
+		const sessionIdentity = requiredOption(args, "--session")
+		const child = await readJsonOption(args, "--child")
+		assertNoArgs(args)
+		return { socket, caller: { kind: "agent", authority }, command: { kind: "agent-await", site, sessionIdentity, child } }
+	}
 	if (resource === "agent" && action === "submit") {
 		const authorityPath = takeOption(args, "--authority")
 		const authority: unknown = authorityPath === null
@@ -99,7 +124,7 @@ async function parseInvocation(argv: readonly string[]): Promise<CliInvocation> 
 		assertNoArgs(args)
 		return { socket, caller: { kind: "agent", authority }, command: { kind: "agent-submit", values } }
 	}
-	throw new Error("usage: coder-loop-v3 --socket PATH <definition publish|chain bootstrap|status|events|task admit|task unhold|agent submit> [options]")
+	throw new Error("usage: coder-loop-v3 --socket PATH <definition publish|chain bootstrap|status|events|audit|task admit|task unhold|agent admit|agent await|agent submit> [options]")
 }
 
 function requestDaemon(socketPath: string, request: unknown, maxResponseBytes: number): Promise<ParsedResponse> {
