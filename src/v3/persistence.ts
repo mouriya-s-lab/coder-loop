@@ -1,0 +1,321 @@
+import { type as arkType } from "arktype"
+import { isBoundaryRecord } from "../boundary-types"
+import type { JsonValue } from "./definition"
+import { parseDeclaredValue } from "./definition"
+import type { ContextValues, FunctionCheckpoint, MapFaultEntry } from "./context"
+import type {
+	AwaitRecord,
+	ClosureResourceState,
+	GroupState,
+	PublicationEvidence,
+	Task,
+	TaskGroup,
+	TaskSettlement,
+} from "./object-domain"
+
+const ChainIdentityBoundary = arkType({ kind: "'chain'", value: "string > 0" })
+const TaskIdentityBoundary = arkType({ kind: "'task'", chain: ChainIdentityBoundary, value: "string > 0" })
+const GroupIdentityBoundary = arkType({ kind: "'group'", chain: ChainIdentityBoundary, value: "string > 0" })
+const ClosureIdentityBoundary = arkType({ kind: "'closure'", task: TaskIdentityBoundary, attempt: "number.integer >= 0" })
+const RunIdentityBoundary = arkType({ kind: "'run'", closure: ClosureIdentityBoundary, value: "string > 0" })
+const AwaitIdentityBoundary = arkType({ kind: "'await'", parent: TaskIdentityBoundary, attempt: "number.integer >= 0", site: "string > 0" })
+const DefinitionRefBoundary = arkType({
+	kind: "'published-definition'",
+	content: { kind: "'definition-content'", digest: "string > 0" },
+	product: { kind: "'compiled-product'", digest: "string > 0" },
+})
+const AgentAuthorityBoundary = arkType({ kind: "'agent-run'", chainId: "string > 0", taskId: "string > 0", closureId: "string > 0", runId: "string > 0", "+": "reject" })
+const CheckpointBoundary = arkType({
+	run: AgentAuthorityBoundary,
+	context0: arkType.or({ stage: "'context-0'", values: "unknown", "+": "reject" }, "null"),
+	context1: arkType.or({ stage: "'context-1'", values: "unknown", "+": "reject" }, "null"),
+	context2: arkType.or({ stage: "'context-2'", values: "unknown", "+": "reject" }, "null"),
+	context3: arkType.or({ stage: "'context-3'", values: "unknown", "+": "reject" }, "null"),
+	prompt: arkType.or({ kind: "'frozen-prompt'", text: "string", inputValues: "unknown", "+": "reject" }, "null"),
+	agent: { state: "'not-opened'|'open'|'closed'", accepted: "unknown", "+": "reject" },
+	predicates: { "[string]": "boolean" },
+	"+": "reject",
+})
+
+const PublicationEvidenceBoundary = arkType.or(
+	{ kind: "'published'", tip: "string > 0", remoteRef: "string > 0", observedAt: "number" },
+	{ kind: "'unpublished'", tip: "string > 0", observedAt: "number" },
+	{ kind: "'unknown'", tip: "string > 0", reason: "string > 0", observedAt: "number" },
+	{ kind: "'no-work'", observedAt: "number" },
+)
+const ContinuationFactBoundary = arkType.or(
+	{ kind: "'present'", sessionIdentity: "string > 0", observedAt: "number" },
+	{ kind: "'lost'", observedAt: "number" },
+)
+const ClosureResourceStateBoundary = arkType.or(
+	{ kind: "'unallocated'" },
+	{
+		kind: "'active'",
+		identity: ClosureIdentityBoundary,
+		basePin: "string > 0",
+		branch: "string > 0",
+		worktree: "string > 0",
+		scratch: "string > 0",
+	},
+	{ kind: "'suspended'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", continuation: ContinuationFactBoundary },
+	{ kind: "'evidence-frozen'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", publication: PublicationEvidenceBoundary },
+	{ kind: "'collected'", identity: ClosureIdentityBoundary, publication: PublicationEvidenceBoundary, collectedAt: "number" },
+)
+
+const ValueParseIssueBoundary = arkType({ path: "(string | number)[]", expected: "string", actual: "string" })
+const MapFaultBoundary = arkType({ kind: "'spawn' | 'timeout' | 'exit' | 'map-rejected'", message: "string" })
+const MapFaultReasonBoundary = arkType.or(
+	{ kind: "'duplicate-result'" },
+	{ kind: "'missing-result'" },
+	{ kind: "'unexpected-result'" },
+	{ kind: "'required-value-absent'" },
+	{ kind: "'parse-rejected'", issues: ValueParseIssueBoundary.array() },
+	{ kind: "'map-fault'", fault: MapFaultBoundary },
+)
+const MapFaultEntryBoundary = arkType({ valueName: "string", reason: MapFaultReasonBoundary })
+const ClosureCauseBoundary = arkType.or(
+	{ kind: "'map-batch-exception'", stage: "'pre-agent' | 'post-agent'", faults: MapFaultEntryBoundary.array() },
+	{ kind: "'policy'", reason: "'predicate-false' | 'program-fault'" },
+	{ kind: "'cascade-exhausted'" },
+)
+const ClosureExceptionBoundary = arkType({ kind: "'exception'", cause: ClosureCauseBoundary })
+const TaskSettlementBoundary = arkType.or(
+	{ kind: "'returned'", value: "unknown" },
+	{ kind: "'exception'", cause: ClosureExceptionBoundary, attempt: "number.integer >= 0", closure: ClosureIdentityBoundary },
+)
+const TaskStateBoundary = arkType.or(
+	{ kind: "'ready'" },
+	{ kind: "'leased'", run: RunIdentityBoundary, acquiredAt: "number", expiresAt: "number" },
+	{ kind: "'suspended'", await: AwaitIdentityBoundary },
+	{ kind: "'held'", reason: arkType.or(
+		{ kind: "'pre-spawn-absence'", endpoint: "string", detail: "string", observedAt: "number" },
+		{ kind: "'unknown-effect'", endpoint: "string", run: RunIdentityBoundary, detail: "string", observedAt: "number" },
+	) },
+	{ kind: "'settled'", settlement: TaskSettlementBoundary, settledAt: "number" },
+)
+const TaskBoundary = arkType({
+	identity: TaskIdentityBoundary,
+	group: GroupIdentityBoundary,
+	input: { definition: DefinitionRefBoundary, basePin: "string > 0", value: "unknown", valueIdentity: "string > 0" },
+	dependsOn: TaskIdentityBoundary.array(),
+	priority: "number.integer",
+	state: TaskStateBoundary,
+	closure: ClosureResourceStateBoundary,
+})
+
+const WaitWindowBoundary = arkType.or(
+	{ kind: "'none'" },
+	{ kind: "'fixed-deadline'", durationMs: "number > 0" },
+	{ kind: "'sliding-deadline'", durationMs: "number > 0" },
+)
+const GroupStateBoundary = arkType.or(
+	{ kind: "'open'" },
+	{ kind: "'waiting'", deadline: "number", memberVersion: "number.integer >= 0" },
+	{ kind: "'terminated'", reason: "'immediate' | 'deadline'", memberVersion: "number.integer >= 0", terminatedAt: "number" },
+	{ kind: "'consumed'", consumption: { kind: "'consumption'", group: GroupIdentityBoundary, value: "string > 0" }, consumedAt: "number" },
+)
+const GroupConsumerBoundary = arkType.or(
+	{ kind: "'drain'" },
+	{ kind: "'validator'", definition: DefinitionRefBoundary },
+	{ kind: "'finalizer'", definition: DefinitionRefBoundary },
+)
+const TaskGroupBoundary = arkType({
+	identity: GroupIdentityBoundary,
+	members: TaskIdentityBoundary.array(),
+	memberVersion: "number.integer >= 0",
+	wait: WaitWindowBoundary,
+	consumer: GroupConsumerBoundary,
+	state: GroupStateBoundary,
+})
+
+const AwaitRecordBoundary = arkType.or(
+	{ kind: "'waiting'", identity: AwaitIdentityBoundary, parentClosure: ClosureIdentityBoundary, child: TaskIdentityBoundary },
+	{
+		kind: "'delivered'",
+		identity: AwaitIdentityBoundary,
+		parentClosure: ClosureIdentityBoundary,
+		child: TaskIdentityBoundary,
+		settlement: TaskSettlementBoundary,
+		token: "string > 0",
+	},
+	{ kind: "'continuation-lost'", identity: AwaitIdentityBoundary, parentClosure: ClosureIdentityBoundary, child: TaskIdentityBoundary },
+)
+
+export type PersistenceParseError = {
+	readonly kind: "persisted-shape-invalid"
+	readonly entity: "task" | "group" | "await" | "publication" | "group-state" | "closure" | "settlement" | "checkpoint"
+	readonly message: string
+}
+
+export type PersistenceParseResult<T> =
+	| { readonly kind: "accepted"; readonly value: T }
+	| { readonly kind: "rejected"; readonly error: PersistenceParseError }
+
+export function parsePersistedTask(candidate: unknown): PersistenceParseResult<Task> {
+	const parsed = TaskBoundary(candidate)
+	if (parsed instanceof arkType.errors) return rejected("task", parsed.summary)
+	const inputValue = jsonValue(parsed.input.value, "task.input.value")
+	if (inputValue.kind === "rejected") return inputValue
+	const state = parseTaskState(parsed.state)
+	if (state.kind === "rejected") return state
+	return {
+		kind: "accepted",
+		value: {
+			identity: parsed.identity,
+			group: parsed.group,
+			input: { ...parsed.input, value: inputValue.value },
+			dependsOn: parsed.dependsOn,
+			priority: parsed.priority,
+			state: state.value,
+			closure: parsed.closure,
+		},
+	}
+}
+
+export function parsePersistedGroup(candidate: unknown): PersistenceParseResult<TaskGroup> {
+	const parsed = TaskGroupBoundary(candidate)
+	if (parsed instanceof arkType.errors) return rejected("group", parsed.summary)
+	return { kind: "accepted", value: parsed }
+}
+
+export function parsePersistedAwait(candidate: unknown): PersistenceParseResult<AwaitRecord> {
+	const parsed = AwaitRecordBoundary(candidate)
+	if (parsed instanceof arkType.errors) return rejected("await", parsed.summary)
+	if (parsed.kind !== "delivered") return { kind: "accepted", value: parsed }
+	const settlement = parseSettlement(parsed.settlement)
+	if (settlement.kind === "rejected") return settlement
+	return { kind: "accepted", value: { ...parsed, settlement: settlement.value } }
+}
+
+export function parsePersistedPublication(candidate: unknown): PersistenceParseResult<PublicationEvidence> {
+	const parsed = PublicationEvidenceBoundary(candidate)
+	return parsed instanceof arkType.errors ? rejected("publication", parsed.summary) : { kind: "accepted", value: parsed }
+}
+
+export function parsePersistedClosure(candidate: unknown): PersistenceParseResult<ClosureResourceState> {
+	const parsed = ClosureResourceStateBoundary(candidate)
+	return parsed instanceof arkType.errors ? rejected("closure", parsed.summary) : { kind: "accepted", value: parsed }
+}
+
+export function parsePersistedGroupState(candidate: unknown): PersistenceParseResult<GroupState> {
+	const parsed = GroupStateBoundary(candidate)
+	return parsed instanceof arkType.errors ? rejected("group-state", parsed.summary) : { kind: "accepted", value: parsed }
+}
+
+export function parsePersistedSettlement(candidate: unknown): PersistenceParseResult<TaskSettlement> {
+	const parsed = TaskSettlementBoundary(candidate)
+	if (parsed instanceof arkType.errors) return rejected("settlement", parsed.summary)
+	return parseSettlement(parsed)
+}
+
+export function parseFunctionCheckpoint(candidate: unknown): PersistenceParseResult<FunctionCheckpoint> {
+	const parsed = CheckpointBoundary(candidate)
+	if (parsed instanceof arkType.errors) return rejected("checkpoint", parsed.summary)
+	const context0Values: PersistenceParseResult<ContextValues | null> = parsed.context0 === null ? { kind: "accepted", value: null } : contextValues(parsed.context0.values, "context-0 values")
+	if (context0Values.kind === "rejected") return context0Values
+	const context1Values: PersistenceParseResult<ContextValues | null> = parsed.context1 === null ? { kind: "accepted", value: null } : contextValues(parsed.context1.values, "context-1 values")
+	if (context1Values.kind === "rejected") return context1Values
+	const context2Values: PersistenceParseResult<ContextValues | null> = parsed.context2 === null ? { kind: "accepted", value: null } : contextValues(parsed.context2.values, "context-2 values")
+	if (context2Values.kind === "rejected") return context2Values
+	const context3Values: PersistenceParseResult<ContextValues | null> = parsed.context3 === null ? { kind: "accepted", value: null } : contextValues(parsed.context3.values, "context-3 values")
+	if (context3Values.kind === "rejected") return context3Values
+	const accepted = contextValues(parsed.agent.accepted, "agent accepted values")
+	if (accepted.kind === "rejected") return accepted
+	let prompt: FunctionCheckpoint["prompt"] = null
+	if (parsed.prompt !== null) {
+		const inputValues = contextValues(parsed.prompt.inputValues, "frozen prompt input values")
+		if (inputValues.kind === "rejected") return inputValues
+		prompt = { kind: "frozen-prompt", text: parsed.prompt.text, inputValues: inputValues.value }
+	}
+	return {
+		kind: "accepted",
+		value: {
+			run: parsed.run,
+			context0: context0Values.value === null ? null : { stage: "context-0", values: context0Values.value },
+			context1: context1Values.value === null ? null : { stage: "context-1", values: context1Values.value },
+			context2: context2Values.value === null ? null : { stage: "context-2", values: context2Values.value },
+			context3: context3Values.value === null ? null : { stage: "context-3", values: context3Values.value },
+			prompt,
+			agent: { state: parsed.agent.state, accepted: accepted.value },
+			predicates: parsed.predicates,
+		},
+	}
+}
+
+export function encodePersisted(value: Task | TaskGroup | AwaitRecord | TaskSettlement | ClosureResourceState | GroupState | PublicationEvidence): string {
+	return JSON.stringify(value)
+}
+
+export function decodePersisted(raw: string): PersistenceParseResult<JsonValue> {
+	let candidate: unknown
+	try {
+		candidate = JSON.parse(raw)
+	} catch (error) {
+		return rejected("task", error instanceof Error ? error.message : String(error))
+	}
+	return jsonValue(candidate, "persisted JSON")
+}
+
+function parseTaskState(candidate: typeof TaskStateBoundary.infer): PersistenceParseResult<Task["state"]> {
+	if (candidate.kind !== "settled") return { kind: "accepted", value: candidate }
+	const settlement = parseSettlement(candidate.settlement)
+	if (settlement.kind === "rejected") return settlement
+	return { kind: "accepted", value: { ...candidate, settlement: settlement.value } }
+}
+
+function parseSettlement(candidate: typeof TaskSettlementBoundary.infer): PersistenceParseResult<TaskSettlement> {
+	if (candidate.kind === "returned") {
+		const value = jsonValue(candidate.value, "task settlement value")
+		return value.kind === "rejected" ? value : { kind: "accepted", value: { kind: "returned", value: value.value } }
+	}
+	const cause = candidate.cause.cause
+	if (cause.kind !== "map-batch-exception") {
+		return {
+			kind: "accepted",
+			value: {
+				kind: "exception",
+				cause: { kind: "exception", cause },
+				attempt: candidate.attempt,
+				closure: candidate.closure,
+			},
+		}
+	}
+	const faults: MapFaultEntry[] = []
+	for (const fault of cause.faults) {
+		if (fault.reason.kind !== "parse-rejected") {
+			faults.push({ valueName: fault.valueName, reason: fault.reason })
+			continue
+		}
+		const [first, ...rest] = fault.reason.issues
+		if (first === undefined) return rejected("settlement", "parse-rejected fault must contain at least one issue")
+		faults.push({ ...fault, reason: { kind: "parse-rejected", issues: [first, ...rest] } })
+	}
+	return {
+		kind: "accepted",
+		value: {
+			...candidate,
+			cause: { ...candidate.cause, cause: { ...cause, faults } },
+		},
+	}
+}
+
+function contextValues(candidate: unknown, label: string): PersistenceParseResult<ContextValues> {
+	if (!isBoundaryRecord(candidate)) return rejected("checkpoint", `${label}: expected record`)
+	const values: Record<string, JsonValue> = {}
+	for (const [name, value] of Object.entries(candidate)) {
+		const parsed = jsonValue(value, `${label}.${name}`)
+		if (parsed.kind === "rejected") return parsed
+		values[name] = parsed.value
+	}
+	return { kind: "accepted", value: values }
+}
+
+function jsonValue(candidate: unknown, label: string): PersistenceParseResult<JsonValue> {
+	const parsed = parseDeclaredValue({ kind: "json" }, candidate)
+	return parsed.kind === "accepted" ? parsed : rejected("task", `${label}: ${parsed.issues.map((issue) => `${issue.path.join(".")}: ${issue.expected}`).join(", ")}`)
+}
+
+function rejected<T>(entity: PersistenceParseError["entity"], message: string): PersistenceParseResult<T> {
+	return { kind: "rejected", error: { kind: "persisted-shape-invalid", entity, message } }
+}
+
