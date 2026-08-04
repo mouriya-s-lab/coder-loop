@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { createHash } from "node:crypto"
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import { type as arkType } from "arktype"
@@ -7,12 +8,14 @@ import type { BoundaryRecord } from "../boundary-types"
 import type { AgentRunAuthority, FunctionCheckpoint } from "./context"
 import {
 	factKey,
+	evaluateAdmission,
 	groupKey,
 	nextGroupState,
 	taskKey,
+	type AdmissionRequest,
+	type AdmissionResult,
 	type AwaitIdentity,
 	type AwaitRecord,
-	type ClosureResourceState,
 	type CommittedTransition,
 	type ObjectDomainSnapshot,
 	type Task,
@@ -30,6 +33,7 @@ import {
 const SCHEMA_VERSION = 3
 const PayloadRowBoundary = arkType({ payload: "string" })
 const IdentityRowBoundary = arkType({ identity_key: "string" })
+const TransitionRowBoundary = arkType({ chain_key: "string", family: "string", payload: "string" })
 
 type SqlParams = Record<string, string | number | bigint | boolean | null | Uint8Array>
 
@@ -59,6 +63,10 @@ export type TransitionRequest = {
 export type CommitResult =
 	| { readonly kind: "committed"; readonly identity: string }
 	| { readonly kind: "already-committed"; readonly identity: string }
+export type AdmissionStoreResult =
+	| { readonly kind: "admitted"; readonly admission: Extract<AdmissionResult, { kind: "admitted" }>; readonly commit: CommitResult }
+	| Extract<AdmissionResult, { kind: "rejected" }>
+
 
 export type CommittedTransitionAudit = {
 	readonly identity: string
@@ -73,6 +81,7 @@ export type ObjectDomainStoreService = {
 	readonly listChains: Effect.Effect<readonly ObjectDomainSnapshot["chain"][], ObjectStoreError>
 	readonly listTransitions: (chain: ObjectDomainSnapshot["chain"], since: number) => Effect.Effect<readonly CommittedTransitionAudit[], ObjectStoreError>
 	readonly readFunctionCheckpoint: (run: AgentRunAuthority) => Effect.Effect<FunctionCheckpoint | null, ObjectStoreError>
+	readonly admit: (chain: ObjectDomainSnapshot["chain"], request: AdmissionRequest) => Effect.Effect<AdmissionStoreResult, ObjectStoreError>
 	readonly writeFunctionCheckpoint: (checkpoint: FunctionCheckpoint) => Effect.Effect<void, ObjectStoreError>
 }
 
@@ -102,6 +111,7 @@ function makeService(database: Database): ObjectDomainStoreService & { readonly 
 		listTransitions: (chain, since) => attempt("list-transitions", () => listTransitions(database, chain, since)),
 		readFunctionCheckpoint: (run) => attempt("read-function-checkpoint", () => readFunctionCheckpoint(database, run)),
 		writeFunctionCheckpoint: (checkpoint) => attempt("write-function-checkpoint", () => writeFunctionCheckpoint(database, checkpoint)),
+		admit: (chain, request) => attempt("admit", () => admit(database, chain, request)),
 		close: () => database.close(),
 	}
 }
@@ -186,12 +196,12 @@ function readSnapshot(database: Database, chain: ObjectDomainSnapshot["chain"]):
 function listTransitions(database: Database, chain: ObjectDomainSnapshot["chain"], since: number): readonly CommittedTransitionAudit[] {
 	const boundary = arkType({
 		identity_key: "string",
-		family: "'task-admission' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'group-waiting' | 'group-termination' | 'group-consumption' | 'resource-intent'",
+		family: "'task-admission' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
 		committed_at: "number",
 		"+": "reject",
 	})
 	return database.query<BoundaryRecord, SqlParams>(
-		"SELECT identity_key,family,committed_at FROM v3_transitions WHERE chain_key=$chain AND committed_at >= $since ORDER BY committed_at,identity_key",
+		"SELECT identity_key,family,committed_at FROM v3_transitions WHERE chain_key=$chain AND committed_at >= $since ORDER BY committed_at,rowid",
 	).all({ chain: chain.value, since }).map((row) => {
 		const parsed = boundary(row)
 		if (parsed instanceof arkType.errors) throw new Error(parsed.summary)
@@ -209,35 +219,92 @@ function readFunctionCheckpoint(database: Database, run: AgentRunAuthority): Fun
 }
 
 function writeFunctionCheckpoint(database: Database, checkpoint: FunctionCheckpoint): void {
-	if (!exists(database, "v3_chains", "chain_key", checkpoint.run.chainId)) reject("bootstrap", "not-found", `chain ${checkpoint.run.chainId} not found`)
-	database.query<never, SqlParams>(
-		"INSERT INTO v3_function_checkpoints (run_key,chain_key,payload) VALUES ($key,$chain,$payload) ON CONFLICT(run_key) DO UPDATE SET payload=excluded.payload",
-	).run({ key: functionRunKey(checkpoint.run), chain: checkpoint.run.chainId, payload: JSON.stringify(checkpoint) })
+	const run = database.transaction(() => {
+		const row = database.query<BoundaryRecord, SqlParams>(
+			"SELECT payload FROM v3_tasks WHERE task_key=$task AND chain_key=$chain",
+		).get({ task: checkpoint.run.taskId, chain: checkpoint.run.chainId })
+		if (row === null) reject("lease-acquire", "not-found", `task ${checkpoint.run.taskId} not found`)
+		const payload = PayloadRowBoundary(row)
+		if (payload instanceof arkType.errors) throw new Error(payload.summary)
+		const parsed = parsePersistedTask(parseJson(payload.payload))
+		if (parsed.kind === "rejected") throw persistedShape(parsed.error)
+		const task = parsed.value
+		const expectedClosure = `${taskKey(task.identity)}/${task.state.kind === "leased" ? task.state.run.closure.attempt : -1}`
+		if (task.state.kind !== "leased"
+			|| task.state.run.value !== checkpoint.run.runId
+			|| taskKey(task.state.run.closure.task) !== checkpoint.run.taskId
+			|| expectedClosure !== checkpoint.run.closureId) {
+			reject("lease-acquire", "run-mismatch", "function checkpoint requires the matching live lease")
+		}
+		database.query<never, SqlParams>(
+			"INSERT INTO v3_function_checkpoints (run_key,chain_key,payload) VALUES ($key,$chain,$payload) ON CONFLICT(run_key) DO UPDATE SET payload=excluded.payload",
+		).run({ key: functionRunKey(checkpoint.run), chain: checkpoint.run.chainId, payload: JSON.stringify(checkpoint) })
+	})
+	run.immediate()
 }
 
 function functionRunKey(run: AgentRunAuthority): string {
-	return `${run.chainId}/${run.taskId}/${run.closureId}/${run.runId}`
+	return run.closureId
 }
 
 
 
-function commit(database: Database, request: TransitionRequest): CommitResult {
-	const run = database.transaction((): CommitResult => {
-		if (exists(database, "v3_transitions", "identity_key", request.identity)) return { kind: "already-committed", identity: request.identity }
-		applyTransition(database, request.transition)
-		const chain = transitionChain(request.transition)
-		database.query<never, SqlParams>("INSERT INTO v3_transitions (identity_key,chain_key,family,payload,committed_at) VALUES ($identity,$chain,$family,$payload,$now)").run({
-			identity: request.identity,
-			chain,
-			family: request.transition.family,
-			payload: JSON.stringify(request.transition),
-			now: Date.now(),
-		})
-		return { kind: "committed", identity: request.identity }
+function admit(database: Database, chain: ObjectDomainSnapshot["chain"], request: AdmissionRequest): AdmissionStoreResult {
+	const identity = `admit:${request.fact.source}:${request.fact.value}`
+	const task: Task = { ...request.task, state: { kind: "ready" }, closure: { kind: "unallocated" } }
+	const transition: Extract<CommittedTransition, { family: "task-admission" }> = {
+		family: "task-admission",
+		fact: request.fact,
+		task,
+		position: request.position,
+	}
+	const run = database.transaction((): AdmissionStoreResult => {
+		const replay = matchingTransition(database, identity, transition)
+		if (replay !== null) return { kind: "admitted", admission: { kind: "admitted", task, position: request.position }, commit: replay }
+		const admission = evaluateAdmission(readSnapshot(database, chain), request)
+		if (admission.kind === "rejected") return admission
+		const committedTransition: Extract<CommittedTransition, { family: "task-admission" }> = { ...transition, task: admission.task, position: admission.position }
+		applyTransition(database, committedTransition)
+		insertTransition(database, identity, committedTransition)
+		return { kind: "admitted", admission, commit: { kind: "committed", identity } }
 	})
 	return run.immediate()
 }
 
+function matchingTransition(database: Database, identity: string, transition: CommittedTransition): CommitResult | null {
+	const existing = database.query<BoundaryRecord, SqlParams>(
+		"SELECT chain_key,family,payload FROM v3_transitions WHERE identity_key=$identity",
+	).get({ identity })
+	if (existing === null) return null
+	const parsed = TransitionRowBoundary(existing)
+	if (parsed instanceof arkType.errors) throw new Error(parsed.summary)
+	const payload = JSON.stringify(transition)
+	if (parsed.chain_key !== transitionChain(transition) || parsed.family !== transition.family || parsed.payload !== payload) {
+		reject(transition.family, "identity-mismatch", `transition identity ${identity} is already bound to a different mutation`)
+	}
+	return { kind: "already-committed", identity }
+}
+
+function insertTransition(database: Database, identity: string, transition: CommittedTransition): void {
+	database.query<never, SqlParams>("INSERT INTO v3_transitions (identity_key,chain_key,family,payload,committed_at) VALUES ($identity,$chain,$family,$payload,$now)").run({
+		identity,
+		chain: transitionChain(transition),
+		family: transition.family,
+		payload: JSON.stringify(transition),
+		now: Date.now(),
+	})
+}
+
+function commit(database: Database, request: TransitionRequest): CommitResult {
+	const run = database.transaction((): CommitResult => {
+		const replay = matchingTransition(database, request.identity, request.transition)
+		if (replay !== null) return replay
+		applyTransition(database, request.transition)
+		insertTransition(database, request.identity, request.transition)
+		return { kind: "committed", identity: request.identity }
+	})
+	return run.immediate()
+}
 function applyTransition(database: Database, transition: CommittedTransition): void {
 	switch (transition.family) {
 		case "task-admission":
@@ -298,6 +365,14 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			const task = requireLeasedTask(database, transition.task, transition.run, transition.family)
 			if (task.closure.kind !== "active") reject(transition.family, "state-mismatch", "leased task does not have an active closure")
 			if (taskKey(transition.record.identity.parent) !== taskKey(task.identity) || closureKey(transition.record.parentClosure) !== closureKey(transition.run.closure)) reject(transition.family, "identity-mismatch", "await identity does not belong to leased closure")
+			if (taskKey(transition.record.child) !== taskKey(transition.child.task.identity)) reject(transition.family, "identity-mismatch", "await child identity does not match its admission")
+			const admission = evaluateAdmission(readSnapshot(database, task.identity.chain), transition.child)
+			if (admission.kind === "rejected") reject(transition.family, "invalid-transition", `await child admission was rejected: ${admission.reason.kind}`)
+			admitTask(database, {
+				fact: transition.child.fact,
+				task: admission.task,
+				position: admission.position,
+			}, transition.family)
 			insertAwait(database, task.identity.chain.value, transition.record)
 			updateTask(database, { ...task, state: { kind: "suspended", await: transition.record.identity }, closure: { ...task.closure, kind: "suspended", continuation: transition.continuation } })
 			return
@@ -312,11 +387,34 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				if (child.state.kind !== "settled" || JSON.stringify(child.state.settlement) !== JSON.stringify(transition.record.settlement)) reject(transition.family, "settlement-mismatch", "child settlement differs from delivered value")
 			}
 			updateAwait(database, task.identity.chain.value, transition.record)
-			let closure: ClosureResourceState = task.closure
-			if (transition.record.kind === "continuation-lost" && task.closure.kind === "suspended") {
-				closure = { ...task.closure, continuation: { kind: "lost", observedAt: Date.now() } }
+			if (transition.record.kind === "continuation-lost") {
+				const closure = task.closure.kind === "suspended"
+					? { ...task.closure, continuation: { kind: "lost" as const, observedAt: Date.now() } }
+					: task.closure
+				updateTask(database, {
+					...task,
+					state: {
+						kind: "settled",
+						settlement: {
+							kind: "exception",
+							cause: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } },
+							attempt: transition.record.identity.attempt,
+							closure: transition.record.parentClosure,
+						},
+						settledAt: Date.now(),
+					},
+					closure,
+				})
+				return
 			}
-			updateTask(database, { ...task, state: { kind: "ready" }, closure })
+			updateTask(database, { ...task, state: { kind: "ready" } })
+			return
+		}
+		case "await-consumption": {
+			const existing = requireAwait(database, transition.record.identity, transition.family)
+			if (existing.kind !== "delivered" || existing.token !== transition.record.token) reject(transition.family, "state-mismatch", "await delivery is not available for one-shot consumption")
+			if (JSON.stringify(existing.settlement) !== JSON.stringify(transition.record.settlement)) reject(transition.family, "settlement-mismatch", "consumed await settlement differs from delivered value")
+			updateAwait(database, transition.task.chain.value, transition.record)
 			return
 		}
 		case "group-waiting": {
@@ -342,9 +440,46 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			updateGroup(database, { ...group, state: transition.state })
 			return
 		}
+		case "group-consumer-start": {
+			const group = requireGroup(database, transition.group, transition.family)
+			if (group.state.kind !== "terminated" || group.consumer.kind === "drain") reject(transition.family, "state-mismatch", "only a terminated group with a fixed task consumer can start consumption")
+			const settlements = group.members.map((identity) => requireTask(database, identity, transition.family).state).map((state) => {
+				if (state.kind !== "settled") reject(transition.family, "state-mismatch", "group member is not settled")
+				return state.settlement
+			})
+			if (JSON.stringify(settlements) !== JSON.stringify(transition.settlements)) reject(transition.family, "settlement-mismatch", "consumer input is not the complete committed settlement vector")
+			const digest = createHash("sha256").update(JSON.stringify(settlements)).digest("hex")
+			if (
+				transition.state.settlementsDigest !== digest
+				|| taskKey(transition.state.consumerTask) !== taskKey(transition.task.identity)
+				|| groupKey(transition.state.consumerGroup) !== groupKey(transition.consumerGroup.identity)
+			) reject(transition.family, "identity-mismatch", "consumer state does not identify its task, group, and settlement vector")
+			if (
+				groupKey(transition.task.group) !== groupKey(transition.consumerGroup.identity)
+				|| transition.consumerGroup.members.length !== 1
+				|| taskKey(transition.consumerGroup.members[0] as Task["identity"]) !== taskKey(transition.task.identity)
+				|| transition.consumerGroup.consumer.kind !== "drain"
+				|| transition.consumerGroup.state.kind !== "open"
+				|| transition.task.state.kind !== "ready"
+				|| transition.task.closure.kind !== "unallocated"
+			) reject(transition.family, "invalid-transition", "fixed consumer must start as one ready task in a fresh drain group")
+			if (
+				transition.task.identity.chain.value !== group.identity.chain.value
+				|| transition.consumerGroup.identity.chain.value !== group.identity.chain.value
+				|| transition.task.input.definition.content.digest !== group.consumer.definition.content.digest
+				|| transition.task.input.definition.product.digest !== group.consumer.definition.product.digest
+			) reject(transition.family, "identity-mismatch", "fixed consumer task does not use the pinned group definition")
+			if (exists(database, "v3_tasks", "task_key", taskKey(transition.task.identity)) || exists(database, "v3_groups", "group_key", groupKey(transition.consumerGroup.identity))) {
+				reject(transition.family, "already-exists", "fixed consumer task or group already exists")
+			}
+			insertGroup(database, transition.consumerGroup)
+			insertTask(database, transition.task)
+			updateGroup(database, { ...group, state: transition.state })
+			return
+		}
 		case "group-consumption": {
 			const group = requireGroup(database, transition.group, transition.family)
-			if (group.state.kind !== "terminated") reject(transition.family, "state-mismatch", "group is not terminated")
+			if (group.state.kind !== "terminated" && group.state.kind !== "consuming") reject(transition.family, "state-mismatch", "group is neither terminated nor awaiting its fixed consumer result")
 			const settlements = group.members.map((identity) => requireTask(database, identity, transition.family).state).map((state) => {
 				if (state.kind !== "settled") reject(transition.family, "state-mismatch", "group member is not settled")
 				return state.settlement
@@ -461,9 +596,11 @@ function transitionChain(transition: CommittedTransition): string {
 		case "lease-release":
 		case "task-settlement":
 		case "await-suspension":
-		case "await-resumption": return transition.task.chain.value
+		case "await-resumption":
+		case "await-consumption": return transition.task.chain.value
 		case "group-waiting":
 		case "group-termination":
+		case "group-consumer-start":
 		case "group-consumption": return transition.group.chain.value
 		case "resource-intent": return transition.closure.task.chain.value
 	}

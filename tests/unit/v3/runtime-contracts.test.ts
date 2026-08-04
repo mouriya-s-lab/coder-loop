@@ -5,6 +5,7 @@ import { createServer } from "node:net"
 import { Effect, Layer } from "effect"
 import { runCli } from "../../../src/v3/cli"
 import {
+	evaluateTransition,
 	openAgentValueSession,
 	parseContext0,
 	settlePreAgentMaps,
@@ -13,6 +14,7 @@ import {
 } from "../../../src/v3/context"
 import {
 	compilePresetDefinition,
+	finalizerResultType,
 	resolveCompileAssets,
 	strictCompiledProduct,
 	type PresetDefinition,
@@ -29,6 +31,7 @@ import {
 import { makeRepositoryGitLive, RepositoryGit } from "../../../src/v3/git-service"
 import { buildEventProjection, buildStatusProjection } from "../../../src/v3/projection"
 import { makeObjectDomainStoreLive, ObjectDomainStore } from "../../../src/v3/sqlite-store"
+import { runnerSandboxProfile } from "../../../src/v3/provider"
 
 const definition: PresetDefinition = {
 	schemaVersion: 3,
@@ -73,15 +76,67 @@ describe("v3 architecture contracts", () => {
 		const compiled = compilePresetDefinition(definition)
 		expect(compiled.kind).toBe("compiled")
 		if (compiled.kind !== "compiled") return
-		expect(compiled.findings).toEqual([{ kind: "map-asset-unverified", value: "pre", module: "map.ts", exportName: "run" }])
+		expect(compiled.findings).toEqual([
+			{ kind: "map-asset-unverified", value: "pre", module: "map.ts", exportName: "run" },
+			{ kind: "prompt-asset-unverified", taskId: "root", asset: "prompt.txt" },
+		])
 		expect(strictCompiledProduct(compiled).kind).toBe("rejected")
 
-		const resolved = resolveCompileAssets(compiled, { "map.ts": "export const run = () => 1" })
+		const resolved = resolveCompileAssets(compiled, {
+			"map.ts": "export const run = () => 1",
+			"prompt.txt": "Process {{request}}",
+		})
 		const strict = strictCompiledProduct(resolved)
 		expect(strict.kind).toBe("accepted")
 		if (strict.kind !== "accepted") return
 		expect(strict.product.taskIndex.root?.kind).toBe("leaf")
 		expect(strict.product.valueIndex.result?.source.kind).toBe("agent")
+	})
+
+	test("parallel definitions require an ordinary typed finalizer program", () => {
+		const finalizerType = finalizerResultType()
+		const parallel: PresetDefinition = {
+			...definition,
+			name: "parallel-contract-test",
+			task: {
+				kind: "par",
+				id: "parallel",
+				growth: "closed",
+				children: [definition.task],
+				finalizer: {
+					values: [
+						{ name: "settlements", type: { kind: "array", element: { kind: "json" } }, source: { kind: "item" }, required: true },
+						{ name: "decision", type: finalizerType, source: { kind: "agent" }, required: true },
+					],
+					consumers: [{ kind: "prompt", value: "settlements" }],
+					task: {
+						kind: "leaf",
+						id: "parallel-finalizer",
+						promptAsset: "finalizer.txt",
+						contract: { returns: finalizerType, returnValue: "decision", predicates: [], successors: [], chooser: null, onNil: "return-nil", onException: "propagate" },
+					},
+				},
+			},
+		}
+		const resolved = resolveCompileAssets(compilePresetDefinition(parallel), {
+			"map.ts": "export const run = () => 1",
+			"prompt.txt": "Process {{request}}",
+			"finalizer.txt": "Finalize {{settlements}}",
+		})
+		expect(strictCompiledProduct(resolved).kind).toBe("accepted")
+		if (parallel.task.kind !== "par") return
+		const invalid = compilePresetDefinition({
+			...parallel,
+			task: {
+				...parallel.task,
+				finalizer: {
+					...parallel.task.finalizer,
+					values: parallel.task.finalizer.values.map((value) => value.name === "decision" ? { ...value, type: { kind: "string" as const } } : value),
+					task: { ...parallel.task.finalizer.task, contract: { ...parallel.task.finalizer.task.contract, returns: { kind: "string" } } },
+				},
+			},
+		})
+		expect(invalid).toMatchObject({ kind: "rejected", diagnostics: expect.arrayContaining([{ kind: "invalid-finalizer-return-type", taskId: "parallel-finalizer" }]) })
 	})
 
 	test("typed context admits only declared values and closes on required agent fields", () => {
@@ -102,6 +157,44 @@ describe("v3 architecture contracts", () => {
 		expect(closed.kind).toBe("accepted")
 		if (closed.kind !== "accepted") return
 		expect(closed.session).toEqual({ state: "closed", authority, context: { stage: "context-2", values: { request: "work", pre: 7, result: "done" } } })
+	})
+
+	test("fail successors remain inside the same function transition", () => {
+		const contract = {
+			returns: { kind: "string" as const },
+			returnValue: "result",
+			predicates: ["gate"],
+			successors: [{ target: "recover", when: "fail" }],
+			chooser: null,
+			onNil: "escalate" as const,
+			onException: "fail" as const,
+		}
+		const context = { stage: "context-3" as const, values: { result: "done", gate: false } }
+		expect(evaluateTransition(contract, context, () => false)).toEqual({ kind: "internal-successor", target: "recover" })
+	})
+
+	test("generated runner sandbox writes only in the closure", async () => {
+		if (Bun.which("/usr/bin/sandbox-exec") === null) return
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-sandbox-"))
+		const outside = `${root}-outside`
+		try {
+			await mkdir(outside)
+			const profile = runnerSandboxProfile(root, join(root, "agent.sock"), "/bin/sh", [])
+			const allowed = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", `echo allowed > ${join(root, "allowed.txt")}`], { stdout: "pipe", stderr: "pipe" })
+			const denied = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", `echo denied > ${join(outside, "denied.txt")}`], { stdout: "pipe", stderr: "pipe" })
+			await Bun.write(join(outside, "secret.txt"), "secret")
+			const deniedRead = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", `cat ${join(outside, "secret.txt")}`], { stdout: "pipe", stderr: "pipe" })
+			expect(allowed.exitCode).toBe(0)
+			expect(await Bun.file(join(root, "allowed.txt")).text()).toBe("allowed\n")
+			expect(denied.exitCode).not.toBe(0)
+			expect(await Bun.file(join(outside, "denied.txt")).exists()).toBe(false)
+			expect(deniedRead.exitCode).not.toBe(0)
+		} finally {
+			await rm(root, { recursive: true, force: true })
+			await rm(outside, { recursive: true, force: true })
+		}
 	})
 
 	test("daemon boundary rejects caller confusion before dispatch", () => {
@@ -175,11 +268,15 @@ describe("v3 architecture contracts", () => {
 				const chain = { kind: "chain" as const, value: "chain" }
 				const task = { kind: "task" as const, chain, value: "root" }
 				const identity = { kind: "closure" as const, task, attempt: 0 }
-				const request = { identity, basePin: "HEAD", branch: "coder-loop/v3/base-pin-test" }
+				const request = { identity, allocation: "base-pin-test", basePin: "HEAD", branch: "coder-loop/v3/base-pin-test" }
 				const first = yield* service.prepare(request)
 				const second = yield* service.prepare(request)
 				expect(first.basePin).not.toBe("HEAD")
 				expect(second).toEqual(first)
+				const competing = yield* service.prepare({ ...request, allocation: "competing-candidate", branch: "coder-loop/v3/competing-candidate" })
+				expect(competing.worktree).not.toBe(first.worktree)
+				yield* service.discard(competing)
+				expect(yield* Effect.promise(() => Bun.file(join(first.worktree, "seed.txt")).exists())).toBe(true)
 				yield* service.discard(first)
 			}).pipe(Effect.provide(makeRepositoryGitLive({
 				repository,
@@ -204,7 +301,7 @@ describe("v3 architecture contracts", () => {
 		const protocol = Layer.succeed(DaemonProtocol, {
 			handle: () => Effect.succeed({ schemaVersion: 3 as const, requestId: null, outcome: { kind: "rejected" as const, rejection: { kind: "request-rejected" as const, reason: "invalid-envelope" as const, issues: ["test"] } } }),
 		})
-		const socketLayer = makeDaemonSocketLive({ operatorPath, agentPath, maxFrameBytes: 1024, onError: () => undefined }).pipe(Layer.provide(protocol))
+		const socketLayer = makeDaemonSocketLive({ operatorPath, agentPath, maxFrameBytes: 1024, maxResponseBytes: 1024 * 1024, onError: () => undefined }).pipe(Layer.provide(protocol))
 		try {
 			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
 				const socket = yield* DaemonSocket
@@ -215,6 +312,151 @@ describe("v3 architecture contracts", () => {
 			expect(await Bun.file(operatorPath).exists()).toBe(false)
 			expect(await Bun.file(agentPath).exists()).toBe(false)
 			expect(await Bun.file(`${operatorPath}.lock`).exists()).toBe(false)
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	test("daemon socket drains responses larger than the kernel write buffer", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-socket-response-"))
+		const operatorPath = join(root, "operator.sock")
+		const agentPath = join(root, "agent.sock")
+		const expected = "x".repeat(128 * 1024)
+		const protocol = Layer.succeed(DaemonProtocol, {
+			handle: () => Effect.succeed({
+				schemaVersion: 3 as const,
+				requestId: null,
+				outcome: {
+					kind: "failure" as const,
+					error: {
+						kind: "task-input-rejected" as const,
+						task: "large",
+						fields: [{ valueName: "large", issues: [{ path: [], expected, actual: "test" }] }],
+					},
+				},
+			}),
+		})
+		const socketLayer = makeDaemonSocketLive({ operatorPath, agentPath, maxFrameBytes: 1024, maxResponseBytes: 1024 * 1024, onError: () => undefined }).pipe(Layer.provide(protocol))
+		try {
+			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+				const socket = yield* DaemonSocket
+				let stdout = ""
+				const exitCode = yield* Effect.promise(() => runCli(["status", "--socket", operatorPath, "--chain", "large"], {
+					stdout: (text) => { stdout += text },
+					stderr: () => undefined,
+				}))
+				expect(exitCode).toBe(1)
+				expect(stdout.length).toBeGreaterThan(expected.length)
+				expect(stdout).toContain(expected)
+				yield* socket.stop
+			}).pipe(Effect.provide(socketLayer))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	test("daemon socket rejects aggregate request and response buffers above configured limits", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-socket-limits-"))
+		const operatorPath = join(root, "operator.sock")
+		const agentPath = join(root, "agent.sock")
+		const errors: string[] = []
+		const protocol = Layer.succeed(DaemonProtocol, {
+			handle: () => Effect.succeed({
+				schemaVersion: 3 as const,
+				requestId: null,
+				outcome: { kind: "rejected" as const, rejection: { kind: "request-rejected" as const, reason: "invalid-envelope" as const, issues: ["x".repeat(2048)] } },
+			}),
+		})
+		const socketLayer = makeDaemonSocketLive({
+			operatorPath,
+			agentPath,
+			maxFrameBytes: 128,
+			maxResponseBytes: 256,
+			onError: (error) => { errors.push(error.message) },
+		}).pipe(Layer.provide(protocol))
+		try {
+			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+				const socket = yield* DaemonSocket
+				yield* Effect.promise(() => sendRaw(operatorPath, `${"x".repeat(129)}\n`))
+				yield* Effect.promise(() => sendRaw(operatorPath, "{}\n{}\n"))
+				yield* Effect.promise(() => sendRaw(operatorPath, "{}\n"))
+				expect(errors).toContain("request frame exceeds maxFrameBytes")
+				expect(errors).toContain("connection queued more than one request frame")
+				expect(errors).toContain("daemon response exceeds maxResponseBytes")
+				yield* socket.stop
+			}).pipe(Effect.provide(socketLayer))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	test("concurrent admissions at one frontier produce one durable winner", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-admission-race-"))
+		try {
+			const databaseFile = join(root, "runtime.sqlite")
+			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+				const store = yield* ObjectDomainStore
+				const chain = { kind: "chain" as const, value: "race" }
+				const group = { kind: "group" as const, chain, value: "root" }
+				const seedIdentity = { kind: "task" as const, chain, value: "seed" }
+				const definitionRef = {
+					kind: "published-definition" as const,
+					content: { kind: "definition-content" as const, digest: "content" },
+					product: { kind: "compiled-product" as const, digest: "product" },
+				}
+				const seed: Task = {
+					identity: seedIdentity,
+					group,
+					input: { definition: definitionRef, entrypoint: "seed", basePin: "base", value: { request: "work" }, valueIdentity: "seed" },
+					dependsOn: [],
+					priority: 1,
+					state: { kind: "ready" },
+					closure: { kind: "unallocated" },
+				}
+				yield* store.bootstrap({
+					chain,
+					tasks: { [taskKey(seedIdentity)]: seed },
+					groups: { [groupKey(group)]: { identity: group, members: [seedIdentity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					awaits: {},
+					admittedFacts: {},
+				})
+				const candidate = (value: string) => ({
+					fact: { kind: "fact" as const, source: "race", value },
+					position: { group, expectedMemberVersion: 1 },
+					timing: { kind: "before-termination" as const },
+					authority: { kind: "external" as const, principal: "test", allowedChain: chain },
+					task: {
+						identity: { kind: "task" as const, chain, value },
+						group,
+						input: { definition: definitionRef, entrypoint: value, basePin: "base", value: { request: value }, valueIdentity: value },
+						dependsOn: [],
+						priority: 1,
+					},
+				})
+				const results = yield* Effect.all(
+					[store.admit(chain, candidate("left")), store.admit(chain, candidate("right"))],
+					{ concurrency: "unbounded" },
+				)
+				expect(results.map((result) => result.kind).sort()).toEqual(["admitted", "rejected"])
+				const durable = yield* store.readSnapshot(chain)
+				expect(durable.groups[groupKey(group)]?.memberVersion).toBe(2)
+				expect(Object.keys(durable.tasks)).toHaveLength(2)
+				expect(Object.keys(durable.admittedFacts)).toHaveLength(1)
+				const forgedGroup = { kind: "group" as const, chain, value: "forged" }
+				const mismatched = candidate("mismatched")
+				const mismatch = yield* store.admit(chain, {
+					...mismatched,
+					position: { group, expectedMemberVersion: 2 },
+					task: { ...mismatched.task, group: forgedGroup },
+				})
+				expect(mismatch).toMatchObject({ kind: "rejected", reason: { kind: "contract-rejected", reason: "task-group-mismatch" } })
+			}).pipe(Effect.provide(makeObjectDomainStoreLive(databaseFile)))))
 		} finally {
 			await rm(root, { recursive: true, force: true })
 		}
@@ -239,7 +481,7 @@ describe("v3 architecture contracts", () => {
 				const parent: Task = {
 					identity: parentIdentity,
 					group,
-					input: { definition: definitionRef, basePin: "base", value: { request: "work" }, valueIdentity: "input" },
+					input: { definition: definitionRef, entrypoint: "parent", basePin: "base", value: { request: "work" }, valueIdentity: "input" },
 					dependsOn: [],
 					priority: 5,
 					state: { kind: "leased", run: { kind: "run", closure: { kind: "closure", task: parentIdentity, attempt: 0 }, value: "run" }, acquiredAt: 10, expiresAt: 20 },
@@ -260,7 +502,7 @@ describe("v3 architecture contracts", () => {
 				const successor: Task = {
 					identity: successorIdentity,
 					group,
-					input: { definition: definitionRef, basePin: "base", value: { result: "done" }, valueIdentity: "next-input" },
+					input: { definition: definitionRef, entrypoint: "child", basePin: "base", value: { result: "done" }, valueIdentity: "next-input" },
 					dependsOn: [parentIdentity],
 					priority: 5,
 					state: { kind: "ready" },
@@ -291,3 +533,16 @@ describe("v3 architecture contracts", () => {
 		}
 	})
 })
+async function sendRaw(path: string, payload: string): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		void Bun.connect({
+			unix: path,
+			socket: {
+				open: (socket) => { socket.write(payload) },
+				data: () => undefined,
+				close: () => resolve(),
+				error: (_socket, error) => reject(error),
+			},
+		}).catch(reject)
+	})
+}

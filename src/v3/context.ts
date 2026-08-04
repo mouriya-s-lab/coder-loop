@@ -16,6 +16,8 @@ export type Context3 = { readonly stage: "context-3"; readonly values: ContextVa
 export type TypedContext = Context0 | Context1 | Context2 | Context3
 export type FunctionCheckpoint = {
 	readonly run: AgentRunAuthority
+	readonly stepId: string
+	readonly runnerSessionIdentity: string | null
 	readonly context0: Context0 | null
 	readonly context1: Context1 | null
 	readonly context2: Context2 | null
@@ -174,14 +176,12 @@ export function openAgentValueSession(
 		state: "open",
 		authority,
 		entry,
-		declarations: Object.fromEntries(declarations.filter((value) => value.source.kind === "agent").map((value) => [value.name, value])),
+		declarations: Object.fromEntries(declarations.filter((value) => value.source.kind === "agent" && !Object.hasOwn(entry.values, value.name)).map((value) => [value.name, value])),
 		accepted: {},
 	}
 }
 
-export function closeProgramOnlyAgentStage(entry: Context1, declarations: readonly DeclaredValue[]): AgentValueSession {
-	const agentDeclarations = declarations.filter((value) => value.source.kind === "agent")
-	if (agentDeclarations.length > 0) throw new Error("program-only closure cannot declare agent values")
+export function closeProgramOnlyAgentStage(entry: Context1, _declarations: readonly DeclaredValue[]): AgentValueSession {
 	return {
 		state: "closed",
 		authority: { kind: "agent-run", chainId: "program", taskId: "program", closureId: "program", runId: "program" },
@@ -249,36 +249,48 @@ export function evaluateTransition(
 	evaluatePredicate: PredicateEvaluator,
 	evaluateChooser: ChooserEvaluator = (name, _kind, current) => current.values[name],
 ): TransitionResult {
+	const fail = contract.successors.find((successor) => successor.when === "fail")
+	const normal = contract.successors.filter((successor) => successor.when !== "fail")
 	if (!contract.predicates.every((predicate) => evaluatePredicate(predicate, context))) {
+		if (fail !== undefined) return { kind: "internal-successor", target: fail.target }
 		return contract.onNil === "return-nil"
 			? { kind: "exit", exit: { kind: "returned", value: null } }
 			: { kind: "exit", exit: { kind: "exception", cause: { kind: "policy", reason: "predicate-false" } } }
 	}
-	if (contract.successors.length === 0) {
+	if (normal.length === 0) {
 		const value = context.values[contract.returnValue]
 		if (value === undefined) return { kind: "exit", exit: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } } }
 		return { kind: "exit", exit: { kind: "returned", value } }
 	}
-	if (contract.successors.length === 1) {
-		const target = contract.successors[0]?.target
-		if (target === undefined) return { kind: "exit", exit: { kind: "exception", cause: { kind: "cascade-exhausted" } } }
-		return { kind: "internal-successor", target }
+	if (normal.length === 1) {
+		const target = normal[0]?.target
+		return target === undefined
+			? { kind: "exit", exit: { kind: "exception", cause: { kind: "cascade-exhausted" } } }
+			: { kind: "internal-successor", target }
 	}
 	const chooser = contract.chooser
 	const selected = chooser === null ? undefined : evaluateChooser(chooser.name, chooser.kind, context)
-	if (typeof selected !== "string" || !contract.successors.some((successor) => successor.target === selected)) {
+	if (typeof selected !== "string" || !normal.some((successor) => successor.target === selected)) {
 		return { kind: "exit", exit: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } } }
 	}
 	return { kind: "internal-successor", target: selected }
 }
 
+export function routeProgramException(contract: HandoffContract): TransitionResult {
+	const fail = contract.onException === "fail"
+		? contract.successors.find((successor) => successor.when === "fail")
+		: undefined
+	return fail === undefined
+		? { kind: "exit", exit: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } } }
+		: { kind: "internal-successor", target: fail.target }
+}
 function settleMapBatch(
 	stage: "pre-agent" | "post-agent",
 	entryValues: ContextValues,
 	declarations: readonly DeclaredValue[],
 	results: readonly MapResult[],
 ): { readonly kind: "settled"; readonly values: ContextValues } | { readonly kind: "exception"; readonly exception: MapBatchException } {
-	const expected = Object.fromEntries(declarations.filter((value) => value.source.kind === "map" && value.source.stage === stage).map((value) => [value.name, value]))
+	const expected = Object.fromEntries(declarations.filter((value) => value.source.kind === "map" && value.source.stage === stage && !Object.hasOwn(entryValues, value.name)).map((value) => [value.name, value]))
 	const grouped = new Map<string, MapResult[]>()
 	for (const result of results) {
 		const entries = grouped.get(result.valueName)

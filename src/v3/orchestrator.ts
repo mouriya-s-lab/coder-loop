@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { Context, Effect, Layer } from "effect"
+import type { JsonValue } from "./definition"
 import { FunctionRuntime, type FunctionExecutionResult, type FunctionRuntimeError, type FunctionRuntimeService } from "./function-runtime"
 import { RepositoryGit, type GitService, type GitServiceError } from "./git-service"
 import { GroupConsumerRuntime, type GroupConsumerService } from "./group-consumer"
@@ -9,7 +10,10 @@ import {
 	type ChainIdentity,
 	type ClosureIdentity,
 	type ClosureResourceState,
+	type GroupIdentity,
 	type Task,
+	type TaskGroup,
+	type AwaitRecord,
 	type TaskSettlement,
 } from "./object-domain"
 import { RunnerProvider, type EndpointProbe, type ProviderFactStoreError, type RunnerProviderService } from "./provider"
@@ -35,8 +39,9 @@ export type OrchestratorAction =
 export type OrchestratorCycle = {
 	readonly recovered: readonly RecoveryDecision[]
 	readonly resumed: readonly FunctionExecutionResult[]
+	readonly awaitsResumed: readonly Extract<AwaitRecord, { kind: "delivered" | "continuation-lost" }>[]
 	readonly reconciled: readonly GroupReconciliation[]
-	readonly action: OrchestratorAction
+	readonly actions: readonly OrchestratorAction[]
 	readonly garbageCollected: readonly GarbageCollectionDecision[]
 }
 
@@ -46,8 +51,9 @@ export type RuntimeOrchestratorService = {
 
 export class RuntimeOrchestrator extends Context.Tag("coder-loop/v3/RuntimeOrchestrator")<RuntimeOrchestrator, RuntimeOrchestratorService>() {}
 
-export function makeRuntimeOrchestratorLive(leaseMs: number): Layer.Layer<RuntimeOrchestrator, never, Scheduler | RuntimeRecovery | RunnerProvider | RepositoryGit | FunctionRuntime | GroupConsumerRuntime | ObjectDomainStore> {
+export function makeRuntimeOrchestratorLive(leaseMs: number, maxConcurrency: number): Layer.Layer<RuntimeOrchestrator, never, Scheduler | RuntimeRecovery | RunnerProvider | RepositoryGit | FunctionRuntime | GroupConsumerRuntime | ObjectDomainStore> {
 	if (!Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error("leaseMs must be positive")
+	if (!Number.isInteger(maxConcurrency) || maxConcurrency <= 0) throw new Error("maxConcurrency must be a positive integer")
 	return Layer.effect(RuntimeOrchestrator, Effect.gen(function*() {
 		const scheduler = yield* Scheduler
 		const recovery = yield* RuntimeRecovery
@@ -56,7 +62,7 @@ export function makeRuntimeOrchestratorLive(leaseMs: number): Layer.Layer<Runtim
 		const runtime = yield* FunctionRuntime
 		const consumers = yield* GroupConsumerRuntime
 		const store = yield* ObjectDomainStore
-		return { cycle: (chains, now) => runCycle({ scheduler, recovery, provider, repository, runtime, consumers, store, leaseMs }, chains, now) }
+		return { cycle: (chains, now) => runCycle({ scheduler, recovery, provider, repository, runtime, consumers, store, leaseMs, maxConcurrency }, chains, now) }
 	}))
 }
 
@@ -69,66 +75,118 @@ type OrchestratorDependencies = {
 	readonly consumers: GroupConsumerService
 	readonly store: ObjectDomainStoreService
 	readonly leaseMs: number
+	readonly maxConcurrency: number
 }
 
 function runCycle(dependencies: OrchestratorDependencies, chains: readonly ChainIdentity[], now: number): Effect.Effect<OrchestratorCycle, OrchestratorError> {
 	return Effect.gen(function*() {
 		const recovered = yield* dependencies.recovery.recoverExpiredLeases(chains, now)
 		const resumed = yield* Effect.forEach(
-			recovered.filter((decision): decision is Extract<RecoveryDecision, { kind: "terminal-awaiting-consumption" }> => decision.kind === "terminal-awaiting-consumption"),
+			recovered.filter((decision): decision is Extract<RecoveryDecision, { kind: "provider-fact-ready" }> => decision.kind === "provider-fact-ready"),
 			(decision) => dependencies.runtime.execute(decision.task),
-			{ concurrency: 1 },
+			{ concurrency: dependencies.maxConcurrency },
 		)
-		const selection = yield* dependencies.scheduler.nextReady(chains)
-		if (selection === null) {
-			const reconciled = yield* reconcileChains(dependencies, chains, now)
-			const garbageCollected = yield* reconcileLifecycle(dependencies.recovery, chains)
-			return { recovered, resumed, reconciled, garbageCollected, action: { kind: "idle" } }
-		}
-		const probe = yield* dependencies.provider.probe
-		const attemptIdentity = `${taskKey(selection.task.identity)}:${attemptNumber(selection.task)}`
-		if (probe.kind === "unknown") {
-			const reconciled = yield* reconcileChains(dependencies, chains, now)
-			const garbageCollected = yield* reconcileLifecycle(dependencies.recovery, chains)
-			return { recovered, resumed, reconciled, garbageCollected, action: { kind: "endpoint-unknown", task: selection.task.identity, probe } }
-		}
-		if (probe.kind === "absent") {
-			yield* dependencies.provider.recordAbsence(attemptIdentity, probe.evidence)
-			const commit = yield* dependencies.store.commit({
-				identity: `hold-absence:${attemptIdentity}:${probe.endpoint.digest}`,
-				transition: { family: "task-held", task: selection.task.identity, expectedRun: null, reason: { kind: "pre-spawn-absence", endpoint: probe.endpoint.digest, detail: probe.evidence.detail, observedAt: probe.evidence.observedAt } },
-			})
-			const reconciled = yield* reconcileChains(dependencies, chains, now)
-			const garbageCollected = yield* reconcileLifecycle(dependencies.recovery, chains)
-			return { recovered, resumed, reconciled, garbageCollected, action: { kind: "pre-spawn-held", task: selection.task.identity, commit } }
-		}
+		const awaitsResumed = yield* reconcileAwaits(dependencies.store, chains)
+		const claimed: Task["identity"][] = []
+		const actions: OrchestratorAction[] = []
+		for (let slot = 0; slot < dependencies.maxConcurrency; slot += 1) {
+			const selection = yield* dependencies.scheduler.nextReady(chains)
+			if (selection === null) break
+			const probe = yield* dependencies.provider.probe
+			const attemptIdentity = `${taskKey(selection.task.identity)}:${attemptNumber(selection.task)}`
+			if (probe.kind === "unknown") {
+				actions.push({ kind: "endpoint-unknown", task: selection.task.identity, probe })
+				break
+			}
+			if (probe.kind === "absent") {
+				yield* dependencies.provider.recordAbsence(attemptIdentity, probe.evidence)
+				const commit = yield* dependencies.store.commit({
+					identity: `hold-absence:${attemptIdentity}:${probe.endpoint.digest}`,
+					transition: { family: "task-held", task: selection.task.identity, expectedRun: null, reason: { kind: "pre-spawn-absence", endpoint: probe.endpoint.digest, detail: probe.evidence.detail, observedAt: probe.evidence.observedAt } },
+				})
+				actions.push({ kind: "pre-spawn-held", task: selection.task.identity, commit })
+				continue
+			}
 
-		const closure = yield* allocateClosure(dependencies.repository, selection.task)
-		const run = { kind: "run" as const, closure: closure.identity, value: randomUUID() }
-		const claimIdentity = `claim:${taskKey(selection.task.identity)}:${run.value}`
-		const claim = yield* Effect.catchAll(
-			dependencies.scheduler.claim({ identity: claimIdentity, task: selection.task, run, closure, acquiredAt: now, expiresAt: now + dependencies.leaseMs }),
-			(claimError) => Effect.gen(function*() {
-				const cleanup = selection.task.closure.kind === "unallocated"
-					? yield* Effect.match(dependencies.repository.discard(closure), { onFailure: (error) => error, onSuccess: () => null })
-					: null
-				return yield* Effect.fail<OrchestratorError>({ kind: "claim-cleanup-error", claim: claimError, cleanup })
-			}),
+			const closureIdentity: ClosureIdentity = { kind: "closure", task: selection.task.identity, attempt: 0 }
+			const run = { kind: "run" as const, closure: closureIdentity, value: randomUUID() }
+			const allocation = yield* allocateClosure(dependencies.repository, selection.task, run.value)
+			const closure = allocation.closure
+			const claimIdentity = `claim:${taskKey(selection.task.identity)}:${run.value}`
+			yield* dependencies.scheduler.claim({ identity: claimIdentity, task: selection.task, run, closure, acquiredAt: now, expiresAt: now + dependencies.leaseMs }).pipe(
+				Effect.catchAll((claim) => Effect.flatMap(
+					allocation.owned
+						? Effect.either(dependencies.repository.discard(allocation.closure))
+						: Effect.either(Effect.void),
+					(cleanup) => Effect.fail<OrchestratorError>({ kind: "claim-cleanup-error", claim, cleanup: cleanup._tag === "Left" ? cleanup.left : null }),
+				)),
+			)
+			claimed.push(selection.task.identity)
+		}
+		const executed = yield* Effect.forEach(
+			claimed,
+			(task) => Effect.map(dependencies.runtime.execute(task), (result): OrchestratorAction => ({ kind: "executed", task, result })),
+			{ concurrency: dependencies.maxConcurrency },
 		)
-		void claim
-		const result = yield* dependencies.runtime.execute(selection.task.identity)
-		const reconciled = yield* reconcileChains(dependencies, chains, now)
+		actions.push(...executed)
+		const reconciled = yield* reconcileChains(dependencies, chains, Date.now())
 		const garbageCollected = yield* reconcileLifecycle(dependencies.recovery, chains)
-		return { recovered, resumed, reconciled, garbageCollected, action: { kind: "executed", task: selection.task.identity, result } }
+		return {
+			recovered,
+			resumed,
+			awaitsResumed,
+			reconciled,
+			garbageCollected,
+			actions: actions.length === 0 ? [{ kind: "idle" }] : actions,
+		}
 	})
 }
 
-function allocateClosure(repository: GitService, task: Task): Effect.Effect<Extract<ClosureResourceState, { kind: "active" }>, GitServiceError | Extract<OrchestratorError, { kind: "orchestrator-state-error" }>> {
-	if (task.closure.kind === "active") return Effect.succeed(task.closure)
+type ClosureAllocation =
+	| { readonly closure: Extract<ClosureResourceState, { kind: "active" }>; readonly owned: true }
+	| { readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>; readonly owned: false }
+
+function allocateClosure(repository: GitService, task: Task, allocation: string): Effect.Effect<ClosureAllocation, GitServiceError | Extract<OrchestratorError, { kind: "orchestrator-state-error" }>> {
+	if (task.closure.kind === "active" || task.closure.kind === "suspended") return Effect.succeed({ closure: task.closure, owned: false })
 	if (task.closure.kind !== "unallocated") return Effect.fail({ kind: "orchestrator-state-error", task: taskKey(task.identity), message: `ready task has ${task.closure.kind} closure resources` })
 	const identity: ClosureIdentity = { kind: "closure", task: task.identity, attempt: 0 }
 	const digest = createHash("sha256").update(`${taskKey(task.identity)}:${task.input.basePin}`).digest("hex").slice(0, 16)
-	return repository.prepare({ identity, basePin: task.input.basePin, branch: `coder-loop/v3/${digest}` })
+	return Effect.map(repository.prepare({ identity, allocation, basePin: task.input.basePin, branch: `coder-loop/v3/${digest}-${allocation.slice(0, 8)}` }), (closure) => ({ closure, owned: true }))
+}
+
+function reconcileAwaits(
+	store: ObjectDomainStoreService,
+	chains: readonly ChainIdentity[],
+): Effect.Effect<readonly Extract<AwaitRecord, { kind: "delivered" | "continuation-lost" }>[], ObjectStoreError> {
+	return Effect.gen(function*() {
+		const resumed: Extract<AwaitRecord, { kind: "delivered" | "continuation-lost" }>[] = []
+		for (const chain of chains) {
+			const snapshot = yield* store.readSnapshot(chain)
+			for (const record of Object.values(snapshot.awaits)) {
+				if (record.kind !== "waiting") continue
+				const parent = snapshot.tasks[taskKey(record.identity.parent)]
+				const child = snapshot.tasks[taskKey(record.child)]
+				if (parent?.state.kind !== "suspended" || child?.state.kind !== "settled") continue
+				const delivered: Extract<AwaitRecord, { kind: "delivered" | "continuation-lost" }> =
+					parent.closure.kind === "suspended" && parent.closure.continuation.kind === "present"
+						? {
+								kind: "delivered",
+								identity: record.identity,
+								parentClosure: record.parentClosure,
+								child: record.child,
+								settlement: child.state.settlement,
+								token: createHash("sha256").update(JSON.stringify([record.identity, child.state.settlement])).digest("hex"),
+							}
+						: { kind: "continuation-lost", identity: record.identity, parentClosure: record.parentClosure, child: record.child }
+				yield* store.commit({
+					identity: `await-resume:${taskKey(record.identity.parent)}:${record.identity.attempt}:${record.identity.site}`,
+					transition: { family: "await-resumption", task: record.identity.parent, record: delivered },
+				})
+				resumed.push(delivered)
+			}
+		}
+		return resumed
+	})
 }
 
 function reconcileChains(dependencies: OrchestratorDependencies, chains: readonly ChainIdentity[], now: number): Effect.Effect<readonly GroupReconciliation[], OrchestratorError> {
@@ -138,43 +196,112 @@ function reconcileChains(dependencies: OrchestratorDependencies, chains: readonl
 			const snapshot = yield* dependencies.store.readSnapshot(chain)
 			for (const group of Object.values(snapshot.groups)) {
 				const reconciliation = yield* dependencies.scheduler.reconcileGroup(group.identity, now)
-				if (reconciliation.kind !== "terminated") {
-					reconciled.push(reconciliation)
-					continue
-				}
 				const latest = yield* dependencies.store.readSnapshot(chain)
 				const current = latest.groups[groupKey(group.identity)]
 				if (current === undefined) {
 					return yield* Effect.fail<ObjectStoreError>({ kind: "transition-rejected", family: "group-consumption", reason: "not-found", message: `group ${groupKey(group.identity)} not found` })
 				}
-				const settlements: TaskSettlement[] = []
-				for (const identity of current.members) {
-					const state = latest.tasks[taskKey(identity)]?.state
-					if (state?.kind !== "settled") break
-					settlements.push(state.settlement)
+				if (current.state.kind === "consuming") {
+					const consumer = latest.tasks[taskKey(current.state.consumerTask)]
+					if (consumer?.state.kind !== "settled" || consumer.state.settlement.kind !== "returned" || !consumerAllowsCompletion(current, consumer.state.settlement.value)) {
+						reconciled.push({ kind: "consuming", group: current.identity })
+						continue
+					}
+					const settlements = committedSettlements(current, latest.tasks)
+					if (settlements === null) return yield* incompleteGroup(current)
+					const consumption = yield* dependencies.consumers.consume(current, settlements)
+					yield* dependencies.scheduler.consumeGroup(current.identity, consumption, now)
+					reconciled.push({ kind: "consumed", group: current.identity })
+					continue
 				}
-				if (settlements.length !== current.members.length) {
+				if (reconciliation.kind !== "terminated") {
 					reconciled.push(reconciliation)
 					continue
 				}
-				const consumption = yield* dependencies.consumers.consume(current, settlements)
-				if (consumption === null) {
+				const settlements = committedSettlements(current, latest.tasks)
+				if (settlements === null) {
 					reconciled.push(reconciliation)
 					continue
 				}
-				yield* dependencies.scheduler.consumeGroup(current.identity, consumption, now)
-				reconciled.push({ kind: "consumed", group: current.identity })
+				if (current.consumer.kind === "drain") {
+					const consumption = yield* dependencies.consumers.consume(current, settlements)
+					yield* dependencies.scheduler.consumeGroup(current.identity, consumption, now)
+					reconciled.push({ kind: "consumed", group: current.identity })
+					continue
+				}
+				const started = materializeGroupConsumer(current, latest.tasks, settlements, now)
+				yield* dependencies.store.commit({
+					identity: `group-consumer-start:${groupKey(current.identity)}:${current.memberVersion}:${started.state.settlementsDigest}`,
+					transition: {
+						family: "group-consumer-start",
+						group: current.identity,
+						state: started.state,
+						consumerGroup: started.group,
+						task: started.task,
+						settlements,
+					},
+				})
+				reconciled.push({ kind: "consuming", group: current.identity })
 			}
 		}
-
 		return reconciled
 	})
 }
+
+function committedSettlements(group: TaskGroup, tasks: Readonly<Record<string, Task>>): TaskSettlement[] | null {
+	const settlements: TaskSettlement[] = []
+	for (const identity of group.members) {
+		const state = tasks[taskKey(identity)]?.state
+		if (state?.kind !== "settled") return null
+		settlements.push(state.settlement)
+	}
+	return settlements
+}
+
+function incompleteGroup(group: TaskGroup): Effect.Effect<never, ObjectStoreError> {
+	return Effect.fail({ kind: "transition-rejected", family: "group-consumption", reason: "state-mismatch", message: `group ${groupKey(group.identity)} lost a committed member settlement` })
+}
+
+function consumerAllowsCompletion(group: TaskGroup, value: JsonValue): boolean {
+	if (group.consumer.kind === "validator") return true
+	return typeof value === "object" && value !== null && "kind" in value && value.kind === "advance"
+}
+
+function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<string, Task>>, settlements: readonly TaskSettlement[], now: number): {
+	readonly state: Extract<TaskGroup["state"], { kind: "consuming" }>
+	readonly group: TaskGroup
+	readonly task: Task
+} {
+	if (group.consumer.kind === "drain") throw new Error("drain groups do not materialize consumer tasks")
+	const suffix = `${group.identity.value}/$${group.consumer.kind}/${group.memberVersion}`
+	const consumerGroup: GroupIdentity = { kind: "group", chain: group.identity.chain, value: `${suffix}/group` }
+	const consumerTask = { kind: "task" as const, chain: group.identity.chain, value: `${suffix}/task` }
+	const settlementsDigest = createHash("sha256").update(JSON.stringify(settlements)).digest("hex")
+	const value = { settlements }
+	const valueIdentity = createHash("sha256").update(JSON.stringify(value)).digest("hex")
+	const members = group.members.map((identity) => tasks[taskKey(identity)]).filter((task): task is Task => task !== undefined)
+	const basePin = members[0]?.input.basePin
+	if (basePin === undefined) throw new Error("fixed consumer requires at least one committed group member")
+	const task: Task = {
+		identity: consumerTask,
+		group: consumerGroup,
+		input: { definition: group.consumer.definition, entrypoint: group.consumer.entrypoint, basePin, value, valueIdentity },
+		dependsOn: [...group.members],
+		priority: Math.max(...members.map((member) => member.priority)),
+		state: { kind: "ready" },
+		closure: { kind: "unallocated" },
+	}
+	return {
+		state: { kind: "consuming", consumerTask, consumerGroup, settlementsDigest, startedAt: now },
+		group: { identity: consumerGroup, members: [consumerTask], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } },
+		task,
+	}
+}
+
 function reconcileLifecycle(recovery: RecoveryService, chains: readonly ChainIdentity[]): Effect.Effect<readonly GarbageCollectionDecision[], RecoveryError> {
 	return Effect.flatMap(recovery.freezeEvidence(chains), (frozen) =>
 		Effect.map(recovery.collect(chains), (collected) => [...frozen, ...collected]))
 }
-
 
 function attemptNumber(task: Task): number {
 	return task.closure.kind === "unallocated" ? 0 : task.closure.identity.attempt

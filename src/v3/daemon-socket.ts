@@ -13,6 +13,7 @@ export type DaemonSocketConfig = {
 	readonly operatorPath: string
 	readonly agentPath: string
 	readonly maxFrameBytes: number
+	readonly maxResponseBytes: number
 	readonly onError: (error: DaemonTransportError) => void
 }
 
@@ -25,10 +26,19 @@ export type DaemonSocketService = {
 export class DaemonSocket extends Context.Tag("coder-loop/v3/DaemonSocket")<DaemonSocket, DaemonSocketService>() {}
 
 type CallerKind = "operator" | "agent"
+type PendingWrite = {
+	readonly bytes: Uint8Array
+	offset: number
+	readonly resolve: () => void
+	readonly reject: (error: Error) => void
+}
+
 type SocketState = {
 	readonly decoder: TextDecoder
 	buffer: string
-	processing: Promise<void>
+	receivedBytes: number
+	acceptedFrame: boolean
+	pendingWrite: PendingWrite | null
 }
 
 type BoundListener = {
@@ -42,6 +52,7 @@ type BoundSocketSet = {
 
 export function makeDaemonSocketLive(config: DaemonSocketConfig): Layer.Layer<DaemonSocket, DaemonTransportError, DaemonProtocol> {
 	if (!Number.isInteger(config.maxFrameBytes) || config.maxFrameBytes <= 0) throw new Error("maxFrameBytes must be a positive integer")
+	if (!Number.isInteger(config.maxResponseBytes) || config.maxResponseBytes <= 0) throw new Error("maxResponseBytes must be a positive integer")
 	if (config.operatorPath === config.agentPath) throw new Error("operator and agent sockets must use different paths")
 	return Layer.scoped(DaemonSocket, Effect.gen(function*() {
 		const protocol = yield* DaemonProtocol
@@ -117,9 +128,20 @@ function bind(config: DaemonSocketConfig, protocol: DaemonProtocolService, path:
 		unix: path,
 		socket: {
 			open: (socket) => {
-				socket.data = { decoder: new TextDecoder("utf-8", { fatal: true }), buffer: "", processing: Promise.resolve() }
+				socket.data = { decoder: new TextDecoder("utf-8", { fatal: true }), buffer: "", receivedBytes: 0, acceptedFrame: false, pendingWrite: null }
 			},
 			data: (socket, chunk) => {
+				if (socket.data.acceptedFrame) {
+					config.onError({ kind: "daemon-transport-error", operation: "frame", message: "connection accepts exactly one request frame" })
+					socket.end()
+					return
+				}
+				socket.data.receivedBytes += chunk.byteLength
+				if (socket.data.receivedBytes > config.maxFrameBytes + 1) {
+					config.onError({ kind: "daemon-transport-error", operation: "frame", message: "request frame exceeds maxFrameBytes" })
+					socket.end()
+					return
+				}
 				try {
 					socket.data.buffer += socket.data.decoder.decode(chunk, { stream: true })
 				} catch (error) {
@@ -127,27 +149,41 @@ function bind(config: DaemonSocketConfig, protocol: DaemonProtocolService, path:
 					socket.end()
 					return
 				}
-				if (Buffer.byteLength(socket.data.buffer, "utf8") > config.maxFrameBytes && !socket.data.buffer.includes("\n")) {
+				const frameEnd = socket.data.buffer.indexOf("\n")
+				if (frameEnd < 0) {
+					if (Buffer.byteLength(socket.data.buffer, "utf8") > config.maxFrameBytes) {
+						config.onError({ kind: "daemon-transport-error", operation: "frame", message: "request frame exceeds maxFrameBytes" })
+						socket.end()
+					}
+					return
+				}
+				const frame = socket.data.buffer.slice(0, frameEnd)
+				const backlog = socket.data.buffer.slice(frameEnd + 1)
+				socket.data.buffer = ""
+				if (Buffer.byteLength(frame, "utf8") > config.maxFrameBytes) {
 					config.onError({ kind: "daemon-transport-error", operation: "frame", message: "request frame exceeds maxFrameBytes" })
 					socket.end()
 					return
 				}
-				const frames = socket.data.buffer.split("\n")
-				socket.data.buffer = frames.pop() ?? ""
-				for (const frame of frames) {
-					if (frame === "") continue
-					if (Buffer.byteLength(frame, "utf8") > config.maxFrameBytes) {
-						config.onError({ kind: "daemon-transport-error", operation: "frame", message: "request frame exceeds maxFrameBytes" })
-						socket.end()
-						return
-					}
-					socket.data.processing = socket.data.processing.then(() => processFrame(protocol, socket, frame, allowedCaller)).catch((error) => {
+				if (backlog !== "") {
+					config.onError({ kind: "daemon-transport-error", operation: "frame", message: "connection queued more than one request frame" })
+					socket.end()
+					return
+				}
+				socket.data.acceptedFrame = true
+				socket.pause()
+				processFrame(protocol, socket, frame, allowedCaller, config.maxResponseBytes).then(
+					() => socket.end(),
+					(error) => {
 						config.onError({ kind: "daemon-transport-error", operation: "socket", message: describeError(error) })
 						socket.end()
-					})
-				}
+					},
+				)
 			},
+			drain: (socket) => flushPendingWrite(socket),
 			close: (socket) => {
+				socket.data.pendingWrite?.reject(new Error("socket closed before the response was fully written"))
+				socket.data.pendingWrite = null
 				try {
 					const tail = socket.data.decoder.decode()
 					if (tail !== "" || socket.data.buffer !== "") config.onError({ kind: "daemon-transport-error", operation: "frame", message: "connection closed with an incomplete request frame" })
@@ -155,17 +191,52 @@ function bind(config: DaemonSocketConfig, protocol: DaemonProtocolService, path:
 					config.onError({ kind: "daemon-transport-error", operation: "frame", message: describeError(error) })
 				}
 			},
-			error: (_socket, error) => config.onError({ kind: "daemon-transport-error", operation: "socket", message: error.message }),
+			error: (socket, error) => {
+				socket.data.pendingWrite?.reject(error)
+				socket.data.pendingWrite = null
+				config.onError({ kind: "daemon-transport-error", operation: "socket", message: error.message })
+			},
 		},
 	})
 }
 
-async function processFrame(protocol: DaemonProtocolService, socket: Bun.Socket<SocketState>, frame: string, allowedCaller: CallerKind): Promise<void> {
+async function processFrame(protocol: DaemonProtocolService, socket: Bun.Socket<SocketState>, frame: string, allowedCaller: CallerKind, maxResponseBytes: number): Promise<void> {
 	let candidate: unknown
-	try { candidate = JSON.parse(frame) }
-	catch { candidate = null }
+	try {
+		candidate = JSON.parse(frame)
+	} catch {
+		candidate = null
+	}
 	const response = await Effect.runPromise(protocol.handle(restrictCaller(candidate, allowedCaller)))
-	socket.write(`${JSON.stringify(response)}\n`)
+	await writeAll(socket, `${JSON.stringify(response)}\n`, maxResponseBytes)
+}
+
+function writeAll(socket: Bun.Socket<SocketState>, payload: string, maxResponseBytes: number): Promise<void> {
+	if (socket.data.pendingWrite !== null) return Promise.reject(new Error("socket already has a pending response write"))
+	if (Buffer.byteLength(payload, "utf8") > maxResponseBytes) return Promise.reject(new Error("daemon response exceeds maxResponseBytes"))
+	const bytes = Buffer.from(payload)
+	const { promise, resolve, reject } = Promise.withResolvers<void>()
+	socket.data.pendingWrite = { bytes, offset: 0, resolve, reject }
+	flushPendingWrite(socket)
+	return promise
+}
+
+function flushPendingWrite(socket: Bun.Socket<SocketState>): void {
+	const pending = socket.data.pendingWrite
+	if (pending === null) return
+	try {
+		while (pending.offset < pending.bytes.byteLength) {
+			const written = socket.write(pending.bytes.subarray(pending.offset))
+			if (written <= 0) return
+			pending.offset += written
+			if (pending.offset < pending.bytes.byteLength) return
+		}
+		socket.data.pendingWrite = null
+		pending.resolve()
+	} catch (error) {
+		socket.data.pendingWrite = null
+		pending.reject(error instanceof Error ? error : new Error(String(error)))
+	}
 }
 
 function restrictCaller(candidate: unknown, allowedCaller: CallerKind): unknown {

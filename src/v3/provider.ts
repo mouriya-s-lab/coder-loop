@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { access, constants, link, mkdir, open, readFile, rm } from "node:fs/promises"
+import { access, constants, link, mkdir, open, readFile, readdir, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { type as arkType } from "arktype"
 import { Context, Effect, Layer } from "effect"
@@ -33,7 +33,7 @@ export type RunnerConfig = {
 	readonly sandbox: SandboxDeclaration
 	readonly launcher:
 		| { readonly kind: "direct" }
-		| { readonly kind: "sandbox-exec"; readonly executable: "/usr/bin/sandbox-exec"; readonly profile: string }
+		| { readonly kind: "sandbox-exec"; readonly executable: "/usr/bin/sandbox-exec" }
 	readonly timeoutMs: number
 	readonly termGraceMs: number
 	readonly maxOutputBytes: number
@@ -41,11 +41,13 @@ export type RunnerConfig = {
 
 export type RunnerInvocation = {
 	readonly attemptIdentity: string
+	readonly factIdentity: string
 	readonly run: RunIdentity
 	readonly prompt: string
 	readonly cwd: string
 	readonly env: Readonly<Record<string, string>>
 	readonly continuation: { readonly kind: "fresh" } | { readonly kind: "resume"; readonly sessionIdentity: string }
+	readonly allowedSocketPath: string
 }
 
 export type ProbeEvidence = {
@@ -73,6 +75,7 @@ export type ProviderFactStoreError = {
 export type ProviderFactStoreService = {
 	readonly commit: (identity: string, fact: ProviderFact) => Effect.Effect<ProviderFact, ProviderFactStoreError>
 	readonly read: (identity: string) => Effect.Effect<ProviderFact | null, ProviderFactStoreError>
+	readonly list: Effect.Effect<readonly ProviderFact[], ProviderFactStoreError>
 }
 
 export class ProviderFactStore extends Context.Tag("coder-loop/v3/ProviderFactStore")<ProviderFactStore, ProviderFactStoreService>() {}
@@ -81,6 +84,7 @@ export function makeProviderFactStoreLive(root: string): Layer.Layer<ProviderFac
 	return Layer.succeed(ProviderFactStore, {
 		commit: (identity, fact) => Effect.tryPromise({ try: () => commitProviderFact(root, identity, fact), catch: (error) => factStoreError("commit", error) }),
 		read: (identity) => Effect.tryPromise({ try: () => readProviderFact(root, identity), catch: (error) => factStoreError("read", error) }),
+		list: Effect.tryPromise({ try: () => listProviderFacts(root), catch: (error) => factStoreError("list", error) }),
 	})
 }
 
@@ -109,7 +113,7 @@ export function makeRunnerProviderLive(config: RunnerConfig): Layer.Layer<Runner
 			}),
 			invoke: (invocation) => Effect.flatMap(
 				runSubprocess(buildSubprocessSpec(config, invocation)),
-				(outcome) => facts.commit(runProviderFactIdentity(invocation.run), providerFactFromOutcome(endpoint, invocation.run, config.kind, outcome)),
+				(outcome) => facts.commit(invocation.factIdentity, providerFactFromOutcome(endpoint, invocation.run, config.kind, outcome)),
 			),
 		}
 	}))
@@ -148,7 +152,9 @@ function probeEndpoint(config: RunnerConfig, endpoint: EndpointIdentity): Effect
 function buildSubprocessSpec(config: RunnerConfig, invocation: RunnerInvocation): SubprocessSpec {
 	const runnerArgv = buildRunnerArgv(config, invocation)
 	const executable = config.launcher.kind === "direct" ? config.executable : config.launcher.executable
-	const argv = config.launcher.kind === "direct" ? runnerArgv : ["-p", config.launcher.profile, config.executable, ...runnerArgv]
+	const argv = config.launcher.kind === "direct"
+		? runnerArgv
+		: ["-p", runnerSandboxProfile(invocation.cwd, invocation.allowedSocketPath, config.executable, config.sandbox.resources), config.executable, ...runnerArgv]
 	return {
 		executable,
 		argv,
@@ -162,6 +168,27 @@ function buildSubprocessSpec(config: RunnerConfig, invocation: RunnerInvocation)
 	}
 }
 
+export function runnerSandboxProfile(cwd: string, allowedSocketPath: string, executable: string, resources: readonly string[]): string {
+	const readPaths = [...new Set([cwd, executable, dirname(executable), ...resources])]
+	const readFilters = readPaths.flatMap((path) => [`(literal ${sandboxLiteral(path)})`, `(subpath ${sandboxLiteral(path)})`])
+	return [
+		"(version 1)",
+		"(deny default)",
+		"(allow process*)",
+		"(allow signal)",
+		"(allow sysctl-read)",
+		"(allow mach-lookup)",
+		"(allow file-read* (require-not (subpath \"/Users\")))",
+		`(allow file-read* (require-any ${readFilters.join(" ")}))`,
+		`(allow file-write* (subpath ${sandboxLiteral(cwd)}))`,
+		`(allow network-outbound (remote unix-socket (path ${sandboxLiteral(allowedSocketPath)})))`,
+	].join("\n")
+}
+
+function sandboxLiteral(value: string): string {
+	return JSON.stringify(value)
+}
+
 function providerFactFromOutcome(endpoint: EndpointIdentity, run: RunIdentity, runner: RunnerKind, outcome: SubprocessOutcome): ProviderFact {
 	switch (outcome.kind) {
 		case "success": {
@@ -170,12 +197,17 @@ function providerFactFromOutcome(endpoint: EndpointIdentity, run: RunIdentity, r
 				? { kind: "terminal-winner", endpoint, run, payload: result.payload, sessionIdentity: result.sessionIdentity, observedAt: outcome.closedAt }
 				: { kind: "unknown-effect", endpoint, run, detail: result.message, observedAt: outcome.closedAt }
 		}
-		case "nonzero": return { kind: "active-loss", endpoint, run, reason: "nonzero", detail: `exit:${outcome.exitCode}`, observedAt: outcome.closedAt }
+		case "nonzero": return { kind: "active-loss", endpoint, run, reason: "nonzero", detail: `exit:${outcome.exitCode}:${outputDetail(outcome.stderr)}`, observedAt: outcome.closedAt }
 		case "timeout": return { kind: "active-loss", endpoint, run, reason: "timeout", detail: outcome.signal, observedAt: outcome.closedAt }
-		case "signal": return { kind: "active-loss", endpoint, run, reason: "signal", detail: outcome.signal, observedAt: outcome.closedAt }
+		case "signal": return { kind: "active-loss", endpoint, run, reason: "signal", detail: `${outcome.signal}:${outputDetail(outcome.stderr)}`, observedAt: outcome.closedAt }
 		case "spawn-failure": return { kind: "unknown-effect", endpoint, run, detail: outcome.message, observedAt: outcome.closedAt }
 	}
 }
+function outputDetail(bytes: Uint8Array): string {
+	const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes).trim()
+	return text === "" ? "no-stderr" : text
+}
+
 
 type RunnerReadResult =
 	| { readonly kind: "accepted"; readonly payload: JsonValue; readonly sessionIdentity: string | null }
@@ -282,6 +314,22 @@ async function readProviderFact(root: string, identity: string): Promise<Provide
 	return parseProviderFact(JSON.parse(raw))
 }
 
+async function listProviderFacts(root: string): Promise<readonly ProviderFact[]> {
+	const directory = join(root, "provider-facts")
+	let entries: string[]
+	try {
+		entries = await readdir(directory)
+	} catch (error) {
+		if (isBoundaryRecord(error) && error.code === "ENOENT") return []
+		throw error
+	}
+	const facts = await Promise.all(entries.sort().map(async (entry) => {
+		const raw = await readFile(join(directory, entry, "winner.json"), "utf8")
+		return parseProviderFact(JSON.parse(raw))
+	}))
+	return facts
+}
+
 function parseProviderFact(candidate: unknown): ProviderFact {
 	if (!isBoundaryRecord(candidate) || typeof candidate.kind !== "string") throw new Error("invalid persisted provider fact")
 	if (candidate.kind === "terminal-winner") {
@@ -316,7 +364,8 @@ function factPath(root: string, identity: string): string {
 
 function validateRunnerConfig(config: RunnerConfig): void {
 	if (config.model === "") throw new Error("runner model must be explicit")
-	if (config.launcher.kind === "direct" && (config.sandbox.filesystem !== "unrestricted" || config.sandbox.network !== "unrestricted")) throw new Error("restricted sandbox declarations require an enforcing launcher")
+	if (config.sandbox.filesystem !== "closure-only") throw new Error("runner filesystem must be closure-only so agent code cannot reach the operator socket")
+	if (config.launcher.kind !== "sandbox-exec") throw new Error("runner requires an enforcing sandbox-exec launcher")
 	if (config.timeoutMs <= 0 || config.termGraceMs <= 0 || config.maxOutputBytes <= 0) throw new Error("runner limits must be positive")
 }
 

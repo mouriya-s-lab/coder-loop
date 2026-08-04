@@ -7,10 +7,10 @@ import { makeMapRuntimeLive, PredicateRuntimeLive, type MapRuntimeConfig } from 
 import { makeFunctionRuntimeLive } from "./function-runtime"
 import { makeRepositoryGitLive, type GitServiceConfig } from "./git-service"
 import { GroupConsumerRuntimeLive } from "./group-consumer"
-import { makeHookRuntimeLive, type HookDeclaration } from "./hooks"
+import { HookRuntime, makeHookRuntimeLive, type HookDeclaration, type HookRuntimeError } from "./hooks"
 import { RuntimeOrchestrator, makeRuntimeOrchestratorLive, type OrchestratorError } from "./orchestrator"
 import { makeProviderFactStoreLive, makeRunnerProviderLive, type RunnerConfig } from "./provider"
-import { RuntimeRecoveryLive } from "./recovery"
+import { makeRuntimeRecoveryLive } from "./recovery"
 import { SchedulerLive } from "./scheduler"
 import { makeObjectDomainStoreLive, ObjectDomainStore, type ObjectStoreError } from "./sqlite-store"
 
@@ -26,12 +26,13 @@ export type RuntimeHostConfig = {
 	readonly runner: RunnerConfig
 	readonly hooks: readonly HookDeclaration[]
 	readonly leaseMs: number
+	readonly maxConcurrency: number
 	readonly cycleMs: number
 	readonly onTransportError: DaemonSocketConfig["onError"]
 	readonly onCycleError: (error: OrchestratorError) => void
 }
 
-export type RuntimeHostStartupError = ObjectStoreError | DaemonTransportError
+export type RuntimeHostStartupError = ObjectStoreError | DaemonTransportError | HookRuntimeError
 
 export function runRuntimeHost(config: RuntimeHostConfig): Effect.Effect<never, RuntimeHostStartupError> {
 	if (!Number.isInteger(config.cycleMs) || config.cycleMs <= 0) throw new Error("cycleMs must be a positive integer")
@@ -45,17 +46,20 @@ export function runRuntimeHost(config: RuntimeHostConfig): Effect.Effect<never, 
 	const consumers = GroupConsumerRuntimeLive
 	const provider = makeRunnerProviderLive(config.runner).pipe(Layer.provide(providerFacts))
 	const scheduler = SchedulerLive.pipe(Layer.provide(store))
-	const recovery = RuntimeRecoveryLive.pipe(Layer.provide(Layer.mergeAll(store, providerFacts, repository)))
+	const recovery = makeRuntimeRecoveryLive(config.leaseMs).pipe(Layer.provide(Layer.mergeAll(store, providerFacts, repository)))
 	const functionRuntime = makeFunctionRuntimeLive({ socketPath: config.socket.agentPath, submitArgv: config.agentSubmitArgv }).pipe(Layer.provide(Layer.mergeAll(definitions, store, maps, predicates, hooks, provider, providerFacts)))
 	const admission = TypedAdmissionLive.pipe(Layer.provide(store))
 	const services = Layer.mergeAll(store, definitions, providerFacts, repository, hooks, maps, predicates, consumers, provider, scheduler, recovery, functionRuntime, admission)
 	const protocol = DaemonProtocolLive.pipe(Layer.provide(services))
 	const socket = makeDaemonSocketLive({ ...config.socket, onError: config.onTransportError }).pipe(Layer.provide(protocol))
-	const orchestrator = makeRuntimeOrchestratorLive(config.leaseMs).pipe(Layer.provide(services))
-	const runtime = Layer.mergeAll(services, protocol, socket, orchestrator)
+	const orchestrator = makeRuntimeOrchestratorLive(config.leaseMs, config.maxConcurrency).pipe(Layer.provide(services))
+	const runtime = Layer.mergeAll(services, protocol, orchestrator)
 	const program = Effect.gen(function*() {
 		const daemon = yield* RuntimeOrchestrator
 		const objectStore = yield* ObjectDomainStore
+		const hookRuntime = yield* HookRuntime
+		yield* hookRuntime.recover
+		yield* Layer.build(socket)
 		const cycle = Effect.catchAll(
 			Effect.flatMap(objectStore.listChains, (chains) => daemon.cycle(chains, Date.now())),
 			(error) => Effect.sync(() => config.onCycleError(error)),

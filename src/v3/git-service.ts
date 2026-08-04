@@ -19,6 +19,7 @@ export type PrepareClosureRequest = {
 	readonly identity: ClosureIdentity
 	readonly basePin: string
 	readonly branch: string
+	readonly allocation: string
 }
 
 export type GitServiceError = {
@@ -28,6 +29,7 @@ export type GitServiceError = {
 }
 
 export type GitService = {
+	readonly resolveBasePin: (ref: string) => Effect.Effect<string, GitServiceError>
 	readonly prepare: (request: PrepareClosureRequest) => Effect.Effect<Extract<ClosureResourceState, { kind: "active" }>, GitServiceError>
 	readonly discard: (closure: Extract<ClosureResourceState, { kind: "active" }>) => Effect.Effect<void, GitServiceError>
 	readonly publication: (closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>) => Effect.Effect<PublicationEvidence, GitServiceError>
@@ -41,6 +43,7 @@ export function makeRepositoryGitLive(config: GitServiceConfig): Layer.Layer<Rep
 		const singleflight = yield* Effect.makeSemaphore(1)
 		const serialized = singleflight.withPermits(1)
 		return {
+			resolveBasePin: (ref) => serialized(gitText(config, "resolve-base-pin", ["-C", config.repository, "rev-parse", `${ref}^{commit}`])),
 			prepare: (request) => serialized(prepareClosure(config, request)),
 			discard: (closure) => serialized(discardClosure(config, closure)),
 			publication: (closure) => serialized(observePublication(config, closure)),
@@ -50,7 +53,7 @@ export function makeRepositoryGitLive(config: GitServiceConfig): Layer.Layer<Rep
 }
 
 function prepareClosure(config: GitServiceConfig, request: PrepareClosureRequest): Effect.Effect<Extract<ClosureResourceState, { kind: "active" }>, GitServiceError> {
-	const root = closureRoot(config.workspaceRoot, request.identity)
+	const root = closureRoot(config.workspaceRoot, request.identity, request.allocation)
 	const worktree = join(root, "worktree")
 	const scratch = join(root, "scratch")
 	return Effect.gen(function*() {
@@ -74,7 +77,7 @@ function prepareClosure(config: GitServiceConfig, request: PrepareClosureRequest
 }
 
 function discardClosure(config: GitServiceConfig, closure: Extract<ClosureResourceState, { kind: "active" }>): Effect.Effect<void, GitServiceError> {
-	const root = closureRoot(config.workspaceRoot, closure.identity)
+	const root = dirname(closure.worktree)
 	return Effect.gen(function*() {
 		const worktrees = yield* gitText(config, "worktree-list", ["-C", config.repository, "worktree", "list", "--porcelain"])
 		if (worktrees.split("\n").includes(`worktree ${closure.worktree}`)) {
@@ -105,8 +108,8 @@ function observePublication(config: GitServiceConfig, closure: Extract<ClosureRe
 }
 
 function collectClosure(config: GitServiceConfig, closure: Extract<ClosureResourceState, { kind: "evidence-frozen" }>): Effect.Effect<void, GitServiceError> {
-	const root = closureRoot(config.workspaceRoot, closure.identity)
-	const worktree = join(root, "worktree")
+	const root = dirname(closure.worktree)
+	const worktree = closure.worktree
 	return Effect.gen(function*() {
 		const worktrees = yield* gitText(config, "worktree-list", ["-C", config.repository, "worktree", "list", "--porcelain"])
 		if (worktrees.split("\n").includes(`worktree ${worktree}`)) {
@@ -151,8 +154,8 @@ function gitOptionalText(config: GitServiceConfig, argv: readonly string[]): Eff
 	}), (outcome) => outcome.kind === "success" ? new TextDecoder().decode(outcome.stdout).trim() : null)
 }
 
-function closureRoot(workspaceRoot: string, identity: ClosureIdentity): string {
-	const digest = createHash("sha256").update(`${identity.task.chain.value}\0${identity.task.value}\0${identity.attempt}`).digest("hex")
+function closureRoot(workspaceRoot: string, identity: ClosureIdentity, allocation: string): string {
+	const digest = createHash("sha256").update(`${identity.task.chain.value}\0${identity.task.value}\0${identity.attempt}\0${allocation}`).digest("hex")
 	return join(workspaceRoot, "closures", digest)
 }
 
