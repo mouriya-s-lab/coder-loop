@@ -37,7 +37,7 @@ export function makeMapRuntimeLive(config: MapRuntimeConfig): Layer.Layer<MapRun
 		return {
 			execute: (stage, definition, declarations, context, cwd) => Effect.all(
 				declarations
-					.filter((declaration): declaration is DeclaredValue & { readonly source: { readonly kind: "map"; readonly stage: typeof stage; readonly module: string; readonly exportName: string; readonly reads: readonly string[] } } => declaration.source.kind === "map" && declaration.source.stage === stage)
+					.filter((declaration): declaration is DeclaredValue & { readonly source: { readonly kind: "map"; readonly stage: typeof stage; readonly module: string; readonly exportName: string; readonly reads: readonly string[] } } => declaration.source.kind === "map" && declaration.source.stage === stage && !Object.hasOwn(context, declaration.name))
 					.map((declaration) => executeMap(definitions, config, definition, declaration, context, cwd)),
 				{ concurrency: "unbounded" },
 			),
