@@ -1,0 +1,80 @@
+# Action: accept PR-backed work
+
+Use only when both dispatched reports (diff-audit, replay), all judgments, and the closure judgment passed.
+
+## Procedure
+
+1. Post the acceptance review report on the PR — same fixed shape as every review reply. Each check that ran gets a section that references observed values (SHAs, counts, verbatim quotes from the retry comment / PR body caveats, URLs); each check that did not run appears in `## Skipped checks` with its reason:
+
+```markdown
+## Review verdict: accepted (<RUN_ID>)
+
+## Check reports
+### diff-audit — pass
+refs <base-sha>..<head-sha>; files changed <n>: in-scope <n> / support <n> / unmapped none;
+hygiene: none; test changes in diff: <enumeration or none>; code findings: none
+### replay — pass
+head <sha>; canonical suite: <count>; rows <total>: matched <n> / browser <n: row #s>;
+e2e re-drive: <n> claims re-driven, all matched; form: direct;
+blocked-path e2e: <command + exit / not applicable>
+### Judgments
+- trace honesty: <one named pair: "<claim>" ↔ <observation>>
+- PR protocol: <body first line quoted; this run's PR comment URL>
+- title-intent: <"<issue title>" vs "<PR title>" after prefix strip>
+- caveat honesty: Intent/Result verdict; trigger phrases: none
+- evidence form: required packet sections all present; manifest re-runnable: yes
+- checks/mergeability: <head sha; each check: name=conclusion; mergeStateStatus>
+
+## 缺失汇总
+none
+
+## Skipped checks
+- <check → reason — or `none`>
+```
+
+An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back to the retry action.
+
+2. Merge:
+
+```bash
+gh pr merge <PR_NUMBER> -R <REPO> --squash --delete-branch
+```
+
+3. If merge succeeds and the issue is an unblock-deliverable issue (its body carries `Unblocks:` and `## 阻塞条件` per `contract.md` §1.2), perform the unblock side effect before closing:
+   - Re-fetch the issue body; parse the `Unblocks: owner/repo#N` back-link. Multiple `Unblocks:` lines → do not guess; retry or stop with the ambiguity recorded.
+   - No back-link at all → log `skip-no-cross-repo-back-link` in the handoff and proceed to close (compatibility path).
+   - Resolve the source repository's target checkout/runtime from local state, handoff, supervisor state, or paths in the issue history. Do not ask for credentials or paths in chat.
+   - Re-queue and restart the source target:
+
+```bash
+coder-loop queue unblock <SOURCE_TARGET_CWD> --issue <SOURCE_ISSUE> --start-daemon
+coder-loop status <SOURCE_TARGET_CWD> --json   # verify: item no longer blocked, daemon running
+```
+
+   - If any of back-link/source-target/re-queue/daemon-start/verification cannot complete: do not close the issue, do not write local `done`; record the exact failed command and take the stop action (infrastructure). A merged unblock PR without the downstream side effect is not complete.
+
+4. Comment on and close the issue:
+
+```bash
+gh issue comment <ISSUE> -R <REPO> --body "$(cat <<'EOF'
+## Coder-loop closure review (<RUN_ID>)
+
+Review verified this issue is fully handled.
+
+- Acceptance criteria: independently replayed, all rows matched.
+- Child/subtask issues: all closed with merged PRs or justified no-code closure.
+- Final transition made by coder-loop review.
+
+Reason:
+<evidence-backed reason>
+EOF
+)"
+
+gh issue close <ISSUE> -R <REPO> --comment "Closed by coder-loop review <RUN_ID> after verifying completion of scope, children, and PRs."
+```
+
+## Failure routing
+
+Every command above is a required side effect. Side effect blocked by a noninteractive approval boundary or failing before durable feedback/closure/unblock published → record exact command + output in handoff, do **not** write local `done`, take the stop action so the daemon cannot replay the same accepted PR. Acceptance posted but merge/close fails for an ordinary reason (conflict, failing checks, stale mergeability) → do not write `done`; take the retry action with exact PR feedback.
+
+On full success, write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `accepted_pr`, then continue the entry's wrap-up.

@@ -1,0 +1,25 @@
+# Judgment guide: source-writing spike audit (source-writing-spike-deliverable)
+
+A source-writing-spike-deliverable issue produces a no-merge spike: PoC branch, command evidence, and an issue comment. Audit it without treating it as PR-backed implementation.
+
+## Route check first
+
+- No PR exists → audit below.
+- A PR exists for the issue → retry immediately: spike output must not be represented as an implementation PR. The only legal route flip is if the issue body itself was rewritten into the implementation-PR-deliverable shape per `contract.md` §1.2 / §1.6 (deliberate scope change, recorded on the issue). Feedback goes on the issue.
+
+## Inputs
+
+- Live issue body + comments (re-fetch); the run-matching comment (`Run: <RUN_ID>`).
+- Handoff and evidence artifacts; pushed spike branch when named.
+
+## Judge
+
+1. **Comment liveness and no-merge framing** — a run-matching comment exists and explicitly states this is no-merge spike evidence, not production implementation.
+2. **Branch evidence** — source changes come with spike branch + head SHA, or an explicit local-only justification.
+3. **Command coverage** — every command promised by `## 验收标准` / `## 验证步骤` has an exit status and output/artifact reference. Where feasible, dispatch a replay to re-run the decisive spike commands rather than trusting the comment.
+4. **Browser evidence** — when required and browser-observable behavior exists, it is present; otherwise an explicit scope-based not-applicable reason.
+5. **Branch selection and follow-ups** — `## 结果分支`: exactly one branch selected; required follow-up titles concrete (same minimums as the spike-followup guide).
+
+## Outcome
+
+All satisfied → the spike is acceptable; a complete spike closes through the accept-no-PR action (`done`, not `moot`). Any miss → retry with feedback on the issue thread listing each missing element.
