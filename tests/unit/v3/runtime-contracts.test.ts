@@ -69,14 +69,17 @@ const authority: AgentRunAuthority = {
 }
 
 describe("v3 architecture contracts", () => {
-	test("compile remains incomplete until every declared map asset resolves", () => {
+	test("compile remains incomplete until every declared asset resolves", () => {
 		const compiled = compilePresetDefinition(definition)
 		expect(compiled.kind).toBe("compiled")
 		if (compiled.kind !== "compiled") return
-		expect(compiled.findings).toEqual([{ kind: "map-asset-unverified", value: "pre", module: "map.ts", exportName: "run" }])
+		expect(compiled.findings).toEqual([
+			{ kind: "map-asset-unverified", value: "pre", module: "map.ts", exportName: "run" },
+			{ kind: "prompt-asset-unverified", taskId: "root", asset: "prompt.txt" },
+		])
 		expect(strictCompiledProduct(compiled).kind).toBe("rejected")
 
-		const resolved = resolveCompileAssets(compiled, { "map.ts": "export const run = () => 1" })
+		const resolved = resolveCompileAssets(compiled, { "map.ts": "export const run = () => 1", "prompt.txt": "Run the task." })
 		const strict = strictCompiledProduct(resolved)
 		expect(strict.kind).toBe("accepted")
 		if (strict.kind !== "accepted") return
@@ -175,7 +178,7 @@ describe("v3 architecture contracts", () => {
 				const chain = { kind: "chain" as const, value: "chain" }
 				const task = { kind: "task" as const, chain, value: "root" }
 				const identity = { kind: "closure" as const, task, attempt: 0 }
-				const request = { identity, basePin: "HEAD", branch: "coder-loop/v3/base-pin-test" }
+				const request = { identity, basePin: "HEAD", branch: "coder-loop/v3/base-pin-test", allocation: "allocation-1" }
 				const first = yield* service.prepare(request)
 				const second = yield* service.prepare(request)
 				expect(first.basePin).not.toBe("HEAD")
@@ -204,7 +207,7 @@ describe("v3 architecture contracts", () => {
 		const protocol = Layer.succeed(DaemonProtocol, {
 			handle: () => Effect.succeed({ schemaVersion: 3 as const, requestId: null, outcome: { kind: "rejected" as const, rejection: { kind: "request-rejected" as const, reason: "invalid-envelope" as const, issues: ["test"] } } }),
 		})
-		const socketLayer = makeDaemonSocketLive({ operatorPath, agentPath, maxFrameBytes: 1024, onError: () => undefined }).pipe(Layer.provide(protocol))
+		const socketLayer = makeDaemonSocketLive({ operatorPath, agentPath, maxFrameBytes: 1024, maxResponseBytes: 1024, onError: () => undefined }).pipe(Layer.provide(protocol))
 		try {
 			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
 				const socket = yield* DaemonSocket
@@ -239,7 +242,7 @@ describe("v3 architecture contracts", () => {
 				const parent: Task = {
 					identity: parentIdentity,
 					group,
-					input: { definition: definitionRef, basePin: "base", value: { request: "work" }, valueIdentity: "input" },
+					input: { definition: definitionRef, entrypoint: "root", basePin: "base", value: { request: "work" }, valueIdentity: "input" },
 					dependsOn: [],
 					priority: 5,
 					state: { kind: "leased", run: { kind: "run", closure: { kind: "closure", task: parentIdentity, attempt: 0 }, value: "run" }, acquiredAt: 10, expiresAt: 20 },
@@ -260,7 +263,7 @@ describe("v3 architecture contracts", () => {
 				const successor: Task = {
 					identity: successorIdentity,
 					group,
-					input: { definition: definitionRef, basePin: "base", value: { result: "done" }, valueIdentity: "next-input" },
+					input: { definition: definitionRef, entrypoint: "root", basePin: "base", value: { result: "done" }, valueIdentity: "next-input" },
 					dependsOn: [parentIdentity],
 					priority: 5,
 					state: { kind: "ready" },
