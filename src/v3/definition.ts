@@ -13,6 +13,7 @@ export type ValueType =
 	| { readonly kind: "number" }
 	| { readonly kind: "boolean" }
 	| { readonly kind: "json" }
+	| { readonly kind: "literal"; readonly value: null | boolean | number | string }
 	| { readonly kind: "array"; readonly element: ValueType }
 	| { readonly kind: "record"; readonly fields: Readonly<Record<string, ValueField>> }
 	| { readonly kind: "union"; readonly variants: readonly ValueType[] }
@@ -61,6 +62,12 @@ export type HandoffContract = {
 	readonly onException: "propagate" | "fail"
 }
 
+export type FinalizerDefinition = {
+	readonly values: readonly DeclaredValue[]
+	readonly consumers: readonly ValueConsumer[]
+	readonly task: Extract<RecursiveTaskDefinition, { readonly kind: "leaf" }>
+}
+
 export type RecursiveTaskDefinition =
 	| { readonly kind: "leaf"; readonly id: string; readonly promptAsset: string; readonly contract: HandoffContract }
 	| { readonly kind: "seq"; readonly id: string; readonly children: readonly RecursiveTaskDefinition[] }
@@ -69,7 +76,7 @@ export type RecursiveTaskDefinition =
 		readonly id: string
 		readonly children: readonly RecursiveTaskDefinition[]
 		readonly growth: "closed" | { readonly kind: "fixed-deadline" | "sliding-deadline"; readonly durationMs: number }
-		readonly join: HandoffContract
+		readonly finalizer: FinalizerDefinition
 	}
 
 export type PresetDefinition = {
@@ -84,7 +91,9 @@ export type PresetDefinition = {
 export type CompileFinding =
 	| { readonly kind: "unconsumed-value"; readonly value: string }
 	| { readonly kind: "map-asset-unverified"; readonly value: string; readonly module: string; readonly exportName: string }
-
+	| { readonly kind: "map-asset-invalid"; readonly value: string; readonly module: string; readonly exportName: string; readonly reason: string }
+	| { readonly kind: "prompt-asset-unverified"; readonly taskId: string; readonly asset: string }
+	| { readonly kind: "prompt-asset-invalid"; readonly taskId: string; readonly asset: string; readonly reason: string }
 export type CompileDiagnostic =
 	| { readonly kind: "duplicate-value-source"; readonly value: string }
 	| { readonly kind: "unknown-value"; readonly consumer: ValueConsumer }
@@ -104,6 +113,9 @@ export type CompileDiagnostic =
 	| { readonly kind: "unknown-chooser"; readonly taskId: string; readonly chooser: string }
 	| { readonly kind: "chooser-type-mismatch"; readonly chooser: string; readonly value: string }
 	| { readonly kind: "chooser-source-mismatch"; readonly taskId: string; readonly chooser: string; readonly expected: "agent" | "map" }
+	| { readonly kind: "duplicate-fail-successor"; readonly taskId: string }
+	| { readonly kind: "invalid-finalizer-return-type"; readonly taskId: string }
+	| { readonly kind: "invalid-finalizer-contract"; readonly taskId: string }
 
 export type CompiledDefinitionProduct = {
 	readonly identity: CompiledProductIdentity
@@ -138,71 +150,27 @@ export type ValueParseResult =
 export function compilePresetDefinition(definition: PresetDefinition): CompileEnvelope {
 	const diagnostics: CompileDiagnostic[] = []
 	const findings: CompileFinding[] = []
-	const values = new Map<string, DeclaredValue>()
-
-	for (const value of definition.values) {
-		if (values.has(value.name)) diagnostics.push({ kind: "duplicate-value-source", value: value.name })
-		else values.set(value.name, value)
-		if (value.source.kind === "map") findings.push({
-			kind: "map-asset-unverified",
-			value: value.name,
-			module: value.source.module,
-			exportName: value.source.exportName,
-		})
-	}
-
-	const consumed = new Set<string>()
-	const predicateConsumers = new Map<string, Extract<ValueConsumer, { readonly kind: "predicate" }>>()
-	const chooserConsumers = new Map<string, Extract<ValueConsumer, { readonly kind: "chooser" }>>()
-	for (const consumer of definition.consumers) {
-		const value = values.get(consumer.value)
-		if (value === undefined) {
-			diagnostics.push({ kind: "unknown-value", consumer })
-			continue
-		}
-		consumed.add(consumer.value)
-		if (consumer.kind === "predicate") {
-			if (predicateConsumers.has(consumer.predicate)) diagnostics.push({ kind: "duplicate-predicate", predicate: consumer.predicate })
-			else predicateConsumers.set(consumer.predicate, consumer)
-			if (value.type.kind !== "boolean") diagnostics.push({ kind: "predicate-type-mismatch", predicate: consumer.predicate, value: consumer.value })
-		}
-		if (consumer.kind === "chooser") {
-			if (chooserConsumers.has(consumer.chooser)) diagnostics.push({ kind: "duplicate-chooser", chooser: consumer.chooser })
-			else chooserConsumers.set(consumer.chooser, consumer)
-			if (value.type.kind !== "string") diagnostics.push({ kind: "chooser-type-mismatch", chooser: consumer.chooser, value: consumer.value })
-		}
-		if (consumer.kind !== "map-input") continue
-		const mapOutput = values.get(consumer.mapValue)
-		if (mapOutput?.source.kind !== "map") {
-			diagnostics.push({ kind: "unknown-value", consumer })
-			continue
-		}
-		if (!isValueVisibleAtMapStage(value.source, mapOutput.source.stage)) {
-			diagnostics.push({ kind: "future-value-read", value: consumer.value, mapValue: consumer.mapValue })
-		}
-	}
-	collectReturnedValues(definition.task, consumed)
-
-	for (const value of definition.values) {
-		if (!consumed.has(value.name)) findings.push({ kind: "unconsumed-value", value: value.name })
-	}
+	const scope = analyzeValueScope(definition.values, definition.consumers, findings, diagnostics)
+	collectReturnedValues(definition.task, scope.consumed)
+	collectUnconsumedValues(definition.values, scope.consumed, findings)
 
 	const taskIndex = new Map<string, RecursiveTaskDefinition>()
 	indexTask(definition.task, taskIndex, diagnostics)
-	validateTask(definition.task, taskIndex, values, predicateConsumers, chooserConsumers, diagnostics)
+	validateTask(definition.task, taskIndex, scope, findings, diagnostics)
+	collectPromptAssetFindings(definition.task, findings)
 
 	if (diagnostics.length > 0) return rejectedEnvelope(definition, nonEmpty(diagnostics))
 
 	const productShape = {
 		definition,
 		taskIds: [...taskIndex.keys()].sort(),
-		valueNames: [...values.keys()].sort(),
+		valueNames: [...scope.values.keys()].sort(),
 	}
 	const product: CompiledDefinitionProduct = {
 		identity: { kind: "compiled-product", digest: digest(productShape) },
 		definition,
 		taskIndex: Object.fromEntries(taskIndex),
-		valueIndex: Object.fromEntries(values),
+		valueIndex: Object.fromEntries(scope.values),
 	}
 	return {
 		kind: "compiled",
@@ -212,18 +180,112 @@ export function compilePresetDefinition(definition: PresetDefinition): CompileEn
 	}
 }
 
+type ValueScope = {
+	readonly values: Map<string, DeclaredValue>
+	readonly consumed: Set<string>
+	readonly predicates: Map<string, Extract<ValueConsumer, { readonly kind: "predicate" }>>
+	readonly choosers: Map<string, Extract<ValueConsumer, { readonly kind: "chooser" }>>
+}
+
+function analyzeValueScope(
+	declarations: readonly DeclaredValue[],
+	consumers: readonly ValueConsumer[],
+	findings: CompileFinding[],
+	diagnostics: CompileDiagnostic[],
+): ValueScope {
+	const values = new Map<string, DeclaredValue>()
+	for (const value of declarations) {
+		if (values.has(value.name)) diagnostics.push({ kind: "duplicate-value-source", value: value.name })
+		else values.set(value.name, value)
+		if (value.source.kind === "map") findings.push({ kind: "map-asset-unverified", value: value.name, module: value.source.module, exportName: value.source.exportName })
+	}
+	const consumed = new Set<string>()
+	const predicates = new Map<string, Extract<ValueConsumer, { readonly kind: "predicate" }>>()
+	const choosers = new Map<string, Extract<ValueConsumer, { readonly kind: "chooser" }>>()
+	for (const consumer of consumers) {
+		const value = values.get(consumer.value)
+		if (value === undefined) {
+			diagnostics.push({ kind: "unknown-value", consumer })
+			continue
+		}
+		consumed.add(consumer.value)
+		if (consumer.kind === "predicate") {
+			if (predicates.has(consumer.predicate)) diagnostics.push({ kind: "duplicate-predicate", predicate: consumer.predicate })
+			else predicates.set(consumer.predicate, consumer)
+			if (value.type.kind !== "boolean") diagnostics.push({ kind: "predicate-type-mismatch", predicate: consumer.predicate, value: consumer.value })
+		}
+		if (consumer.kind === "chooser") {
+			if (choosers.has(consumer.chooser)) diagnostics.push({ kind: "duplicate-chooser", chooser: consumer.chooser })
+			else choosers.set(consumer.chooser, consumer)
+			if (value.type.kind !== "string") diagnostics.push({ kind: "chooser-type-mismatch", chooser: consumer.chooser, value: consumer.value })
+		}
+		if (consumer.kind !== "map-input") continue
+		const mapOutput = values.get(consumer.mapValue)
+		if (mapOutput?.source.kind !== "map") {
+			diagnostics.push({ kind: "unknown-value", consumer })
+			continue
+		}
+		if (!isValueVisibleAtMapStage(value.source, mapOutput.source.stage)) diagnostics.push({ kind: "future-value-read", value: consumer.value, mapValue: consumer.mapValue })
+	}
+	return { values, consumed, predicates, choosers }
+}
+
+function collectUnconsumedValues(declarations: readonly DeclaredValue[], consumed: ReadonlySet<string>, findings: CompileFinding[]): void {
+	for (const value of declarations) {
+		if (!consumed.has(value.name)) findings.push({ kind: "unconsumed-value", value: value.name })
+	}
+}
+
 export function resolveCompileAssets(
 	envelope: CompileEnvelope,
 	assets: Readonly<Record<string, string | Uint8Array>>,
 ): CompileEnvelope {
 	if (envelope.kind === "rejected") return envelope
-	return {
-		...envelope,
-		findings: envelope.findings.filter((finding) => {
-			if (finding.kind !== "map-asset-unverified") return true
-			return !Object.hasOwn(assets, finding.module)
-		}),
+	const findings = envelope.findings.flatMap((finding): CompileFinding[] => {
+		if (finding.kind === "map-asset-unverified") {
+			const source = assetText(assets[finding.module])
+			if (source === null) return [finding]
+			try {
+				const exports = new Bun.Transpiler({ loader: "ts" }).scan(source).exports
+				return exports.includes(finding.exportName)
+					? []
+					: [{ ...finding, kind: "map-asset-invalid", reason: `missing export ${finding.exportName}` }]
+			} catch (error) {
+				return [{ ...finding, kind: "map-asset-invalid", reason: error instanceof Error ? error.message : String(error) }]
+			}
+		}
+		if (finding.kind === "prompt-asset-unverified") {
+			const template = assetText(assets[finding.asset])
+			if (template === null) return [finding]
+			const scope = valueScopeForTask(envelope.product.definition, finding.taskId)
+			const valueNames = new Set(scope.values.map((value) => value.name))
+			const promptConsumers = new Set(scope.consumers.flatMap((consumer) => consumer.kind === "prompt" ? [consumer.value] : []))
+			const placeholders = [...template.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/gu)]
+				.map((match) => match[1])
+				.filter((name): name is string => name !== undefined)
+			const invalid = [...new Set(placeholders)].filter((name) => !valueNames.has(name) || !promptConsumers.has(name))
+			return invalid.length === 0
+				? []
+				: [{ ...finding, kind: "prompt-asset-invalid", reason: `undeclared prompt consumers: ${invalid.join(", ")}` }]
+		}
+		return [finding]
+	})
+	return { ...envelope, findings }
+}
+
+function valueScopeForTask(definition: PresetDefinition, taskId: string): Pick<FinalizerDefinition, "values" | "consumers"> {
+	const finalizer = findFinalizer(definition.task, taskId)
+	return finalizer ?? definition
+}
+
+function findFinalizer(node: RecursiveTaskDefinition, taskId: string): FinalizerDefinition | null {
+	if (node.kind === "leaf") return null
+	if (node.kind === "par" && node.finalizer.task.id === taskId) return node.finalizer
+	for (const child of node.children) {
+		const found = findFinalizer(child, taskId)
+		if (found !== null) return found
 	}
+	return null
 }
 
 export function strictCompiledProduct(envelope: CompileEnvelope):
@@ -270,15 +332,19 @@ function indexTask(node: RecursiveTaskDefinition, index: Map<string, RecursiveTa
 	if (index.has(node.id)) diagnostics.push({ kind: "duplicate-task-identity", taskId: node.id })
 	else index.set(node.id, node)
 	if (node.kind === "leaf") return
+	if (node.kind === "par") {
+		const finalizer = node.finalizer.task
+		if (index.has(finalizer.id)) diagnostics.push({ kind: "duplicate-task-identity", taskId: finalizer.id })
+		else index.set(finalizer.id, finalizer)
+	}
 	for (const child of node.children) indexTask(child, index, diagnostics)
 }
 
 function validateTask(
 	node: RecursiveTaskDefinition,
 	index: ReadonlyMap<string, RecursiveTaskDefinition>,
-	values: ReadonlyMap<string, DeclaredValue>,
-	predicates: ReadonlyMap<string, Extract<ValueConsumer, { readonly kind: "predicate" }>>,
-	choosers: ReadonlyMap<string, Extract<ValueConsumer, { readonly kind: "chooser" }>>,
+	scope: ValueScope,
+	findings: CompileFinding[],
 	diagnostics: CompileDiagnostic[],
 ): void {
 	if (node.kind !== "leaf" && node.children.length === 0) diagnostics.push({ kind: "empty-task-group", taskId: node.id })
@@ -286,11 +352,20 @@ function validateTask(
 		diagnostics.push({ kind: "invalid-growth-window", taskId: node.id, durationMs: node.growth.durationMs })
 	}
 	if (node.kind === "leaf") {
-		validateHandoff(node.id, node.contract, index, values, predicates, choosers, diagnostics)
+		validateHandoff(node.id, node.contract, index, scope.values, scope.predicates, scope.choosers, diagnostics)
 		return
 	}
-	if (node.kind === "par") validateHandoff(node.id, node.join, index, values, predicates, choosers, diagnostics)
-	for (const child of node.children) validateTask(child, index, values, predicates, choosers, diagnostics)
+	if (node.kind === "par") {
+		const finalizerScope = analyzeValueScope(node.finalizer.values, node.finalizer.consumers, findings, diagnostics)
+		finalizerScope.consumed.add(node.finalizer.task.contract.returnValue)
+		collectUnconsumedValues(node.finalizer.values, finalizerScope.consumed, findings)
+		validateHandoff(node.finalizer.task.id, node.finalizer.task.contract, index, finalizerScope.values, finalizerScope.predicates, finalizerScope.choosers, diagnostics)
+		if (digest(node.finalizer.task.contract.returns) !== digest(finalizerResultType())) diagnostics.push({ kind: "invalid-finalizer-return-type", taskId: node.finalizer.task.id })
+		if (node.finalizer.task.contract.successors.length > 0 || node.finalizer.task.contract.predicates.length > 0 || node.finalizer.task.contract.chooser !== null) {
+			diagnostics.push({ kind: "invalid-finalizer-contract", taskId: node.finalizer.task.id })
+		}
+	}
+	for (const child of node.children) validateTask(child, index, scope, findings, diagnostics)
 }
 
 function validateHandoff(
@@ -308,14 +383,17 @@ function validateHandoff(
 	for (const predicate of contract.predicates) {
 		if (!predicates.has(predicate)) diagnostics.push({ kind: "unknown-predicate", taskId, predicate })
 	}
+	const failSuccessors = contract.successors.filter((successor) => successor.when === "fail")
+	const normalSuccessors = contract.successors.filter((successor) => successor.when !== "fail")
+	if (failSuccessors.length > 1) diagnostics.push({ kind: "duplicate-fail-successor", taskId })
 	for (const successor of contract.successors) {
 		if (!index.has(successor.target)) diagnostics.push({ kind: "unknown-successor", taskId, target: successor.target })
 	}
-	if (contract.successors.length >= 2 && contract.chooser === null) {
-		diagnostics.push({ kind: "missing-chooser", taskId, successorCount: contract.successors.length })
+	if (normalSuccessors.length >= 2 && contract.chooser === null) {
+		diagnostics.push({ kind: "missing-chooser", taskId, successorCount: normalSuccessors.length })
 	}
-	if (contract.successors.length < 2 && contract.chooser !== null) {
-		diagnostics.push({ kind: "unexpected-chooser", taskId, successorCount: contract.successors.length })
+	if (normalSuccessors.length < 2 && contract.chooser !== null) {
+		diagnostics.push({ kind: "unexpected-chooser", taskId, successorCount: normalSuccessors.length })
 	}
 	if (contract.chooser !== null) {
 		const consumer = choosers.get(contract.chooser.name)
@@ -324,8 +402,21 @@ function validateHandoff(
 	}
 }
 
+export function finalizerResultType(): ValueType {
+	return {
+		kind: "union",
+		variants: [
+			{ kind: "record", fields: { kind: { type: { kind: "literal", value: "advance" }, optional: false }, value: { type: { kind: "json" }, optional: true } } },
+			{ kind: "record", fields: { kind: { type: { kind: "literal", value: "hold" }, optional: false }, reason: { type: { kind: "string" }, optional: false } } },
+		],
+	}
+}
+
 function parseValue(type: ValueType, input: unknown, path: readonly (string | number)[], issues: ValueParseIssue[]): JsonValue {
 	switch (type.kind) {
+		case "literal":
+			if (input === type.value) return type.value
+			return rejectValue(path, JSON.stringify(type.value), input, issues)
 		case "string":
 			if (typeof input === "string") return input
 			return rejectValue(path, "string", input, issues)
@@ -380,6 +471,7 @@ function describeType(type: ValueType): string {
 		case "json": return "JSON value"
 		case "array": return `array<${describeType(type.element)}>`
 		case "record": return "record"
+		case "literal": return JSON.stringify(type.value)
 		case "union": return type.variants.map(describeType).join(" | ")
 	}
 }
@@ -403,7 +495,24 @@ function collectReturnedValues(node: RecursiveTaskDefinition, consumed: Set<stri
 		return
 	}
 	for (const child of node.children) collectReturnedValues(child, consumed)
-	if (node.kind === "par") consumed.add(node.join.returnValue)
+}
+
+function collectPromptAssetFindings(node: RecursiveTaskDefinition, findings: CompileFinding[]): void {
+	if (node.kind === "leaf") {
+		findings.push({ kind: "prompt-asset-unverified", taskId: node.id, asset: node.promptAsset })
+		return
+	}
+	for (const child of node.children) collectPromptAssetFindings(child, findings)
+	if (node.kind === "par") findings.push({ kind: "prompt-asset-unverified", taskId: node.finalizer.task.id, asset: node.finalizer.task.promptAsset })
+}
+
+function assetText(asset: string | Uint8Array | undefined): string | null {
+	if (asset === undefined) return null
+	try {
+		return typeof asset === "string" ? asset : new TextDecoder("utf-8", { fatal: true }).decode(asset)
+	} catch {
+		return null
+	}
 }
 
 function digest(value: unknown): string {
