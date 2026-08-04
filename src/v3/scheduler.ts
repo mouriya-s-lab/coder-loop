@@ -23,7 +23,7 @@ export type LeaseClaim = {
 	readonly identity: string
 	readonly task: Task
 	readonly run: RunIdentity
-	readonly closure: Extract<ClosureResourceState, { kind: "active" }>
+	readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>
 	readonly acquiredAt: number
 	readonly expiresAt: number
 }
@@ -32,6 +32,7 @@ export type GroupReconciliation =
 	| { readonly kind: "running"; readonly group: GroupIdentity }
 	| { readonly kind: "waiting"; readonly group: GroupIdentity; readonly deadline: number }
 	| { readonly kind: "terminated"; readonly group: GroupIdentity }
+	| { readonly kind: "consuming"; readonly group: GroupIdentity }
 	| { readonly kind: "consumed"; readonly group: GroupIdentity }
 
 export type SchedulerService = {
@@ -66,6 +67,7 @@ export const SchedulerLive: Layer.Layer<Scheduler, never, ObjectDomainStore> = L
 			if (current === undefined) return Effect.fail<ObjectStoreError>({ kind: "transition-rejected", family: "group-termination", reason: "not-found", message: `group ${groupKey(group)} not found` })
 			if (current.state.kind === "consumed") return Effect.succeed({ kind: "consumed", group })
 			if (current.state.kind === "terminated") return Effect.succeed({ kind: "terminated", group })
+			if (current.state.kind === "consuming") return Effect.succeed({ kind: "consuming", group })
 			const next = nextGroupState(current, snapshot.tasks, now)
 			if (next.kind === "open") return Effect.succeed({ kind: "running", group })
 			if (next.kind === "waiting") {
@@ -77,6 +79,7 @@ export const SchedulerLive: Layer.Layer<Scheduler, never, ObjectDomainStore> = L
 					{ kind: "waiting", group, deadline: next.deadline },
 				)
 			}
+			if (next.kind === "consuming") return Effect.succeed({ kind: "consuming", group })
 			if (next.kind === "consumed") return Effect.succeed({ kind: "consumed", group })
 			return Effect.as(
 				store.commit({ identity: `group-terminated:${groupKey(group)}:${next.memberVersion}:${next.terminatedAt}`, transition: { family: "group-termination", group, state: next } }),
