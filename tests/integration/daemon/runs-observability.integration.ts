@@ -54,7 +54,7 @@ describe("daemon", () => {
 				// #405: pin the iteration write so the test's single-phase event assertion stays
 				// single-phase (previously the retired stdout verdict mapper coincidentally landed
 				// iteration at done via the default REVIEW SUMMARY token).
-				extra: { sleepMs: 50, exitCode: 0, writeStatus: "done" },
+				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done", extraSleepAfterStatusWriteMs: 500 },
 			})
 
 			// The run's events file must end with chain.completed, which the scheduler appends last.
