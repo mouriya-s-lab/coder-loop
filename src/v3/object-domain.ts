@@ -13,6 +13,7 @@ export type ConsumptionIdentity = { readonly kind: "consumption"; readonly group
 
 export type TaskInput = {
 	readonly definition: DefinitionRef
+	readonly entrypoint: string
 	readonly basePin: string
 	readonly value: JsonValue
 	readonly valueIdentity: string
@@ -69,12 +70,19 @@ export type GroupState =
 	| { readonly kind: "open" }
 	| { readonly kind: "waiting"; readonly deadline: number; readonly memberVersion: number }
 	| { readonly kind: "terminated"; readonly reason: "immediate" | "deadline"; readonly memberVersion: number; readonly terminatedAt: number }
+	| {
+		readonly kind: "consuming"
+		readonly consumerTask: TaskIdentity
+		readonly consumerGroup: GroupIdentity
+		readonly settlementsDigest: string
+		readonly startedAt: number
+	}
 	| { readonly kind: "consumed"; readonly consumption: ConsumptionIdentity; readonly consumedAt: number }
 
 export type GroupConsumer =
 	| { readonly kind: "drain" }
-	| { readonly kind: "validator"; readonly definition: DefinitionRef }
-	| { readonly kind: "finalizer"; readonly definition: DefinitionRef }
+	| { readonly kind: "validator"; readonly definition: DefinitionRef; readonly entrypoint: string }
+	| { readonly kind: "finalizer"; readonly definition: DefinitionRef; readonly entrypoint: string }
 
 export type TaskGroup = {
 	readonly identity: GroupIdentity
@@ -99,6 +107,15 @@ export type AwaitRecord =
 		readonly child: TaskIdentity
 		readonly settlement: TaskSettlement
 		readonly token: string
+	}
+	| {
+		readonly kind: "consumed"
+		readonly identity: AwaitIdentity
+		readonly parentClosure: ClosureIdentity
+		readonly child: TaskIdentity
+		readonly settlement: TaskSettlement
+		readonly token: string
+		readonly consumedAt: number
 	}
 	| {
 		readonly kind: "continuation-lost"
@@ -137,7 +154,7 @@ export type OpenFrontier = readonly {
 export type AdmissionRejection =
 	| { readonly kind: "position-unavailable"; readonly frontier: OpenFrontier }
 	| { readonly kind: "timing-invalid"; readonly frontier: OpenFrontier }
-	| { readonly kind: "contract-rejected"; readonly reason: "definition-chain-mismatch" | "dependency-cycle" | "duplicate-task"; readonly frontier: OpenFrontier }
+	| { readonly kind: "contract-rejected"; readonly reason: "definition-chain-mismatch" | "dependency-cycle" | "duplicate-task" | "task-group-mismatch"; readonly frontier: OpenFrontier }
 	| { readonly kind: "unauthorized"; readonly frontier: OpenFrontier }
 
 export type AdmissionResult =
@@ -171,16 +188,25 @@ export type ObjectDomainAction =
 
 export type CommittedTransition =
 	| { readonly family: "task-admission"; readonly fact: FactIdentity; readonly task: Task; readonly position: AdmissionPosition }
-	| { readonly family: "lease-acquire"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly closure: Extract<ClosureResourceState, { kind: "active" }>; readonly acquiredAt: number; readonly expiresAt: number }
+	| { readonly family: "lease-acquire"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>; readonly acquiredAt: number; readonly expiresAt: number }
 	| { readonly family: "lease-release"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly reason: "cancelled" }
 	| { readonly family: "task-held"; readonly task: TaskIdentity; readonly expectedRun: RunIdentity | null; readonly reason: TaskHoldReason }
 	| { readonly family: "task-unhold"; readonly task: TaskIdentity }
 	| { readonly family: "task-resume"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly resumedAt: number; readonly expiresAt: number }
 	| { readonly family: "task-settlement"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly settlement: TaskSettlement; readonly successors: readonly { readonly fact: FactIdentity; readonly task: Task; readonly position: AdmissionPosition }[] }
-	| { readonly family: "await-suspension"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly record: Extract<AwaitRecord, { kind: "waiting" }>; readonly continuation: ContinuationFact }
+	| { readonly family: "await-suspension"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly record: Extract<AwaitRecord, { kind: "waiting" }>; readonly continuation: Extract<ContinuationFact, { kind: "present" }>; readonly child: AdmissionRequest }
 	| { readonly family: "await-resumption"; readonly task: TaskIdentity; readonly record: Extract<AwaitRecord, { kind: "delivered" | "continuation-lost" }> }
+	| { readonly family: "await-consumption"; readonly task: TaskIdentity; readonly record: Extract<AwaitRecord, { kind: "consumed" }> }
 	| { readonly family: "group-waiting"; readonly group: GroupIdentity; readonly state: Extract<GroupState, { kind: "waiting" }> }
 	| { readonly family: "group-termination"; readonly group: GroupIdentity; readonly state: Extract<GroupState, { kind: "terminated" }> }
+	| {
+		readonly family: "group-consumer-start"
+		readonly group: GroupIdentity
+		readonly state: Extract<GroupState, { kind: "consuming" }>
+		readonly consumerGroup: TaskGroup
+		readonly task: Task
+		readonly settlements: readonly TaskSettlement[]
+	}
 	| { readonly family: "group-consumption"; readonly group: GroupIdentity; readonly state: Extract<GroupState, { kind: "consumed" }>; readonly settlements: readonly TaskSettlement[] }
 	| { readonly family: "resource-intent"; readonly closure: ClosureIdentity; readonly action: "freeze-evidence" | "collect"; readonly publication: PublicationEvidence | null }
 
@@ -207,14 +233,17 @@ export function factKey(identity: FactIdentity): string {
 export function evaluateAdmission(snapshot: ObjectDomainSnapshot, request: AdmissionRequest): AdmissionResult {
 	const group = snapshot.groups[groupKey(request.position.group)]
 	const frontier = openFrontier(snapshot)
-	if (group === undefined || group.state.kind === "terminated" || group.state.kind === "consumed" || group.memberVersion !== request.position.expectedMemberVersion) {
+	if (group === undefined || group.state.kind === "terminated" || group.state.kind === "consuming" || group.state.kind === "consumed" || group.memberVersion !== request.position.expectedMemberVersion) {
 		return { kind: "rejected", reason: { kind: "position-unavailable", frontier } }
 	}
-	if (!authorityAllows(request.authority, request.position.group)) {
+	if (!authorityAllows(snapshot, request.authority, request.position.group)) {
 		return { kind: "rejected", reason: { kind: "unauthorized", frontier } }
 	}
 	if (request.timing.kind === "before-deadline" && (group.state.kind !== "waiting" || request.timing.claimedAt > group.state.deadline)) {
 		return { kind: "rejected", reason: { kind: "timing-invalid", frontier } }
+	}
+	if (groupKey(request.task.group) !== groupKey(request.position.group)) {
+		return { kind: "rejected", reason: { kind: "contract-rejected", reason: "task-group-mismatch", frontier } }
 	}
 	if (Object.hasOwn(snapshot.tasks, taskKey(request.task.identity))) {
 		return { kind: "rejected", reason: { kind: "contract-rejected", reason: "duplicate-task", frontier } }
@@ -248,7 +277,7 @@ export function evaluateEscalation(policy: EscalationPolicy, attempt: number): r
 }
 
 export function nextGroupState(group: TaskGroup, tasks: Readonly<Record<string, Task>>, now: number): GroupState {
-	if (group.state.kind === "terminated" || group.state.kind === "consumed") return group.state
+	if (group.state.kind === "terminated" || group.state.kind === "consuming" || group.state.kind === "consumed") return group.state
 	const allSettled = group.members.every((identity) => tasks[taskKey(identity)]?.state.kind === "settled")
 	if (!allSettled) return { kind: "open" }
 	if (group.wait.kind === "none") return { kind: "terminated", reason: "immediate", memberVersion: group.memberVersion, terminatedAt: now }
@@ -272,10 +301,17 @@ export function openFrontier(snapshot: ObjectDomainSnapshot): OpenFrontier {
 		}))
 }
 
-function authorityAllows(authority: AdmissionAuthority, group: GroupIdentity): boolean {
-	return authority.kind === "internal"
-		? groupKey(authority.allowedGroup) === groupKey(group)
-		: authority.allowedChain.value === group.chain.value
+function authorityAllows(snapshot: ObjectDomainSnapshot, authority: AdmissionAuthority, group: GroupIdentity): boolean {
+	if (authority.kind === "external") return authority.allowedChain.value === group.chain.value
+	const owner = snapshot.tasks[taskKey(authority.run.closure.task)]
+	if (owner?.state.kind !== "leased" || !sameRun(owner.state.run, authority.run)) return false
+	return groupKey(owner.group) === groupKey(authority.allowedGroup) && groupKey(authority.allowedGroup) === groupKey(group)
+}
+
+function sameRun(left: RunIdentity, right: RunIdentity): boolean {
+	return left.value === right.value
+		&& left.closure.attempt === right.closure.attempt
+		&& taskKey(left.closure.task) === taskKey(right.closure.task)
 }
 
 function wouldIntroduceDependencyCycle(snapshot: ObjectDomainSnapshot, task: TaskIdentity, dependencies: readonly TaskIdentity[]): boolean {
