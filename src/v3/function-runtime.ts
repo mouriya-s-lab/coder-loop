@@ -188,7 +188,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 					}
 
 					if (session.state === "open") {
-						const factIdentity = runnerFactIdentity(run, checkpoint.stepId)
+						const factIdentity = runProviderFactIdentity(run)
 						const existing = yield* facts.read(factIdentity)
 						const probe = existing === null ? yield* runner.probe : null
 						if (existing === null && probe?.kind !== "ready") {
@@ -463,10 +463,6 @@ function failureSuccessor(contract: Extract<RecursiveTaskDefinition, { readonly 
 	return transition.kind === "internal-successor" ? transition.target : null
 }
 
-function runnerFactIdentity(run: RunIdentity, stepId: string): string {
-	return `${runProviderFactIdentity(run)}/${stepId}`
-}
-
 function programFault(): { readonly kind: "policy"; readonly reason: "program-fault" } {
 	return { kind: "policy", reason: "program-fault" }
 }
@@ -564,4 +560,3 @@ function definitionError(reason: Extract<FunctionRuntimeError, { kind: "runtime-
 function isFunctionRuntimeError(error: unknown): error is FunctionRuntimeError {
 	return typeof error === "object" && error !== null && "kind" in error && typeof error.kind === "string"
 }
-

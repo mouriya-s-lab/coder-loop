@@ -74,32 +74,28 @@ function recoverTask(store: typeof ObjectDomainStore.Service, facts: typeof Prov
 	} else {
 		return Effect.dieMessage("recoverTask requires an expired lease or unknown-effect hold")
 	}
-	return Effect.flatMap(store.readFunctionCheckpoint(authorityFor(run)), (checkpoint) => {
-		const factIdentity = checkpoint === null
-			? runProviderFactIdentity(run)
-			: `${runProviderFactIdentity(run)}/${checkpoint.stepId}`
-		return Effect.flatMap(facts.read(factIdentity), (fact): Effect.Effect<RecoveryDecision, ObjectStoreError> => {
-			if (fact?.kind === "terminal-winner" || fact?.kind === "active-loss") {
-				if (task.state.kind === "leased") return Effect.succeed({ kind: "provider-fact-ready", task: task.identity, fact })
-				return Effect.as(
-					store.commit({
-						identity: `recovery-resume:${factIdentity}`,
-						transition: { family: "task-resume", task: task.identity, run, resumedAt: now, expiresAt: now + leaseMs },
-					}),
-					{ kind: "provider-fact-ready", task: task.identity, fact },
-				)
-			}
-			const detail = fact?.kind === "unknown-effect" ? fact.detail : "lease expired without a durable terminal or loss winner"
-			if (task.state.kind === "held") return Effect.succeed({ kind: "unknown-held", task: task.identity, detail })
-			const endpoint = fact?.kind === "unknown-effect" ? fact.endpoint.digest : "unresolved"
+	const factIdentity = runProviderFactIdentity(run)
+	return Effect.flatMap(facts.read(factIdentity), (fact): Effect.Effect<RecoveryDecision, ObjectStoreError> => {
+		if (fact?.kind === "terminal-winner" || fact?.kind === "active-loss") {
+			if (task.state.kind === "leased") return Effect.succeed({ kind: "provider-fact-ready", task: task.identity, fact })
 			return Effect.as(
 				store.commit({
-					identity: `recovery-hold:${factIdentity}`,
-					transition: { family: "task-held", task: task.identity, expectedRun: run, reason: { kind: "unknown-effect", endpoint, run, detail, observedAt: now } },
+					identity: `recovery-resume:${factIdentity}`,
+					transition: { family: "task-resume", task: task.identity, run, resumedAt: now, expiresAt: now + leaseMs },
 				}),
-				{ kind: "unknown-held", task: task.identity, detail },
+				{ kind: "provider-fact-ready", task: task.identity, fact },
 			)
-		})
+		}
+		const detail = fact?.kind === "unknown-effect" ? fact.detail : "lease expired without a durable terminal or loss winner"
+		if (task.state.kind === "held") return Effect.succeed({ kind: "unknown-held", task: task.identity, detail })
+		const endpoint = fact?.kind === "unknown-effect" ? fact.endpoint.digest : "unresolved"
+		return Effect.as(
+			store.commit({
+				identity: `recovery-hold:${factIdentity}`,
+				transition: { family: "task-held", task: task.identity, expectedRun: run, reason: { kind: "unknown-effect", endpoint, run, detail, observedAt: now } },
+			}),
+			{ kind: "unknown-held", task: task.identity, detail },
+		)
 	})
 }
 
@@ -140,16 +136,6 @@ function isCollectEligible(group: TaskGroup | undefined, task: Task): boolean {
 	return group?.state.kind === "consumed"
 		&& group.members.some((member) => taskKey(member) === taskKey(task.identity))
 		&& task.closure.kind === "evidence-frozen"
-}
-
-function authorityFor(run: Extract<Task["state"], { readonly kind: "leased" }>["run"]): import("./context").AgentRunAuthority {
-	return {
-		kind: "agent-run",
-		chainId: run.closure.task.chain.value,
-		taskId: taskKey(run.closure.task),
-		closureId: `${taskKey(run.closure.task)}/${run.closure.attempt}`,
-		runId: run.value,
-	}
 }
 
 function closureKey(identity: ClosureIdentity): string {
