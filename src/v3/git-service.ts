@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
-import { mkdir, rm } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { lstat, mkdir, realpath, rm } from "node:fs/promises"
+import { basename, dirname, join, resolve } from "node:path"
 import { Context, Effect, Layer } from "effect"
 import type { ClosureIdentity, ClosureResourceState, PublicationEvidence } from "./object-domain"
 import { runSubprocess, type SubprocessOutcome } from "./subprocess"
@@ -40,50 +40,54 @@ export class RepositoryGit extends Context.Tag("coder-loop/v3/RepositoryGit")<Re
 
 export function makeRepositoryGitLive(config: GitServiceConfig): Layer.Layer<RepositoryGit> {
 	return Layer.effect(RepositoryGit, Effect.gen(function*() {
+		const normalizedConfig = { ...config, workspaceRoot: resolve(config.workspaceRoot) }
 		const singleflight = yield* Effect.makeSemaphore(1)
 		const serialized = singleflight.withPermits(1)
 		return {
-			resolveBasePin: (ref) => serialized(gitText(config, "resolve-base-pin", ["-C", config.repository, "rev-parse", `${ref}^{commit}`])),
-			prepare: (request) => serialized(prepareClosure(config, request)),
-			discard: (closure) => serialized(discardClosure(config, closure)),
-			publication: (closure) => serialized(observePublication(config, closure)),
-			collect: (closure) => serialized(collectClosure(config, closure)),
+			resolveBasePin: (ref) => serialized(gitText(normalizedConfig, "resolve-base-pin", ["-C", normalizedConfig.repository, "rev-parse", `${ref}^{commit}`])),
+			prepare: (request) => serialized(prepareClosure(normalizedConfig, request)),
+			discard: (closure) => serialized(discardClosure(normalizedConfig, closure)),
+			publication: (closure) => serialized(observePublication(normalizedConfig, closure)),
+			collect: (closure) => serialized(collectClosure(normalizedConfig, closure)),
 		}
 	}))
 }
 
 function prepareClosure(config: GitServiceConfig, request: PrepareClosureRequest): Effect.Effect<Extract<ClosureResourceState, { kind: "active" }>, GitServiceError> {
-	const root = closureRoot(config.workspaceRoot, request.identity, request.allocation)
-	const worktree = join(root, "worktree")
-	const scratch = join(root, "scratch")
 	return Effect.gen(function*() {
-		const basePin = yield* gitText(config, "resolve-base-pin", ["-C", config.repository, "rev-parse", `${request.basePin}^{commit}`])
+		const canonicalConfig = yield* canonicalizeGitServiceConfig(config)
+		const root = closureRoot(canonicalConfig.workspaceRoot, request.identity, request.allocation)
+		const worktree = join(root, "worktree")
+		const scratch = join(root, "scratch")
+		const basePin = yield* gitText(canonicalConfig, "resolve-base-pin", ["-C", canonicalConfig.repository, "rev-parse", `${request.basePin}^{commit}`])
 		if (!request.branch.startsWith("coder-loop/v3/")) return yield* Effect.fail<GitServiceError>({ kind: "git-service-error", operation: "prepare", message: "closure branch is outside the engine namespace" })
 		yield* fsEffect("prepare-directories", async () => {
 			await mkdir(dirname(worktree), { recursive: true })
 			await mkdir(scratch, { recursive: true })
 		})
-		const worktrees = yield* gitText(config, "worktree-list", ["-C", config.repository, "worktree", "list", "--porcelain"])
+		const worktrees = yield* gitText(canonicalConfig, "worktree-list", ["-C", canonicalConfig.repository, "worktree", "list", "--porcelain"])
 		if (worktrees.split("\n").includes(`worktree ${worktree}`)) {
-			const branch = yield* gitText(config, "resolve-branch", ["-C", worktree, "branch", "--show-current"])
-			const tip = yield* gitText(config, "resolve-tip", ["-C", worktree, "rev-parse", "HEAD"])
+			const branch = yield* gitText(canonicalConfig, "resolve-branch", ["-C", worktree, "branch", "--show-current"])
+			const tip = yield* gitText(canonicalConfig, "resolve-tip", ["-C", worktree, "rev-parse", "HEAD"])
 			if (branch !== request.branch || tip !== basePin) return yield* Effect.fail<GitServiceError>({ kind: "git-service-error", operation: "prepare", message: "existing closure residue does not match its declared branch and resolved base pin" })
 			return { kind: "active", identity: request.identity, basePin, branch: request.branch, worktree, scratch }
 		}
-		yield* gitOptionalText(config, ["-C", config.repository, "branch", "-D", request.branch])
-		yield* git(config, "worktree-add", ["-C", config.repository, "worktree", "add", "-b", request.branch, worktree, basePin])
+		yield* gitOptionalText(canonicalConfig, ["-C", canonicalConfig.repository, "branch", "-D", request.branch])
+		yield* git(canonicalConfig, "worktree-add", ["-C", canonicalConfig.repository, "worktree", "add", "-b", request.branch, worktree, basePin])
 		return { kind: "active", identity: request.identity, basePin, branch: request.branch, worktree, scratch }
 	})
 }
 
 function discardClosure(config: GitServiceConfig, closure: Extract<ClosureResourceState, { kind: "active" }>): Effect.Effect<void, GitServiceError> {
-	const root = dirname(closure.worktree)
 	return Effect.gen(function*() {
-		const worktrees = yield* gitText(config, "worktree-list", ["-C", config.repository, "worktree", "list", "--porcelain"])
+		const canonicalConfig = yield* canonicalizeGitServiceConfig(config)
+		const root = yield* validateCleanupRoot(canonicalConfig.workspaceRoot, closure, "discard")
+		const worktrees = yield* gitText(canonicalConfig, "worktree-list", ["-C", canonicalConfig.repository, "worktree", "list", "--porcelain"])
 		if (worktrees.split("\n").includes(`worktree ${closure.worktree}`)) {
-			yield* git(config, "worktree-remove", ["-C", config.repository, "worktree", "remove", "--force", closure.worktree])
+			yield* git(canonicalConfig, "worktree-remove", ["-C", canonicalConfig.repository, "worktree", "remove", "--force", closure.worktree])
 		}
-		yield* gitOptionalText(config, ["-C", config.repository, "branch", "-D", closure.branch])
+		yield* gitOptionalText(canonicalConfig, ["-C", canonicalConfig.repository, "branch", "-D", closure.branch])
+		yield* validateCleanupRoot(canonicalConfig.workspaceRoot, closure, "discard")
 		yield* fsEffect("remove-unclaimed-closure-root", () => rm(root, { recursive: true, force: true }))
 	})
 }
@@ -108,14 +112,16 @@ function observePublication(config: GitServiceConfig, closure: Extract<ClosureRe
 }
 
 function collectClosure(config: GitServiceConfig, closure: Extract<ClosureResourceState, { kind: "evidence-frozen" }>): Effect.Effect<void, GitServiceError> {
-	const root = dirname(closure.worktree)
 	const worktree = closure.worktree
 	return Effect.gen(function*() {
-		const worktrees = yield* gitText(config, "worktree-list", ["-C", config.repository, "worktree", "list", "--porcelain"])
+		const canonicalConfig = yield* canonicalizeGitServiceConfig(config)
+		const root = yield* validateCleanupRoot(canonicalConfig.workspaceRoot, closure, "collect")
+		const worktrees = yield* gitText(canonicalConfig, "worktree-list", ["-C", canonicalConfig.repository, "worktree", "list", "--porcelain"])
 		if (worktrees.split("\n").includes(`worktree ${worktree}`)) {
-			yield* git(config, "worktree-remove", ["-C", config.repository, "worktree", "remove", "--force", worktree])
+			yield* git(canonicalConfig, "worktree-remove", ["-C", canonicalConfig.repository, "worktree", "remove", "--force", worktree])
 		}
-		yield* gitOptionalText(config, ["-C", config.repository, "branch", "-D", closure.branch])
+		yield* gitOptionalText(canonicalConfig, ["-C", canonicalConfig.repository, "branch", "-D", closure.branch])
+		yield* validateCleanupRoot(canonicalConfig.workspaceRoot, closure, "collect")
 		yield* fsEffect("remove-closure-root", () => rm(root, { recursive: true, force: true }))
 	})
 }
@@ -157,6 +163,64 @@ function gitOptionalText(config: GitServiceConfig, argv: readonly string[]): Eff
 function closureRoot(workspaceRoot: string, identity: ClosureIdentity, allocation: string): string {
 	const digest = createHash("sha256").update(`${identity.task.chain.value}\0${identity.task.value}\0${identity.attempt}\0${allocation}`).digest("hex")
 	return join(workspaceRoot, "closures", digest)
+}
+
+function canonicalizeGitServiceConfig(config: GitServiceConfig): Effect.Effect<GitServiceConfig, GitServiceError> {
+	return Effect.tryPromise({
+		try: async () => {
+			await mkdir(resolve(config.workspaceRoot), { recursive: true })
+			const workspaceRoot = await realpath(resolve(config.workspaceRoot))
+			const closuresRoot = join(workspaceRoot, "closures")
+			await mkdir(closuresRoot, { recursive: true })
+			if (await realpath(closuresRoot) !== closuresRoot) throw new Error("git.workspaceRoot/closures must not be a symbolic link")
+			return { ...config, workspaceRoot }
+		},
+		catch: (error) => ({ kind: "git-service-error", operation: "canonicalize-workspace-root", message: error instanceof Error ? error.message : String(error) }),
+	})
+}
+
+function validateCleanupRoot(
+	workspaceRoot: string,
+	closure: Extract<ClosureResourceState, { kind: "active" | "evidence-frozen" }>,
+	operation: "discard" | "collect",
+): Effect.Effect<string, GitServiceError> {
+	return Effect.tryPromise({
+		try: async () => {
+			const closuresRoot = join(workspaceRoot, "closures")
+			const root = dirname(closure.worktree)
+			if (basename(closure.worktree) !== "worktree"
+				|| dirname(root) !== closuresRoot
+				|| !/^[0-9a-f]{64}$/u.test(basename(root))
+				|| closure.scratch !== join(root, "scratch")) {
+				throw new Error("closure cleanup path is outside the configured workspaceRoot namespace")
+			}
+			if (await realpath(closuresRoot) !== closuresRoot) throw new Error("configured workspaceRoot closure namespace resolves through a symbolic link")
+			let rootStat: Awaited<ReturnType<typeof lstat>>
+			try {
+				rootStat = await lstat(root)
+			} catch (error) {
+				if (isNodeErrorWithCode(error, "ENOENT")) return root
+				throw error
+			}
+			if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || await realpath(root) !== root) {
+				throw new Error("closure cleanup root must be a canonical directory without symbolic links")
+			}
+			try {
+				const worktreeStat = await lstat(closure.worktree)
+				if (!worktreeStat.isDirectory() || worktreeStat.isSymbolicLink() || await realpath(closure.worktree) !== closure.worktree) {
+					throw new Error("closure worktree must be a canonical directory without symbolic links")
+				}
+			} catch (error) {
+				if (!isNodeErrorWithCode(error, "ENOENT")) throw error
+			}
+			return root
+		},
+		catch: (error) => ({ kind: "git-service-error", operation, message: error instanceof Error ? error.message : String(error) }),
+	})
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+	return error instanceof Error && "code" in error && error.code === code
 }
 
 function describeOutcome(outcome: Exclude<SubprocessOutcome, { kind: "success" }>): string {
