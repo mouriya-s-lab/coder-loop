@@ -31,18 +31,19 @@ describe("group consumer committed transition", () => {
 						{ kind: "exception", cause: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } }, attempt: 0, closure: { kind: "closure", task: second, attempt: 0 } },
 					]
 					const member = (identity: Task["identity"], settlement: TaskSettlement): Task => ({
+						kind: "task",
 						identity,
 						group: sourceGroup,
 						input: { definition, entrypoint: identity.value, basePin: "base", value: {}, valueIdentity: `${identity.value}-input` },
 						dependsOn: [],
 						priority: 1,
 						state: { kind: "settled", settlement, settledAt: 1 },
-						closure: { kind: "unallocated" },
+						closure: { kind: "active", identity: { kind: "closure", task: identity, attempt: 0 }, basePin: "base", branch: `coder-loop/v3/${identity.value}`, worktree: `/worktree/${identity.value}`, scratch: `/scratch/${identity.value}` },
 					})
 					const snapshot: ObjectDomainSnapshot = {
 						chain,
 						tasks: { [taskKey(first)]: member(first, settlements[0]!), [taskKey(second)]: member(second, settlements[1]!) },
-						groups: { [groupKey(sourceGroup)]: { identity: sourceGroup, members: [first, second], memberVersion: 2, wait: { kind: "none" }, consumer: { kind: "validator", definition, entrypoint: "validate" }, state: { kind: "terminated", reason: "immediate", memberVersion: 2, terminatedAt: 2 } } },
+						groups: { [groupKey(sourceGroup)]: { kind: "task-group", identity: sourceGroup, members: [first, second], memberVersion: 2, wait: { kind: "none" }, join: { kind: "validator", definition, entrypoint: "validate" }, state: { kind: "terminated", reason: "immediate", memberVersion: 2, terminatedAt: 2 } } },
 						awaits: {},
 						admittedFacts: {},
 					}
@@ -51,6 +52,7 @@ describe("group consumer committed transition", () => {
 					const consumerTask = { kind: "task" as const, chain, value: "source/$validator/2/task" }
 					const value = { settlements }
 					const task: Task = {
+						kind: "task",
 						identity: consumerTask,
 						group: consumerGroup,
 						input: {
@@ -72,7 +74,7 @@ describe("group consumer committed transition", () => {
 							group: sourceGroup,
 							settlements,
 							state: { kind: "consuming", consumerTask, consumerGroup, settlementsDigest: createHash("sha256").update(JSON.stringify(settlements)).digest("hex"), startedAt: 3 },
-							consumerGroup: { identity: consumerGroup, members: [consumerTask], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } },
+							consumerGroup: { kind: "task-group", identity: consumerGroup, members: [consumerTask], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } },
 							task,
 						},
 					}))

@@ -233,7 +233,7 @@ function reconcileChains(dependencies: OrchestratorDependencies, chains: readonl
 					reconciled.push(reconciliation)
 					continue
 				}
-				if (current.consumer.kind === "drain") {
+				if (current.join.kind === "drain") {
 					const consumption = yield* dependencies.consumers.consume(current, settlements)
 					yield* dependencies.scheduler.consumeGroup(current.identity, consumption, now)
 					reconciled.push({ kind: "consumed", group: current.identity })
@@ -273,7 +273,7 @@ function incompleteGroup(group: TaskGroup): Effect.Effect<never, ObjectStoreErro
 }
 
 function consumerAllowsCompletion(group: TaskGroup, value: JsonValue): boolean {
-	switch (group.consumer.kind) {
+	switch (group.join.kind) {
 		case "drain":
 			throw new Error("drain groups do not materialize consumer tasks")
 		case "validator":
@@ -281,7 +281,7 @@ function consumerAllowsCompletion(group: TaskGroup, value: JsonValue): boolean {
 		case "finalizer":
 			return typeof value === "object" && value !== null && "kind" in value && value.kind === "advance"
 	}
-	return assertNever(group.consumer)
+	return assertNever(group.join)
 }
 
 function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<string, Task>>, settlements: readonly TaskSettlement[], now: number): {
@@ -289,7 +289,7 @@ function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<strin
 	readonly group: TaskGroup
 	readonly task: Task
 } {
-	const consumer = fixedGroupConsumer(group.consumer)
+	const consumer = fixedGroupConsumer(group.join)
 	const suffix = `${group.identity.value}/$${consumer.kind}/${group.memberVersion}`
 	const consumerGroup: GroupIdentity = { kind: "group", chain: group.identity.chain, value: `${suffix}/group` }
 	const consumerTask = { kind: "task" as const, chain: group.identity.chain, value: `${suffix}/task` }
@@ -300,6 +300,7 @@ function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<strin
 	const basePin = members[0]?.input.basePin
 	if (basePin === undefined) throw new Error("fixed consumer requires at least one committed group member")
 	const task: Task = {
+		kind: "task",
 		identity: consumerTask,
 		group: consumerGroup,
 		input: { definition: consumer.definition, entrypoint: consumer.entrypoint, basePin, value, valueIdentity },
@@ -310,12 +311,12 @@ function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<strin
 	}
 	return {
 		state: { kind: "consuming", consumerTask, consumerGroup, settlementsDigest, startedAt: now },
-		group: { identity: consumerGroup, members: [consumerTask], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } },
+		group: { kind: "task-group", identity: consumerGroup, members: [consumerTask], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } },
 		task,
 	}
 }
 
-function fixedGroupConsumer(consumer: TaskGroup["consumer"]): Exclude<TaskGroup["consumer"], { readonly kind: "drain" }> {
+function fixedGroupConsumer(consumer: TaskGroup["join"]): Exclude<TaskGroup["join"], { readonly kind: "drain" }> {
 	switch (consumer.kind) {
 		case "drain":
 			throw new Error("drain groups do not materialize consumer tasks")

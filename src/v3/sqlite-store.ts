@@ -8,6 +8,7 @@ import type { BoundaryRecord } from "../boundary-types"
 import type { AgentRunAuthority, FunctionCheckpoint } from "./context"
 import {
 	factKey,
+	replaceTaskLifecycle,
 	evaluateAdmission,
 	groupKey,
 	nextGroupState,
@@ -356,13 +357,13 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			const task = requireTask(database, transition.task, transition.family)
 			if (task.state.kind !== "ready" || task.closure.kind !== "unallocated") reject(transition.family, "state-mismatch", "allocation requires a ready unallocated task")
 			if (taskKey(transition.allocation.identity.task) !== taskKey(task.identity)) reject(transition.family, "identity-mismatch", "allocation does not belong to task")
-			updateTask(database, { ...task, closure: transition.allocation })
+			updateTask(database, replaceTaskLifecycle(task, task.state, transition.allocation))
 			return
 		}
 		case "closure-allocation-cleanup": {
 			const task = requireTask(database, transition.task, transition.family)
 			if (task.state.kind !== "ready" || task.closure.kind !== "allocating" || JSON.stringify(task.closure) !== JSON.stringify(transition.allocation)) reject(transition.family, "identity-mismatch", "cleanup must match the pending allocation")
-			updateTask(database, { ...task, closure: { kind: "unallocated" } })
+			updateTask(database, replaceTaskLifecycle(task, task.state, { kind: "unallocated" }))
 			return
 		}
 		case "lease-acquire": {
@@ -376,12 +377,12 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			if (task.closure.kind === "allocating" && (closureKey(task.closure.identity) !== closureKey(transition.closure.identity) || task.closure.basePin !== transition.closure.basePin || task.closure.branch !== transition.closure.branch)) reject(transition.family, "identity-mismatch", "lease does not claim the pending allocation")
 			if (task.closure.kind !== "allocating" && task.closure.kind !== "active" && task.closure.kind !== "suspended") reject(transition.family, "state-mismatch", "task closure has no durable allocation to lease")
 			if (transition.expiresAt <= transition.acquiredAt) reject(transition.family, "invalid-transition", "lease expiry must follow acquisition")
-			updateTask(database, { ...task, state: { kind: "leased", run: transition.run, acquiredAt: transition.acquiredAt, expiresAt: transition.expiresAt }, closure: transition.closure })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "leased", run: transition.run, acquiredAt: transition.acquiredAt, expiresAt: transition.expiresAt }, transition.closure))
 			return
 		}
 		case "lease-release": {
 			const task = requireLeasedTask(database, transition.task, transition.run, transition.family)
-			updateTask(database, { ...task, state: { kind: "ready" } })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "ready" }, task.closure))
 			return
 		}
 		case "task-held": {
@@ -399,13 +400,13 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				default:
 					return assertNever(transition.reason)
 			}
-			updateTask(database, { ...task, state: { kind: "held", reason: transition.reason } })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "held", reason: transition.reason }, task.closure))
 			return
 		}
 		case "task-unhold": {
 			const task = requireTask(database, transition.task, transition.family)
 			if (task.state.kind !== "held") reject(transition.family, "state-mismatch", "task is not held")
-			updateTask(database, { ...task, state: { kind: "ready" } })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "ready" }, task.closure))
 			return
 		}
 		case "task-resume": {
@@ -415,7 +416,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			}
 			if (task.closure.kind !== "active") reject(transition.family, "state-mismatch", "resumed task requires active closure resources")
 			if (transition.expiresAt <= transition.resumedAt) reject(transition.family, "invalid-transition", "resume expiry must follow resume time")
-			updateTask(database, { ...task, state: { kind: "leased", run: transition.run, acquiredAt: transition.resumedAt, expiresAt: transition.expiresAt } })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "leased", run: transition.run, acquiredAt: transition.resumedAt, expiresAt: transition.expiresAt }, task.closure))
 			return
 		}
 		case "task-settlement": {
@@ -427,7 +428,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				transition.settlement.attempt !== transition.run.closure.attempt
 				|| closureKey(transition.settlement.closure) !== closureKey(transition.run.closure)
 			)) reject(transition.family, "run-mismatch", "exception settlement provenance must match the settling run closure")
-			updateTask(database, { ...task, state: { kind: "settled", settlement: transition.settlement, settledAt: Date.now() } })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "settled", settlement: transition.settlement, settledAt: Date.now() }, task.closure))
 			for (const successor of transition.successors) admitTask(database, successor, transition.family)
 			return
 		}
@@ -444,7 +445,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				position: admission.position,
 			}, transition.family)
 			insertAwait(database, task.identity.chain.value, transition.record)
-			updateTask(database, { ...task, state: { kind: "suspended", await: transition.record.identity }, closure: { ...task.closure, kind: "suspended", continuation: transition.continuation } })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "suspended", await: transition.record.identity }, { ...task.closure, kind: "suspended", continuation: transition.continuation }))
 			return
 		}
 		case "await-resumption": {
@@ -462,23 +463,19 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				const closure = task.closure.kind === "suspended"
 					? { ...task.closure, continuation: { kind: "lost" as const, observedAt: Date.now() } }
 					: task.closure
-				updateTask(database, {
-					...task,
-					state: {
-						kind: "settled",
-						settlement: {
-							kind: "exception",
-							cause: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } },
-							attempt: transition.record.identity.attempt,
-							closure: transition.record.parentClosure,
-						},
-						settledAt: Date.now(),
+				updateTask(database, replaceTaskLifecycle(task, {
+					kind: "settled",
+					settlement: {
+						kind: "exception",
+						cause: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } },
+						attempt: transition.record.identity.attempt,
+						closure: transition.record.parentClosure,
 					},
-					closure,
-				})
+					settledAt: Date.now(),
+				}, closure))
 				return
 			}
-			updateTask(database, { ...task, state: { kind: "ready" } })
+			updateTask(database, replaceTaskLifecycle(task, { kind: "ready" }, task.closure))
 			return
 		}
 		case "await-consumption": {
@@ -514,7 +511,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 		}
 		case "group-consumer-start": {
 			const group = requireGroup(database, transition.group, transition.family)
-			if (group.state.kind !== "terminated" || group.consumer.kind === "drain") reject(transition.family, "state-mismatch", "only a terminated group with a fixed task consumer can start consumption")
+			if (group.state.kind !== "terminated" || group.join.kind === "drain") reject(transition.family, "state-mismatch", "only a terminated group with a fixed task consumer can start consumption")
 			const settlements = group.members.map((identity) => requireTask(database, identity, transition.family).state).map((state) => {
 				if (state.kind !== "settled") reject(transition.family, "state-mismatch", "group member is not settled")
 				return state.settlement
@@ -532,7 +529,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				groupKey(transition.task.group) !== groupKey(transition.consumerGroup.identity)
 				|| transition.consumerGroup.members.length !== 1
 				|| taskKey(transition.consumerGroup.members[0] as Task["identity"]) !== taskKey(transition.task.identity)
-				|| transition.consumerGroup.consumer.kind !== "drain"
+				|| transition.consumerGroup.join.kind !== "drain"
 				|| transition.consumerGroup.state.kind !== "open"
 				|| transition.task.state.kind !== "ready"
 				|| transition.task.closure.kind !== "unallocated"
@@ -540,11 +537,11 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			if (
 				transition.task.identity.chain.value !== group.identity.chain.value
 				|| transition.consumerGroup.identity.chain.value !== group.identity.chain.value
-				|| transition.task.input.definition.content.digest !== group.consumer.definition.content.digest
-				|| transition.task.input.definition.product.digest !== group.consumer.definition.product.digest
+				|| transition.task.input.definition.content.digest !== group.join.definition.content.digest
+				|| transition.task.input.definition.product.digest !== group.join.definition.product.digest
 			) reject(transition.family, "identity-mismatch", "fixed consumer task does not use the pinned group definition")
 			if (
-				transition.task.input.entrypoint !== group.consumer.entrypoint
+				transition.task.input.entrypoint !== group.join.entrypoint
 				|| JSON.stringify(transition.task.input.value) !== JSON.stringify(value)
 				|| transition.task.input.valueIdentity !== valueIdentity
 				|| JSON.stringify(transition.task.dependsOn.map(taskKey)) !== JSON.stringify(group.members.map(taskKey))
@@ -570,11 +567,12 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 		}
 		case "resource-intent": {
 			const task = requireTask(database, transition.closure.task, transition.family)
-			if (task.closure.kind === "unallocated" || closureKey(task.closure.identity) !== closureKey(transition.closure)) reject(transition.family, "identity-mismatch", "closure is not owned by task")
+			if (task.state.kind !== "settled") reject(transition.family, "state-mismatch", "closure evidence lifecycle requires a settled task")
+			if (task.closure.kind === "unallocated" || task.closure.kind === "allocating" || closureKey(task.closure.identity) !== closureKey(transition.closure)) reject(transition.family, "identity-mismatch", "closure is not owned by task")
 			if (transition.action === "freeze-evidence") {
 				if (task.closure.kind !== "active" && task.closure.kind !== "suspended") reject(transition.family, "state-mismatch", "freeze requires live closure resources")
 				if (transition.publication === null) reject(transition.family, "publication-mismatch", "freeze requires publication evidence")
-				updateTask(database, { ...task, closure: { ...task.closure, kind: "evidence-frozen", publication: transition.publication } })
+				updateTask(database, replaceTaskLifecycle(task, task.state, { ...task.closure, kind: "evidence-frozen", publication: transition.publication }))
 				return
 			}
 			if (task.closure.kind !== "evidence-frozen") reject(transition.family, "state-mismatch", "collect requires frozen evidence")
@@ -582,7 +580,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			if (group.state.kind !== "consumed") reject(transition.family, "state-mismatch", "collect requires a consumed owning group")
 			if (!group.members.some((member) => taskKey(member) === taskKey(task.identity))) reject(transition.family, "identity-mismatch", "collect requires the owning group to reference the task")
 			if (transition.publication !== null && JSON.stringify(transition.publication) !== JSON.stringify(task.closure.publication)) reject(transition.family, "publication-mismatch", "collection evidence differs from frozen evidence")
-			updateTask(database, { ...task, closure: { kind: "collected", identity: transition.closure, basePin: task.closure.basePin, publication: task.closure.publication, collectedAt: Date.now() } })
+			updateTask(database, replaceTaskLifecycle(task, task.state, { kind: "collected", identity: transition.closure, basePin: task.closure.basePin, publication: task.closure.publication, collectedAt: Date.now() }))
 			return
 	}
 }

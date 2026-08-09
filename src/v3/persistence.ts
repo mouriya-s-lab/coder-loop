@@ -3,14 +3,15 @@ import { isBoundaryRecord } from "../boundary-types"
 import type { JsonValue } from "./definition"
 import { parseDeclaredValue } from "./definition"
 import type { ContextValues, FunctionCheckpoint, MapFaultEntry } from "./context"
-import type {
-	AwaitRecord,
-	ClosureResourceState,
-	GroupState,
-	PublicationEvidence,
-	Task,
-	TaskGroup,
-	TaskSettlement,
+import {
+	replaceTaskLifecycle,
+	type AwaitRecord,
+	type ClosureResourceState,
+	type GroupState,
+	type PublicationEvidence,
+	type Task,
+	type TaskGroup,
+	type TaskSettlement,
 } from "./object-domain"
 
 const ChainIdentityBoundary = arkType({ kind: "'chain'", value: "string > 0", "+": "reject" })
@@ -99,6 +100,7 @@ const TaskStateBoundary = arkType.or(
 	{ kind: "'settled'", settlement: TaskSettlementBoundary, settledAt: "number", "+": "reject" },
 )
 const TaskBoundary = arkType({
+	kind: "'task'",
 	identity: TaskIdentityBoundary,
 	group: GroupIdentityBoundary,
 	input: { definition: DefinitionRefBoundary, entrypoint: "string > 0", basePin: "string > 0", value: "unknown", valueIdentity: "string > 0", "+": "reject" },
@@ -134,11 +136,12 @@ const GroupConsumerBoundary = arkType.or(
 	{ kind: "'finalizer'", definition: DefinitionRefBoundary, entrypoint: "string > 0", "+": "reject" },
 )
 const TaskGroupBoundary = arkType({
+	kind: "'task-group'",
 	identity: GroupIdentityBoundary,
 	members: TaskIdentityBoundary.array(),
 	memberVersion: "number.integer >= 0",
 	wait: WaitWindowBoundary,
-	consumer: GroupConsumerBoundary,
+	join: GroupConsumerBoundary,
 	state: GroupStateBoundary,
 	"+": "reject",
 })
@@ -184,23 +187,18 @@ export function parsePersistedTask(candidate: unknown): PersistenceParseResult<T
 	if (inputValue.kind === "rejected") return inputValue
 	const state = parseTaskState(parsed.state)
 	if (state.kind === "rejected") return state
-	return {
-		kind: "accepted",
-		value: {
-			identity: parsed.identity,
-			group: parsed.group,
-			input: { ...parsed.input, value: inputValue.value },
-			dependsOn: parsed.dependsOn,
-			priority: parsed.priority,
-			state: state.value,
-			closure: parsed.closure,
-		},
+	const seed: Task = { kind: "task", identity: parsed.identity, group: parsed.group, input: { ...parsed.input, value: inputValue.value }, dependsOn: parsed.dependsOn, priority: parsed.priority, state: { kind: "ready" }, closure: { kind: "unallocated" } }
+	try {
+		return { kind: "accepted", value: replaceTaskLifecycle(seed, state.value, parsed.closure) }
+	} catch (error) {
+		return rejected("task", error instanceof Error ? error.message : String(error))
 	}
 }
 
 export function parsePersistedGroup(candidate: unknown): PersistenceParseResult<TaskGroup> {
 	const parsed = TaskGroupBoundary(candidate)
 	if (parsed instanceof arkType.errors) return rejected("group", parsed.summary)
+	if (parsed.state.kind === "consuming" && parsed.join.kind === "drain") return rejected("group", "drain join cannot enter consuming")
 	return { kind: "accepted", value: parsed }
 }
 

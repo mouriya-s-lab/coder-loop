@@ -34,15 +34,22 @@ export type TaskSettlement =
 	| { readonly kind: "returned"; readonly value: JsonValue }
 	| { readonly kind: "exception"; readonly cause: ClosureExit & { readonly kind: "exception" }; readonly attempt: number; readonly closure: ClosureIdentity }
 
-export type Task = {
+type TaskFields = {
+	readonly kind: "task"
 	readonly identity: TaskIdentity
 	readonly group: GroupIdentity
 	readonly input: TaskInput
 	readonly dependsOn: readonly TaskIdentity[]
 	readonly priority: number
-	readonly state: TaskState
-	readonly closure: ClosureResourceState
 }
+
+export type Task = TaskFields & (
+	| { readonly state: Extract<TaskState, { kind: "ready" }>; readonly closure: Extract<ClosureResourceState, { kind: "unallocated" | "allocating" | "active" | "suspended" }> }
+	| { readonly state: Extract<TaskState, { kind: "leased" }>; readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }> }
+	| { readonly state: Extract<TaskState, { kind: "suspended" }>; readonly closure: Extract<ClosureResourceState, { kind: "suspended" }> }
+	| { readonly state: Extract<TaskState, { kind: "held" }>; readonly closure: Extract<ClosureResourceState, { kind: "unallocated" | "active" }> }
+	| { readonly state: Extract<TaskState, { kind: "settled" }>; readonly closure: Exclude<ClosureResourceState, { kind: "unallocated" | "allocating" }> }
+)
 
 export type ClosureResourceState =
 	| { readonly kind: "unallocated" }
@@ -51,6 +58,28 @@ export type ClosureResourceState =
 	| { readonly kind: "suspended"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string; readonly continuation: ContinuationFact }
 	| { readonly kind: "evidence-frozen"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string; readonly publication: PublicationEvidence }
 	| { readonly kind: "collected"; readonly identity: ClosureIdentity; readonly basePin: string; readonly publication: PublicationEvidence; readonly collectedAt: number }
+
+
+export function replaceTaskLifecycle(task: Task, state: TaskState, closure: ClosureResourceState): Task {
+	const fields: TaskFields = { kind: "task", identity: task.identity, group: task.group, input: task.input, dependsOn: task.dependsOn, priority: task.priority }
+	switch (state.kind) {
+		case "ready":
+			if (closure.kind === "unallocated" || closure.kind === "allocating" || closure.kind === "active" || closure.kind === "suspended") return { ...fields, state, closure }
+			break
+		case "leased":
+			if (closure.kind === "active" || closure.kind === "suspended") return { ...fields, state, closure }
+			break
+		case "suspended":
+			if (closure.kind === "suspended") return { ...fields, state, closure }
+			break
+		case "held":
+			if (closure.kind === "unallocated" || closure.kind === "active") return { ...fields, state, closure }
+			break
+		case "settled":
+			if (closure.kind !== "unallocated" && closure.kind !== "allocating") return { ...fields, state, closure }
+	}
+	throw new Error(`invalid task lifecycle: ${state.kind} + ${closure.kind}`)
+}
 
 export type ContinuationFact =
 	| { readonly kind: "present"; readonly sessionIdentity: string; readonly observedAt: number }
@@ -80,17 +109,18 @@ export type GroupState =
 	}
 	| { readonly kind: "consumed"; readonly consumption: ConsumptionIdentity; readonly consumedAt: number }
 
-export type GroupConsumer =
+export type GroupJoin =
 	| { readonly kind: "drain" }
 	| { readonly kind: "validator"; readonly definition: DefinitionRef; readonly entrypoint: string }
 	| { readonly kind: "finalizer"; readonly definition: DefinitionRef; readonly entrypoint: string }
 
 export type TaskGroup = {
+	readonly kind: "task-group"
 	readonly identity: GroupIdentity
 	readonly members: readonly TaskIdentity[]
 	readonly memberVersion: number
 	readonly wait: WaitWindow
-	readonly consumer: GroupConsumer
+	readonly join: GroupJoin
 	readonly state: GroupState
 }
 

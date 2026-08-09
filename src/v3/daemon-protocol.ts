@@ -83,6 +83,7 @@ const AdmissionBoundary = arkType({
 		{ kind: "'external'", principal: "string > 0", allowedChain: ChainBoundary, "+": "reject" },
 	),
 	task: {
+		kind: "'task'",
 		identity: TaskBoundary,
 		group: GroupBoundary,
 		input: { definition: DefinitionRefBoundary, entrypoint: "string > 0", basePin: "string > 0", value: "unknown", valueIdentity: "string > 0", "+": "reject" },
