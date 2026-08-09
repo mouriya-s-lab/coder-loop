@@ -429,6 +429,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			if (task.state.kind !== "suspended" || awaitKey(task.state.await) !== awaitKey(transition.record.identity)) reject(transition.family, "state-mismatch", "task is not suspended on this await")
 			const existing = requireAwait(database, transition.record.identity, transition.family)
 			if (existing.kind !== "waiting") reject(transition.family, "state-mismatch", "await is not waiting")
+			if (closureKey(existing.parentClosure) !== closureKey(transition.record.parentClosure) || taskKey(existing.child) !== taskKey(transition.record.child)) reject(transition.family, "identity-mismatch", "await resumption cannot replace the waiting record binding")
 			if (transition.record.kind === "delivered") {
 				const child = requireTask(database, transition.record.child, transition.family)
 				if (child.state.kind !== "settled" || JSON.stringify(child.state.settlement) !== JSON.stringify(transition.record.settlement)) reject(transition.family, "settlement-mismatch", "child settlement differs from delivered value")
@@ -460,6 +461,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 		case "await-consumption": {
 			const existing = requireAwait(database, transition.record.identity, transition.family)
 			if (existing.kind !== "delivered" || existing.token !== transition.record.token) reject(transition.family, "state-mismatch", "await delivery is not available for one-shot consumption")
+			if (closureKey(existing.parentClosure) !== closureKey(transition.record.parentClosure) || taskKey(existing.child) !== taskKey(transition.record.child)) reject(transition.family, "identity-mismatch", "await consumption cannot replace the delivered record binding")
 			if (JSON.stringify(existing.settlement) !== JSON.stringify(transition.record.settlement)) reject(transition.family, "settlement-mismatch", "consumed await settlement differs from delivered value")
 			updateAwait(database, transition.task.chain.value, transition.record)
 			return
