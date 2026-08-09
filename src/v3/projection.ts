@@ -8,7 +8,7 @@ import {
 	type ObjectDomainSnapshot,
 	type TaskHoldReason,
 } from "./object-domain"
-import type { ProviderFact } from "./provider"
+import type { ProviderFactRecord } from "./provider"
 import type { CommittedTransitionAudit } from "./sqlite-store"
 
 export type TaskProjection =
@@ -58,7 +58,7 @@ export type FunctionTimelineProjection = {
 export type SideEffectAuditProjection = {
 	readonly schemaVersion: 3
 	readonly hooks: readonly HookDeliveryAudit[]
-	readonly providers: readonly ProviderFact[]
+	readonly providers: readonly ProviderFactRecord[]
 }
 
 export function buildStatusProjection(snapshot: ObjectDomainSnapshot): StatusProjectionV3 {
@@ -97,7 +97,7 @@ export function buildFunctionTimelineProjection(closure: string, contexts: reado
 	}
 }
 
-export function buildSideEffectAuditProjection(hooks: readonly HookDeliveryAudit[], providers: readonly ProviderFact[]): SideEffectAuditProjection {
+export function buildSideEffectAuditProjection(hooks: readonly HookDeliveryAudit[], providers: readonly ProviderFactRecord[]): SideEffectAuditProjection {
 	return { schemaVersion: 3, hooks, providers }
 }
 

@@ -66,6 +66,11 @@ export type ProviderFact =
 	| { readonly kind: "active-loss"; readonly endpoint: EndpointIdentity; readonly run: RunIdentity; readonly reason: "nonzero" | "timeout" | "signal"; readonly detail: string; readonly observedAt: number }
 	| { readonly kind: "unknown-effect"; readonly endpoint: EndpointIdentity; readonly run: RunIdentity; readonly detail: string; readonly observedAt: number }
 
+export type ProviderFactRecord = {
+	readonly identity: string
+	readonly fact: ProviderFact
+}
+
 export type ProviderFactStoreError = {
 	readonly kind: "provider-fact-store-error"
 	readonly operation: string
@@ -75,7 +80,7 @@ export type ProviderFactStoreError = {
 export type ProviderFactStoreService = {
 	readonly commit: (identity: string, fact: ProviderFact) => Effect.Effect<ProviderFact, ProviderFactStoreError>
 	readonly read: (identity: string) => Effect.Effect<ProviderFact | null, ProviderFactStoreError>
-	readonly list: Effect.Effect<readonly ProviderFact[], ProviderFactStoreError>
+	readonly list: Effect.Effect<readonly ProviderFactRecord[], ProviderFactStoreError>
 }
 
 export class ProviderFactStore extends Context.Tag("coder-loop/v3/ProviderFactStore")<ProviderFactStore, ProviderFactStoreService>() {}
@@ -292,7 +297,7 @@ async function commitProviderFact(root: string, identity: string, fact: Provider
 	const candidatePath = `${winnerPath}.${randomUUID()}.candidate`
 	const candidate = await open(candidatePath, "wx")
 	try {
-		await candidate.writeFile(JSON.stringify(fact))
+		await candidate.writeFile(JSON.stringify({ identity, fact } satisfies ProviderFactRecord))
 		await candidate.sync()
 	} finally {
 		await candidate.close()
@@ -328,10 +333,12 @@ async function readProviderFact(root: string, identity: string): Promise<Provide
 		if (isBoundaryRecord(error) && error.code === "ENOENT") return null
 		throw error
 	}
-	return parseProviderFact(JSON.parse(raw))
+	const record = parseProviderFactRecord(JSON.parse(raw))
+	if (record.identity !== identity) throw new Error("persisted provider fact identity does not match its winner path")
+	return record.fact
 }
 
-async function listProviderFacts(root: string): Promise<readonly ProviderFact[]> {
+async function listProviderFacts(root: string): Promise<readonly ProviderFactRecord[]> {
 	const directory = join(root, "provider-facts")
 	let entries: string[]
 	try {
@@ -342,10 +349,20 @@ async function listProviderFacts(root: string): Promise<readonly ProviderFact[]>
 	}
 	const facts = await Promise.all(entries.sort().map(async (entry) => {
 		const raw = await readFile(join(directory, entry, "winner.json"), "utf8")
-		return parseProviderFact(JSON.parse(raw))
+		const record = parseProviderFactRecord(JSON.parse(raw))
+		if (entry !== factDirectoryKey(record.identity)) throw new Error("persisted provider fact identity does not match its winner directory")
+		return record
 	}))
-	return facts
+	return facts.sort((left, right) => left.identity.localeCompare(right.identity))
 }
+
+function parseProviderFactRecord(candidate: unknown): ProviderFactRecord {
+	const boundary = ProviderFactRecordBoundary(candidate)
+	if (boundary instanceof arkType.errors) throw new Error(boundary.summary)
+	return { identity: boundary.identity, fact: parseProviderFact(boundary.fact) }
+}
+
+const ProviderFactRecordBoundary = arkType({ identity: "string > 0", fact: "unknown", "+": "reject" })
 
 function parseProviderFact(candidate: unknown): ProviderFact {
 	if (!isBoundaryRecord(candidate) || typeof candidate.kind !== "string") throw new Error("invalid persisted provider fact")
@@ -376,7 +393,11 @@ function parseRunIdentity(candidate: unknown): RunIdentity {
 }
 
 function factPath(root: string, identity: string): string {
-	return join(root, "provider-facts", createHash("sha256").update(identity).digest("hex"), "winner.json")
+	return join(root, "provider-facts", factDirectoryKey(identity), "winner.json")
+}
+
+function factDirectoryKey(identity: string): string {
+	return createHash("sha256").update(identity).digest("hex")
 }
 
 function validateRunnerConfig(config: RunnerConfig): void {
