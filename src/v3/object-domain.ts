@@ -46,6 +46,7 @@ export type Task = {
 
 export type ClosureResourceState =
 	| { readonly kind: "unallocated" }
+	| { readonly kind: "allocating"; readonly identity: ClosureIdentity; readonly allocation: string; readonly basePin: string; readonly branch: string }
 	| { readonly kind: "active"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string }
 	| { readonly kind: "suspended"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string; readonly continuation: ContinuationFact }
 	| { readonly kind: "evidence-frozen"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string; readonly publication: PublicationEvidence }
@@ -188,6 +189,8 @@ export type ObjectDomainAction =
 
 export type CommittedTransition =
 	| { readonly family: "task-admission"; readonly fact: FactIdentity; readonly task: Task; readonly position: AdmissionPosition }
+	| { readonly family: "closure-allocation-start"; readonly task: TaskIdentity; readonly allocation: Extract<ClosureResourceState, { kind: "allocating" }> }
+	| { readonly family: "closure-allocation-cleanup"; readonly task: TaskIdentity; readonly allocation: Extract<ClosureResourceState, { kind: "allocating" }> }
 	| { readonly family: "lease-acquire"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>; readonly acquiredAt: number; readonly expiresAt: number }
 	| { readonly family: "lease-release"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly reason: "cancelled" }
 	| { readonly family: "task-held"; readonly task: TaskIdentity; readonly expectedRun: RunIdentity | null; readonly reason: TaskHoldReason }

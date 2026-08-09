@@ -231,7 +231,7 @@ function listTransitions(database: Database, chain: ObjectDomainSnapshot["chain"
 	const boundary = arkType({
 		cursor: "number.integer > 0",
 		identity_key: "string",
-		family: "'task-admission' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'await-consumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
+		family: "'task-admission' | 'closure-allocation-start' | 'closure-allocation-cleanup' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'await-consumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
 		committed_at: "number",
 		"+": "reject",
 	})
@@ -352,6 +352,19 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 		case "task-admission":
 			admitTask(database, transition, transition.family)
 			return
+		case "closure-allocation-start": {
+			const task = requireTask(database, transition.task, transition.family)
+			if (task.state.kind !== "ready" || task.closure.kind !== "unallocated") reject(transition.family, "state-mismatch", "allocation requires a ready unallocated task")
+			if (taskKey(transition.allocation.identity.task) !== taskKey(task.identity)) reject(transition.family, "identity-mismatch", "allocation does not belong to task")
+			updateTask(database, { ...task, closure: transition.allocation })
+			return
+		}
+		case "closure-allocation-cleanup": {
+			const task = requireTask(database, transition.task, transition.family)
+			if (task.state.kind !== "ready" || task.closure.kind !== "allocating" || JSON.stringify(task.closure) !== JSON.stringify(transition.allocation)) reject(transition.family, "identity-mismatch", "cleanup must match the pending allocation")
+			updateTask(database, { ...task, closure: { kind: "unallocated" } })
+			return
+		}
 		case "lease-acquire": {
 			const task = requireTask(database, transition.task, transition.family)
 			if (task.state.kind !== "ready") reject(transition.family, "state-mismatch", "task is not ready")
@@ -360,6 +373,8 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			}
 			if (taskKey(transition.run.closure.task) !== taskKey(task.identity) || closureKey(transition.closure.identity) !== closureKey(transition.run.closure)) reject(transition.family, "identity-mismatch", "run, closure, and task identities disagree")
 			if (transition.closure.basePin !== task.input.basePin) reject(transition.family, "identity-mismatch", "closure base pin differs from the task input base pin")
+			if (task.closure.kind === "allocating" && (closureKey(task.closure.identity) !== closureKey(transition.closure.identity) || task.closure.basePin !== transition.closure.basePin || task.closure.branch !== transition.closure.branch)) reject(transition.family, "identity-mismatch", "lease does not claim the pending allocation")
+			if (task.closure.kind !== "allocating" && task.closure.kind !== "active" && task.closure.kind !== "suspended") reject(transition.family, "state-mismatch", "task closure has no durable allocation to lease")
 			if (transition.expiresAt <= transition.acquiredAt) reject(transition.family, "invalid-transition", "lease expiry must follow acquisition")
 			updateTask(database, { ...task, state: { kind: "leased", run: transition.run, acquiredAt: transition.acquiredAt, expiresAt: transition.expiresAt }, closure: transition.closure })
 			return
@@ -667,6 +682,8 @@ function exists(database: Database, table: "v3_chains" | "v3_tasks" | "v3_groups
 function transitionChain(transition: CommittedTransition): string {
 	switch (transition.family) {
 		case "task-admission": return transition.task.identity.chain.value
+		case "closure-allocation-start":
+		case "closure-allocation-cleanup":
 		case "lease-acquire":
 		case "task-held":
 		case "task-unhold":

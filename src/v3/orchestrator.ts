@@ -80,7 +80,8 @@ type OrchestratorDependencies = {
 
 function runCycle(dependencies: OrchestratorDependencies, chains: readonly ChainIdentity[], now: number): Effect.Effect<OrchestratorCycle, OrchestratorError> {
 	return Effect.gen(function*() {
-		const recovered = yield* dependencies.recovery.recoverExpiredLeases(chains, now)
+		const allocationRecovery = yield* dependencies.recovery.recoverAllocations(chains)
+		const recovered = [...allocationRecovery, ...yield* dependencies.recovery.recoverExpiredLeases(chains, now)]
 		const resumed = yield* Effect.forEach(
 			recovered.filter((decision): decision is Extract<RecoveryDecision, { kind: "provider-fact-ready" }> => decision.kind === "provider-fact-ready"),
 			(decision) => dependencies.runtime.execute(decision.task),
@@ -110,7 +111,7 @@ function runCycle(dependencies: OrchestratorDependencies, chains: readonly Chain
 
 			const closureIdentity: ClosureIdentity = { kind: "closure", task: selection.task.identity, attempt: 0 }
 			const run = { kind: "run" as const, closure: closureIdentity, value: randomUUID() }
-			const allocation = yield* allocateClosure(dependencies.repository, selection.task, run.value)
+			const allocation = yield* allocateClosure(dependencies.store, dependencies.repository, selection.task, run.value)
 			const closure = allocation.closure
 			const claimIdentity = `claim:${taskKey(selection.task.identity)}:${run.value}`
 			yield* dependencies.scheduler.claim({ identity: claimIdentity, task: selection.task, run, closure, acquiredAt: now, expiresAt: now + dependencies.leaseMs }).pipe(
@@ -146,12 +147,21 @@ type ClosureAllocation =
 	| { readonly closure: Extract<ClosureResourceState, { kind: "active" }>; readonly owned: true }
 	| { readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>; readonly owned: false }
 
-function allocateClosure(repository: GitService, task: Task, allocation: string): Effect.Effect<ClosureAllocation, GitServiceError | Extract<OrchestratorError, { kind: "orchestrator-state-error" }>> {
+function allocateClosure(store: ObjectDomainStoreService, repository: GitService, task: Task, allocation: string): Effect.Effect<ClosureAllocation, GitServiceError | ObjectStoreError | Extract<OrchestratorError, { kind: "orchestrator-state-error" }>> {
 	if (task.closure.kind === "active" || task.closure.kind === "suspended") return Effect.succeed({ closure: task.closure, owned: false })
 	if (task.closure.kind !== "unallocated") return Effect.fail({ kind: "orchestrator-state-error", task: taskKey(task.identity), message: `ready task has ${task.closure.kind} closure resources` })
 	const identity: ClosureIdentity = { kind: "closure", task: task.identity, attempt: 0 }
-	const digest = createHash("sha256").update(`${taskKey(task.identity)}:${task.input.basePin}`).digest("hex").slice(0, 16)
-	return Effect.map(repository.prepare({ identity, allocation, basePin: task.input.basePin, branch: `coder-loop/v3/${digest}-${allocation.slice(0, 8)}` }), (closure) => ({ closure, owned: true }))
+	return Effect.gen(function*() {
+		const basePin = yield* repository.resolveBasePin(task.input.basePin)
+		const digest = createHash("sha256").update(`${taskKey(task.identity)}:${basePin}`).digest("hex").slice(0, 16)
+		const intent = { kind: "allocating" as const, identity, allocation, basePin, branch: `coder-loop/v3/${digest}-${allocation.slice(0, 8)}` }
+		yield* store.commit({ identity: `allocation-start:${taskKey(task.identity)}:${allocation}`, transition: { family: "closure-allocation-start", task: task.identity, allocation: intent } })
+		const closure = yield* repository.prepare(intent).pipe(Effect.catchAll((error) => Effect.zipRight(
+			Effect.zipRight(repository.discardAllocation(intent), store.commit({ identity: `allocation-cleaned:${taskKey(task.identity)}:${allocation}`, transition: { family: "closure-allocation-cleanup", task: task.identity, allocation: intent } })),
+			Effect.fail(error),
+		)))
+		return { closure, owned: true } as const
+	})
 }
 
 function reconcileAwaits(

@@ -52,6 +52,7 @@ const ContinuationFactBoundary = arkType.or(
 )
 const ClosureResourceStateBoundary = arkType.or(
 	{ kind: "'unallocated'", "+": "reject" },
+	{ kind: "'allocating'", identity: ClosureIdentityBoundary, allocation: "string > 0", basePin: "string > 0", branch: "string > 0", "+": "reject" },
 	{
 		kind: "'active'",
 		identity: ClosureIdentityBoundary,
