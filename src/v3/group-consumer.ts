@@ -12,9 +12,22 @@ export const GroupConsumerRuntimeLive: Layer.Layer<GroupConsumerRuntime> = Layer
 		const vector = settlements.map((settlement) => settlement.kind === "returned"
 			? { kind: settlement.kind, value: settlement.value }
 			: { kind: settlement.kind, attempt: settlement.attempt, closure: settlement.closure })
-		const consumer = group.consumer.kind === "drain"
-			? "drain"
-			: `${group.consumer.kind}:${group.consumer.definition.content.digest}:${group.consumer.definition.product.digest}`
+		const consumer = groupConsumerIdentity(group.consumer)
 		return Effect.succeed({ kind: "consumption", group: group.identity, value: `${consumer}:${group.memberVersion}:${JSON.stringify(vector)}` })
 	},
 })
+
+function groupConsumerIdentity(consumer: TaskGroup["consumer"]): string {
+	switch (consumer.kind) {
+		case "drain":
+			return "drain"
+		case "validator":
+		case "finalizer":
+			return `${consumer.kind}:${consumer.definition.content.digest}:${consumer.definition.product.digest}`
+	}
+	return assertNever(consumer)
+}
+
+function assertNever(value: never): never {
+	throw new Error(`unreachable variant: ${JSON.stringify(value)}`)
+}
