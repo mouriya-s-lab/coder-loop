@@ -13,16 +13,17 @@ import type {
 	TaskSettlement,
 } from "./object-domain"
 
-const ChainIdentityBoundary = arkType({ kind: "'chain'", value: "string > 0" })
-const TaskIdentityBoundary = arkType({ kind: "'task'", chain: ChainIdentityBoundary, value: "string > 0" })
-const GroupIdentityBoundary = arkType({ kind: "'group'", chain: ChainIdentityBoundary, value: "string > 0" })
-const ClosureIdentityBoundary = arkType({ kind: "'closure'", task: TaskIdentityBoundary, attempt: "number.integer >= 0" })
-const RunIdentityBoundary = arkType({ kind: "'run'", closure: ClosureIdentityBoundary, value: "string > 0" })
-const AwaitIdentityBoundary = arkType({ kind: "'await'", parent: TaskIdentityBoundary, attempt: "number.integer >= 0", site: "string > 0" })
+const ChainIdentityBoundary = arkType({ kind: "'chain'", value: "string > 0", "+": "reject" })
+const TaskIdentityBoundary = arkType({ kind: "'task'", chain: ChainIdentityBoundary, value: "string > 0", "+": "reject" })
+const GroupIdentityBoundary = arkType({ kind: "'group'", chain: ChainIdentityBoundary, value: "string > 0", "+": "reject" })
+const ClosureIdentityBoundary = arkType({ kind: "'closure'", task: TaskIdentityBoundary, attempt: "number.integer >= 0", "+": "reject" })
+const RunIdentityBoundary = arkType({ kind: "'run'", closure: ClosureIdentityBoundary, value: "string > 0", "+": "reject" })
+const AwaitIdentityBoundary = arkType({ kind: "'await'", parent: TaskIdentityBoundary, attempt: "number.integer >= 0", site: "string > 0", "+": "reject" })
 const DefinitionRefBoundary = arkType({
 	kind: "'published-definition'",
-	content: { kind: "'definition-content'", digest: "string > 0" },
-	product: { kind: "'compiled-product'", digest: "string > 0" },
+	content: { kind: "'definition-content'", digest: "string > 0", "+": "reject" },
+	product: { kind: "'compiled-product'", digest: "string > 0", "+": "reject" },
+	"+": "reject",
 })
 const AgentAuthorityBoundary = arkType({ kind: "'agent-run'", chainId: "string > 0", taskId: "string > 0", closureId: "string > 0", runId: "string > 0", "+": "reject" })
 const CheckpointBoundary = arkType({
@@ -40,17 +41,17 @@ const CheckpointBoundary = arkType({
 })
 
 const PublicationEvidenceBoundary = arkType.or(
-	{ kind: "'published'", tip: "string > 0", remoteRef: "string > 0", observedAt: "number" },
-	{ kind: "'unpublished'", tip: "string > 0", observedAt: "number" },
-	{ kind: "'unknown'", tip: "string > 0", reason: "string > 0", observedAt: "number" },
-	{ kind: "'no-work'", observedAt: "number" },
+	{ kind: "'published'", tip: "string > 0", remoteRef: "string > 0", observedAt: "number", "+": "reject" },
+	{ kind: "'unpublished'", tip: "string > 0", observedAt: "number", "+": "reject" },
+	{ kind: "'unknown'", tip: "string > 0", reason: "string > 0", observedAt: "number", "+": "reject" },
+	{ kind: "'no-work'", observedAt: "number", "+": "reject" },
 )
 const ContinuationFactBoundary = arkType.or(
-	{ kind: "'present'", sessionIdentity: "string > 0", observedAt: "number" },
-	{ kind: "'lost'", observedAt: "number" },
+	{ kind: "'present'", sessionIdentity: "string > 0", observedAt: "number", "+": "reject" },
+	{ kind: "'lost'", observedAt: "number", "+": "reject" },
 )
 const ClosureResourceStateBoundary = arkType.or(
-	{ kind: "'unallocated'" },
+	{ kind: "'unallocated'", "+": "reject" },
 	{
 		kind: "'active'",
 		identity: ClosureIdentityBoundary,
@@ -58,75 +59,78 @@ const ClosureResourceStateBoundary = arkType.or(
 		branch: "string > 0",
 		worktree: "string > 0",
 		scratch: "string > 0",
+		"+": "reject",
 	},
-	{ kind: "'suspended'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", continuation: ContinuationFactBoundary },
-	{ kind: "'evidence-frozen'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", publication: PublicationEvidenceBoundary },
-	{ kind: "'collected'", identity: ClosureIdentityBoundary, basePin: "string > 0", publication: PublicationEvidenceBoundary, collectedAt: "number" },
+	{ kind: "'suspended'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", continuation: ContinuationFactBoundary, "+": "reject" },
+	{ kind: "'evidence-frozen'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", publication: PublicationEvidenceBoundary, "+": "reject" },
+	{ kind: "'collected'", identity: ClosureIdentityBoundary, basePin: "string > 0", publication: PublicationEvidenceBoundary, collectedAt: "number", "+": "reject" },
 )
 
-const ValueParseIssueBoundary = arkType({ path: "(string | number)[]", expected: "string", actual: "string" })
-const MapFaultBoundary = arkType({ kind: "'spawn' | 'timeout' | 'exit' | 'map-rejected'", message: "string" })
+const ValueParseIssueBoundary = arkType({ path: "(string | number)[]", expected: "string", actual: "string", "+": "reject" })
+const MapFaultBoundary = arkType({ kind: "'spawn' | 'timeout' | 'exit' | 'map-rejected'", message: "string", "+": "reject" })
 const MapFaultReasonBoundary = arkType.or(
-	{ kind: "'duplicate-result'" },
-	{ kind: "'missing-result'" },
-	{ kind: "'unexpected-result'" },
-	{ kind: "'required-value-absent'" },
-	{ kind: "'parse-rejected'", issues: ValueParseIssueBoundary.array() },
-	{ kind: "'map-fault'", fault: MapFaultBoundary },
+	{ kind: "'duplicate-result'", "+": "reject" },
+	{ kind: "'missing-result'", "+": "reject" },
+	{ kind: "'unexpected-result'", "+": "reject" },
+	{ kind: "'required-value-absent'", "+": "reject" },
+	{ kind: "'parse-rejected'", issues: ValueParseIssueBoundary.array(), "+": "reject" },
+	{ kind: "'map-fault'", fault: MapFaultBoundary, "+": "reject" },
 )
-const MapFaultEntryBoundary = arkType({ valueName: "string", reason: MapFaultReasonBoundary })
+const MapFaultEntryBoundary = arkType({ valueName: "string", reason: MapFaultReasonBoundary, "+": "reject" })
 const ClosureCauseBoundary = arkType.or(
-	{ kind: "'map-batch-exception'", stage: "'pre-agent' | 'post-agent'", faults: MapFaultEntryBoundary.array() },
-	{ kind: "'policy'", reason: "'predicate-false' | 'program-fault'" },
-	{ kind: "'cascade-exhausted'" },
+	{ kind: "'map-batch-exception'", stage: "'pre-agent' | 'post-agent'", faults: MapFaultEntryBoundary.array(), "+": "reject" },
+	{ kind: "'policy'", reason: "'predicate-false' | 'program-fault'", "+": "reject" },
+	{ kind: "'cascade-exhausted'", "+": "reject" },
 )
-const ClosureExceptionBoundary = arkType({ kind: "'exception'", cause: ClosureCauseBoundary })
+const ClosureExceptionBoundary = arkType({ kind: "'exception'", cause: ClosureCauseBoundary, "+": "reject" })
 const TaskSettlementBoundary = arkType.or(
-	{ kind: "'returned'", value: "unknown" },
-	{ kind: "'exception'", cause: ClosureExceptionBoundary, attempt: "number.integer >= 0", closure: ClosureIdentityBoundary },
+	{ kind: "'returned'", value: "unknown", "+": "reject" },
+	{ kind: "'exception'", cause: ClosureExceptionBoundary, attempt: "number.integer >= 0", closure: ClosureIdentityBoundary, "+": "reject" },
 )
 const TaskStateBoundary = arkType.or(
-	{ kind: "'ready'" },
-	{ kind: "'leased'", run: RunIdentityBoundary, acquiredAt: "number", expiresAt: "number" },
-	{ kind: "'suspended'", await: AwaitIdentityBoundary },
+	{ kind: "'ready'", "+": "reject" },
+	{ kind: "'leased'", run: RunIdentityBoundary, acquiredAt: "number", expiresAt: "number", "+": "reject" },
+	{ kind: "'suspended'", await: AwaitIdentityBoundary, "+": "reject" },
 	{ kind: "'held'", reason: arkType.or(
-		{ kind: "'pre-spawn-absence'", endpoint: "string", detail: "string", observedAt: "number" },
-		{ kind: "'unknown-effect'", endpoint: "string", run: RunIdentityBoundary, detail: "string", observedAt: "number" },
-	) },
-	{ kind: "'settled'", settlement: TaskSettlementBoundary, settledAt: "number" },
+		{ kind: "'pre-spawn-absence'", endpoint: "string", detail: "string", observedAt: "number", "+": "reject" },
+		{ kind: "'unknown-effect'", endpoint: "string", run: RunIdentityBoundary, detail: "string", observedAt: "number", "+": "reject" },
+	), "+": "reject" },
+	{ kind: "'settled'", settlement: TaskSettlementBoundary, settledAt: "number", "+": "reject" },
 )
 const TaskBoundary = arkType({
 	identity: TaskIdentityBoundary,
 	group: GroupIdentityBoundary,
-	input: { definition: DefinitionRefBoundary, entrypoint: "string > 0", basePin: "string > 0", value: "unknown", valueIdentity: "string > 0" },
+	input: { definition: DefinitionRefBoundary, entrypoint: "string > 0", basePin: "string > 0", value: "unknown", valueIdentity: "string > 0", "+": "reject" },
 	dependsOn: TaskIdentityBoundary.array(),
 	priority: "number.integer",
 	state: TaskStateBoundary,
 	closure: ClosureResourceStateBoundary,
+	"+": "reject",
 })
 
 const WaitWindowBoundary = arkType.or(
-	{ kind: "'none'" },
-	{ kind: "'fixed-deadline'", durationMs: "number > 0" },
-	{ kind: "'sliding-deadline'", durationMs: "number > 0" },
+	{ kind: "'none'", "+": "reject" },
+	{ kind: "'fixed-deadline'", durationMs: "number > 0", "+": "reject" },
+	{ kind: "'sliding-deadline'", durationMs: "number > 0", "+": "reject" },
 )
 const GroupStateBoundary = arkType.or(
-	{ kind: "'open'" },
-	{ kind: "'waiting'", deadline: "number", memberVersion: "number.integer >= 0" },
-	{ kind: "'terminated'", reason: "'immediate' | 'deadline'", memberVersion: "number.integer >= 0", terminatedAt: "number" },
+	{ kind: "'open'", "+": "reject" },
+	{ kind: "'waiting'", deadline: "number", memberVersion: "number.integer >= 0", "+": "reject" },
+	{ kind: "'terminated'", reason: "'immediate' | 'deadline'", memberVersion: "number.integer >= 0", terminatedAt: "number", "+": "reject" },
 	{
 		kind: "'consuming'",
 		consumerTask: TaskIdentityBoundary,
 		consumerGroup: GroupIdentityBoundary,
 		settlementsDigest: "string > 0",
 		startedAt: "number",
+		"+": "reject",
 	},
-	{ kind: "'consumed'", consumption: { kind: "'consumption'", group: GroupIdentityBoundary, value: "string > 0" }, consumedAt: "number" },
+	{ kind: "'consumed'", consumption: { kind: "'consumption'", group: GroupIdentityBoundary, value: "string > 0", "+": "reject" }, consumedAt: "number", "+": "reject" },
 )
 const GroupConsumerBoundary = arkType.or(
-	{ kind: "'drain'" },
-	{ kind: "'validator'", definition: DefinitionRefBoundary, entrypoint: "string > 0" },
-	{ kind: "'finalizer'", definition: DefinitionRefBoundary, entrypoint: "string > 0" },
+	{ kind: "'drain'", "+": "reject" },
+	{ kind: "'validator'", definition: DefinitionRefBoundary, entrypoint: "string > 0", "+": "reject" },
+	{ kind: "'finalizer'", definition: DefinitionRefBoundary, entrypoint: "string > 0", "+": "reject" },
 )
 const TaskGroupBoundary = arkType({
 	identity: GroupIdentityBoundary,
@@ -135,10 +139,11 @@ const TaskGroupBoundary = arkType({
 	wait: WaitWindowBoundary,
 	consumer: GroupConsumerBoundary,
 	state: GroupStateBoundary,
+	"+": "reject",
 })
 
 const AwaitRecordBoundary = arkType.or(
-	{ kind: "'waiting'", identity: AwaitIdentityBoundary, parentClosure: ClosureIdentityBoundary, child: TaskIdentityBoundary },
+	{ kind: "'waiting'", identity: AwaitIdentityBoundary, parentClosure: ClosureIdentityBoundary, child: TaskIdentityBoundary, "+": "reject" },
 	{
 		kind: "'delivered'",
 		identity: AwaitIdentityBoundary,
@@ -146,6 +151,7 @@ const AwaitRecordBoundary = arkType.or(
 		child: TaskIdentityBoundary,
 		settlement: TaskSettlementBoundary,
 		token: "string > 0",
+		"+": "reject",
 	},
 	{
 		kind: "'consumed'",
@@ -155,8 +161,9 @@ const AwaitRecordBoundary = arkType.or(
 		settlement: TaskSettlementBoundary,
 		token: "string > 0",
 		consumedAt: "number",
+		"+": "reject",
 	},
-	{ kind: "'continuation-lost'", identity: AwaitIdentityBoundary, parentClosure: ClosureIdentityBoundary, child: TaskIdentityBoundary },
+	{ kind: "'continuation-lost'", identity: AwaitIdentityBoundary, parentClosure: ClosureIdentityBoundary, child: TaskIdentityBoundary, "+": "reject" },
 )
 
 export type PersistenceParseError = {
@@ -338,4 +345,3 @@ function jsonValue(candidate: unknown, label: string): PersistenceParseResult<Js
 function rejected<T>(entity: PersistenceParseError["entity"], message: string): PersistenceParseResult<T> {
 	return { kind: "rejected", error: { kind: "persisted-shape-invalid", entity, message } }
 }
-
