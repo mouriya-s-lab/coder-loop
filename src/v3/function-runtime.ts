@@ -18,6 +18,7 @@ import {
 	type Context2,
 	type Context3,
 	type ContextValues,
+	type FrozenPrompt,
 	type FunctionCheckpoint,
 } from "./context"
 import { DefinitionStore, type DefinitionStoreError, type DefinitionStoreService } from "./definition-store"
@@ -89,7 +90,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 				let session = sessions.get(key)
 				if (session === undefined) {
 					const loaded = yield* loadLeaf(definitions, task, checkpoint.stepId)
-					const recovered = sessionFromCheckpoint(checkpoint, loaded.declarations)
+					const recovered = restoreAgentSessionFromCheckpoint(checkpoint, loaded.declarations)
 					if (recovered === null) return { kind: "rejected", reason: "wrong-run", fields: [] }
 					session = recovered
 				}
@@ -97,8 +98,8 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 				if (result.kind === "rejected") return result
 				sessions.set(key, result.session)
 				const updated: FunctionCheckpoint = result.session.state === "closed"
-					? { ...checkpoint, context2: result.session.context, agent: { state: "closed", accepted: result.session.context.values } }
-					: { ...checkpoint, agent: { state: "open", accepted: result.session.accepted } }
+					? checkpointAtContext2(checkpoint, result.session.context)
+					: checkpointAtAgentOpen(checkpoint, result.session.accepted)
 				yield* store.writeFunctionCheckpoint(updated)
 				return result
 			}))
@@ -138,7 +139,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 					const parsed = parseContext0(declarations, task.input.value)
 					if (parsed.kind === "rejected") return yield* settleException(store, hooks, hooksObserved, task, run, programFault())
 					context0 = parsed.context
-					checkpoint = { ...checkpoint, context0 }
+					checkpoint = checkpointAtContext0(checkpoint, context0)
 					yield* store.writeFunctionCheckpoint(checkpoint)
 				}
 
@@ -155,7 +156,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 						continue
 					}
 					context1 = pre.context
-					checkpoint = { ...checkpoint, context1 }
+					checkpoint = checkpointAtContext1(checkpoint, context1)
 					yield* store.writeFunctionCheckpoint(checkpoint)
 				}
 
@@ -171,19 +172,24 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 					}
 					prompt = rendered.prompt
 					yield* observeHook(hooks, hooksObserved, run, "prompt-frozen", context1.values, checkpoint.stepId)
-					checkpoint = { ...checkpoint, prompt }
+					checkpoint = checkpointAtPrompt(checkpoint, prompt)
 					yield* store.writeFunctionCheckpoint(checkpoint)
 				}
 
-				let session = sessionFromCheckpoint(checkpoint, declarations)
-				let context2 = checkpoint.context2
-				if (context2 === null) {
+					let session = restoreAgentSessionFromCheckpoint(checkpoint, declarations)
+					let context2 = checkpoint.context2
+					if ((checkpoint.stage === "context-2" || checkpoint.stage === "context-3") && session === null) {
+						return yield* settleException(store, hooks, hooksObserved, task, run, programFault())
+					}
+					if (context2 === null) {
 					if (session === null) {
 						session = declarations.some((value) => value.source.kind === "agent" && !Object.hasOwn(context1.values, value.name))
 							? openAgentValueSession(authority, context1, declarations)
 							: closeProgramOnlyAgentStage(context1, declarations)
 						sessions.set(authorityKey(authority), session)
-						checkpoint = { ...checkpoint, agent: { state: session.state, accepted: session.state === "open" ? session.accepted : context2Accepted(session, context1) } }
+						checkpoint = session.state === "open"
+							? checkpointAtAgentOpen(checkpoint, session.accepted)
+							: checkpointAtContext2(checkpoint, session.context)
 						yield* store.writeFunctionCheckpoint(checkpoint)
 					}
 
@@ -198,7 +204,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 							if (probe?.kind === "absent") yield* runner.recordAbsence(`${runKey(run)}:${checkpoint.stepId}`, probe.evidence)
 							const hold = yield* store.commit({ identity: `hold:${runKey(run)}`, transition: { family: "task-held", task: task.identity, expectedRun: run, reason } })
 							return { kind: "held", commit: hold, reason, hooks: hooksObserved }
-						}
+					}
 						yield* observeHook(hooks, hooksObserved, run, "agent-start", { endpoint: runner.endpoint.digest }, checkpoint.stepId)
 						const fact = existing ?? (yield* runner.invoke({
 							attemptIdentity: `${runKey(run)}:${checkpoint.stepId}`,
@@ -245,18 +251,16 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 						}
 						checkpoint = { ...checkpoint, runnerSessionIdentity: fact.sessionIdentity }
 						const persistedAfterRun = yield* store.readFunctionCheckpoint(authority)
-						const persistedSession = persistedAfterRun === null ? null : sessionFromCheckpoint(persistedAfterRun, declarations)
+						const persistedSession = persistedAfterRun === null ? null : restoreAgentSessionFromCheckpoint(persistedAfterRun, declarations)
 						const reported = persistedSession ?? sessions.get(authorityKey(authority))
 						if (reported?.state !== "closed") return yield* settleException(store, hooks, hooksObserved, task, run, programFault())
 						session = reported
 						sessions.set(authorityKey(authority), session)
-						checkpoint = { ...checkpoint, agent: { state: "closed", accepted: context2Accepted(session, context1) } }
-						yield* store.writeFunctionCheckpoint(checkpoint)
-					}
+						}
 					if (session.state !== "closed") return yield* settleException(store, hooks, hooksObserved, task, run, programFault())
 					context2 = session.context
 					sessions.delete(authorityKey(authority))
-					checkpoint = { ...checkpoint, context2 }
+					checkpoint = checkpointAtContext2(checkpoint, context2)
 					yield* store.writeFunctionCheckpoint(checkpoint)
 				}
 
@@ -272,7 +276,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 						continue
 					}
 					context3 = post.context
-					checkpoint = { ...checkpoint, context3 }
+					checkpoint = checkpointAtContext3(checkpoint, context3)
 					yield* store.writeFunctionCheckpoint(checkpoint)
 				}
 
@@ -280,6 +284,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 				const pendingPredicates = loaded.leaf.contract.predicates.filter((predicate) => !Object.hasOwn(checkpoint.predicates, predicate))
 				if (pendingPredicates.length > 0) {
 					const evaluated = yield* predicates.evaluate(pendingPredicates, loaded.consumers, context3)
+					if (checkpoint.stage !== "context-3") throw new Error("predicates require a context-3 checkpoint")
 					checkpoint = { ...checkpoint, predicates: { ...checkpoint.predicates, ...evaluated } }
 					yield* store.writeFunctionCheckpoint(checkpoint)
 				}
@@ -344,6 +349,7 @@ function emptyCheckpoint(authority: AgentRunAuthority, stepId: string, runnerSes
 		run: authority,
 		stepId,
 		runnerSessionIdentity,
+		stage: "initial",
 		context0: null,
 		context1: null,
 		context2: null,
@@ -355,25 +361,72 @@ function emptyCheckpoint(authority: AgentRunAuthority, stepId: string, runnerSes
 }
 
 function stepCheckpoint(authority: AgentRunAuthority, stepId: string, values: ContextValues, runnerSessionIdentity: string | null): FunctionCheckpoint {
-	return {
-		...emptyCheckpoint(authority, stepId, runnerSessionIdentity),
-		context0: { stage: "context-0", values: { ...values } },
-	}
+	return checkpointAtContext0(emptyCheckpoint(authority, stepId, runnerSessionIdentity), { stage: "context-0", values: { ...values } })
 }
 
-function sessionFromCheckpoint(checkpoint: FunctionCheckpoint, declarations: readonly DeclaredValue[]): AgentValueSession | null {
-	if (checkpoint.agent.state === "closed") {
-		return checkpoint.context2 === null ? null : { state: "closed", authority: checkpoint.run, context: checkpoint.context2 }
+function checkpointIdentity(checkpoint: FunctionCheckpoint): Pick<FunctionCheckpoint, "run" | "stepId" | "runnerSessionIdentity"> {
+	return { run: checkpoint.run, stepId: checkpoint.stepId, runnerSessionIdentity: checkpoint.runnerSessionIdentity }
+}
+
+function checkpointAtContext0(checkpoint: FunctionCheckpoint, context0: Context0): FunctionCheckpoint {
+	return { ...checkpointIdentity(checkpoint), stage: "context-0", context0, context1: null, context2: null, context3: null, prompt: null, agent: { state: "not-opened", accepted: {} }, predicates: {} }
+}
+
+function checkpointAtContext1(checkpoint: FunctionCheckpoint, context1: Context1): FunctionCheckpoint {
+	if (checkpoint.context0 === null) throw new Error("context-1 requires context-0")
+	return { ...checkpointIdentity(checkpoint), stage: "context-1", context0: checkpoint.context0, context1, context2: null, context3: null, prompt: null, agent: { state: "not-opened", accepted: {} }, predicates: {} }
+}
+
+function checkpointAtPrompt(checkpoint: FunctionCheckpoint, prompt: FrozenPrompt): FunctionCheckpoint {
+	if (checkpoint.context0 === null || checkpoint.context1 === null) throw new Error("frozen prompt requires context-1")
+	return { ...checkpointIdentity(checkpoint), stage: "prompt-frozen", context0: checkpoint.context0, context1: checkpoint.context1, context2: null, context3: null, prompt, agent: { state: "not-opened", accepted: {} }, predicates: {} }
+}
+
+function checkpointAtAgentOpen(checkpoint: FunctionCheckpoint, accepted: ContextValues): FunctionCheckpoint {
+	if (checkpoint.context0 === null || checkpoint.context1 === null || checkpoint.prompt === null) throw new Error("open agent requires a frozen prompt")
+	return { ...checkpointIdentity(checkpoint), stage: "agent-open", context0: checkpoint.context0, context1: checkpoint.context1, context2: null, context3: null, prompt: checkpoint.prompt, agent: { state: "open", accepted }, predicates: {} }
+}
+
+function checkpointAtContext2(checkpoint: FunctionCheckpoint, context2: Context2): FunctionCheckpoint {
+	if (checkpoint.context0 === null || checkpoint.context1 === null || checkpoint.prompt === null) throw new Error("context-2 requires a frozen prompt")
+	return { ...checkpointIdentity(checkpoint), stage: "context-2", context0: checkpoint.context0, context1: checkpoint.context1, context2, context3: null, prompt: checkpoint.prompt, agent: { state: "closed", accepted: context2.values }, predicates: {} }
+}
+
+function checkpointAtContext3(checkpoint: FunctionCheckpoint, context3: Context3): FunctionCheckpoint {
+	if (checkpoint.context0 === null || checkpoint.context1 === null || checkpoint.context2 === null || checkpoint.prompt === null) throw new Error("context-3 requires context-2")
+	return { ...checkpointIdentity(checkpoint), stage: "context-3", context0: checkpoint.context0, context1: checkpoint.context1, context2: checkpoint.context2, context3, prompt: checkpoint.prompt, agent: { state: "closed", accepted: checkpoint.context2.values }, predicates: {} }
+}
+
+export function restoreAgentSessionFromCheckpoint(checkpoint: FunctionCheckpoint, declarations: readonly DeclaredValue[]): AgentValueSession | null {
+	if (checkpoint.context1 === null) return null
+	const fresh = openAgentValueSession(checkpoint.run, checkpoint.context1, declarations)
+	if (checkpoint.stage === "agent-open") {
+		const restored = submitAgentValues(fresh, checkpoint.run, checkpoint.agent.accepted)
+		return restored.kind === "accepted" && restored.session.state === "open" ? restored.session : null
 	}
-	if (checkpoint.agent.state !== "open" || checkpoint.context1 === null) return null
-	const entry = checkpoint.context1
-	return {
-		state: "open",
-		authority: checkpoint.run,
-		entry,
-		declarations: Object.fromEntries(declarations.filter((value) => value.source.kind === "agent" && !Object.hasOwn(entry.values, value.name)).map((value) => [value.name, value])),
-		accepted: checkpoint.agent.accepted,
-	}
+	if (checkpoint.stage !== "context-2" && checkpoint.stage !== "context-3") return null
+	const agentValues = Object.fromEntries(Object.entries(checkpoint.context2.values).filter(([name]) => !Object.hasOwn(checkpoint.context1.values, name)))
+	const restored = submitAgentValues(fresh, checkpoint.run, agentValues)
+	return restored.kind === "accepted" && restored.session.state === "closed" && sameContextValues(restored.session.context.values, checkpoint.context2.values)
+		? restored.session
+		: null
+}
+
+function sameContextValues(left: ContextValues, right: ContextValues): boolean {
+	const leftKeys = Object.keys(left)
+	const rightKeys = Object.keys(right)
+	return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.hasOwn(right, key) && sameJsonValue(left[key], right[key]))
+}
+
+function sameJsonValue(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
+	if (left === undefined || right === undefined || left === null || right === null || typeof left !== "object" || typeof right !== "object") return left === right
+	if (isJsonValueArray(left)) return isJsonValueArray(right) && left.length === right.length && left.every((value, index) => sameJsonValue(value, right[index]))
+	if (isJsonValueArray(right)) return false
+	return sameContextValues(left, right)
+}
+
+function isJsonValueArray(value: JsonValue): value is readonly JsonValue[] {
+	return Array.isArray(value)
 }
 
 function authorityKey(authority: AgentRunAuthority): string {
@@ -465,10 +518,6 @@ function failureSuccessor(contract: Extract<RecursiveTaskDefinition, { readonly 
 
 function programFault(): { readonly kind: "policy"; readonly reason: "program-fault" } {
 	return { kind: "policy", reason: "program-fault" }
-}
-
-function context2Accepted(session: Extract<AgentValueSession, { readonly state: "closed" }>, context1: { readonly values: ContextValues }): ContextValues {
-	return Object.fromEntries(Object.entries(session.context.values).filter(([name]) => !Object.hasOwn(context1.values, name)))
 }
 
 function nextObjectLeaves(root: RecursiveTaskDefinition, currentId: string): readonly string[] {

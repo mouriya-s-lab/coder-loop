@@ -14,19 +14,80 @@ export type Context1 = { readonly stage: "context-1"; readonly values: ContextVa
 export type Context2 = { readonly stage: "context-2"; readonly values: ContextValues }
 export type Context3 = { readonly stage: "context-3"; readonly values: ContextValues }
 export type TypedContext = Context0 | Context1 | Context2 | Context3
-export type FunctionCheckpoint = {
+type FunctionCheckpointIdentity = {
 	readonly run: AgentRunAuthority
 	readonly stepId: string
 	readonly runnerSessionIdentity: string | null
-	readonly context0: Context0 | null
-	readonly context1: Context1 | null
-	readonly context2: Context2 | null
-	readonly context3: Context3 | null
-	readonly prompt: FrozenPrompt | null
-	readonly agent: { readonly state: "not-opened" | "open" | "closed"; readonly accepted: ContextValues }
-	readonly predicates: Readonly<Record<string, boolean>>
 }
 
+type FunctionCheckpointPrefix = FunctionCheckpointIdentity & {
+	readonly context0: Context0
+}
+
+type FunctionCheckpointPreAgent = FunctionCheckpointPrefix & {
+	readonly context1: Context1
+}
+
+type FunctionCheckpointPrompted = FunctionCheckpointPreAgent & {
+	readonly prompt: FrozenPrompt
+}
+
+export type FunctionCheckpoint =
+	| FunctionCheckpointIdentity & {
+		readonly stage: "initial"
+		readonly context0: null
+		readonly context1: null
+		readonly context2: null
+		readonly context3: null
+		readonly prompt: null
+		readonly agent: { readonly state: "not-opened"; readonly accepted: Readonly<Record<string, never>> }
+		readonly predicates: Readonly<Record<string, never>>
+	}
+	| FunctionCheckpointPrefix & {
+		readonly stage: "context-0"
+		readonly context1: null
+		readonly context2: null
+		readonly context3: null
+		readonly prompt: null
+		readonly agent: { readonly state: "not-opened"; readonly accepted: Readonly<Record<string, never>> }
+		readonly predicates: Readonly<Record<string, never>>
+	}
+	| FunctionCheckpointPreAgent & {
+		readonly stage: "context-1"
+		readonly context2: null
+		readonly context3: null
+		readonly prompt: null
+		readonly agent: { readonly state: "not-opened"; readonly accepted: Readonly<Record<string, never>> }
+		readonly predicates: Readonly<Record<string, never>>
+	}
+	| FunctionCheckpointPrompted & {
+		readonly stage: "prompt-frozen"
+		readonly context2: null
+		readonly context3: null
+		readonly agent: { readonly state: "not-opened"; readonly accepted: Readonly<Record<string, never>> }
+		readonly predicates: Readonly<Record<string, never>>
+	}
+	| FunctionCheckpointPrompted & {
+		readonly stage: "agent-open"
+		readonly context2: null
+		readonly context3: null
+		readonly agent: { readonly state: "open"; readonly accepted: ContextValues }
+		readonly predicates: Readonly<Record<string, never>>
+	}
+	| FunctionCheckpointPrompted & {
+		readonly stage: "context-2"
+		readonly context2: Context2
+		readonly context3: null
+		readonly agent: { readonly state: "closed"; readonly accepted: ContextValues }
+		readonly predicates: Readonly<Record<string, never>>
+	}
+	| FunctionCheckpointPrompted & {
+		readonly stage: "context-3"
+		readonly context2: Context2
+		readonly context3: Context3
+		readonly agent: { readonly state: "closed"; readonly accepted: ContextValues }
+		readonly predicates: Readonly<Record<string, boolean>>
+	}
 
 export type FrozenPrompt = {
 	readonly kind: "frozen-prompt"
