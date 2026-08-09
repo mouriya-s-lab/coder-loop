@@ -83,7 +83,7 @@ export function makeFunctionRuntimeLive(agentTransport: { readonly socketPath: s
 				const key = authorityKey(authority)
 				const snapshot = yield* store.readSnapshot({ kind: "chain", value: authority.chainId })
 				const task = Object.values(snapshot.tasks).find((candidate) => taskKey(candidate.identity) === authority.taskId)
-				if (task === undefined || !authorityOwnsLiveLease(authority, task)) return { kind: "rejected", reason: "wrong-run", fields: [] }
+				if (task === undefined || !authorityOwnsLiveLease(authority, task, Date.now())) return { kind: "rejected", reason: "wrong-run", fields: [] }
 				const checkpoint = yield* store.readFunctionCheckpoint(authority)
 				if (checkpoint === null) return { kind: "rejected", reason: "wrong-run", fields: [] }
 				let session = sessions.get(key)
@@ -526,8 +526,8 @@ function authorityFor(run: RunIdentity): AgentRunAuthority {
 	return { kind: "agent-run", chainId: run.closure.task.chain.value, taskId: taskKey(run.closure.task), closureId: `${taskKey(run.closure.task)}/${run.closure.attempt}`, runId: run.value }
 }
 
-function authorityOwnsLiveLease(authority: AgentRunAuthority, task: Task): boolean {
-	if (task.state.kind !== "leased") return false
+function authorityOwnsLiveLease(authority: AgentRunAuthority, task: Task, now: number): boolean {
+	if (task.state.kind !== "leased" || task.state.expiresAt <= now) return false
 	const expected = authorityFor(task.state.run)
 	return authority.chainId === expected.chainId
 		&& authority.taskId === expected.taskId
