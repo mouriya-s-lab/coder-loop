@@ -619,4 +619,57 @@ describe("v3 architecture contracts", () => {
 		} finally { await rm(root, { recursive: true, force: true }) }
 	})
 
+	test("exception settlement provenance must match the settling run closure", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-settlement-provenance-"))
+		try {
+			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+				const store = yield* ObjectDomainStore
+				const chain = { kind: "chain" as const, value: "chain" }
+				const group = { kind: "group" as const, chain, value: "root" }
+				const identity = { kind: "task" as const, chain, value: "root" }
+				const closure = { kind: "closure" as const, task: identity, attempt: 0 }
+				const run = { kind: "run" as const, closure, value: "run" }
+				const task: Task = {
+					identity,
+					group,
+					input: {
+						definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } },
+						entrypoint: "root",
+						basePin: "base",
+						value: "work",
+						valueIdentity: "input",
+					},
+					dependsOn: [],
+					priority: 0,
+					state: { kind: "leased", run, acquiredAt: 1, expiresAt: 2 },
+					closure: { kind: "active", identity: closure, basePin: "base", branch: "branch", worktree: "/worktree", scratch: "/scratch" },
+				}
+				yield* store.bootstrap({
+					chain,
+					tasks: { [taskKey(identity)]: task },
+					groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					awaits: {},
+					admittedFacts: {},
+				})
+				const rejected = yield* Effect.exit(store.commit({
+					identity: "wrong-provenance",
+					transition: {
+						family: "task-settlement",
+						task: identity,
+						run,
+						settlement: { kind: "exception", cause: { kind: "exception", cause: { kind: "policy", reason: "program-fault" } }, attempt: 1, closure: { ...closure, attempt: 1 } },
+						successors: [],
+					},
+				}))
+				expect(rejected).toMatchObject({ _tag: "Failure", cause: { _tag: "Fail", error: { kind: "transition-rejected", family: "task-settlement", reason: "run-mismatch" } } })
+				const durable = yield* store.readSnapshot(chain)
+				expect(durable.tasks[taskKey(identity)]?.state.kind).toBe("leased")
+				expect(yield* store.listTransitions(chain, 0)).toEqual([])
+			}).pipe(Effect.provide(makeObjectDomainStoreLive(join(root, "runtime.sqlite"))))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
 })
