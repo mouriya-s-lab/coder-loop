@@ -513,4 +513,27 @@ describe("v3 architecture contracts", () => {
 			await rm(root, { recursive: true, force: true })
 		}
 	})
+
+	test("events include committed await consumption", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-events-await-consumption-"))
+		try {
+			const databaseFile = join(root, "runtime.sqlite")
+			await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+				const store = yield* ObjectDomainStore
+				const chain = { kind: "chain" as const, value: "events-await-consumption" }
+				yield* store.bootstrap({ chain, tasks: {}, groups: {}, awaits: {}, admittedFacts: {} })
+				const database = new Database(databaseFile, { strict: true })
+				database.query("INSERT INTO v3_transitions(identity_key,chain_key,family,payload,committed_at) VALUES ($identity,$chain,$family,$payload,$at)").run({
+					identity: "await-consume:token-1", chain: chain.value, family: "await-consumption", payload: "{}", at: 42,
+				})
+				database.close()
+				expect(yield* store.listTransitions(chain, 0)).toEqual([
+					{ identity: "await-consume:token-1", family: "await-consumption", cursor: 1, committedAt: 42 },
+				])
+			}).pipe(Effect.provide(makeObjectDomainStoreLive(databaseFile)))))
+		} finally { await rm(root, { recursive: true, force: true }) }
+	})
+
 })
