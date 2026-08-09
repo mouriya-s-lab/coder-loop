@@ -12,6 +12,27 @@ afterEach(() => {
 })
 
 describe("runSubprocess", () => {
+	test("keeps timeout active until descendants close inherited pipes", async () => {
+		const startedAt = performance.now()
+		const outcome = await Effect.runPromise(runSubprocess({
+			executable: "/bin/sh",
+			argv: ["-c", "sleep 2 &"],
+			cwd: tmpdir(),
+			env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+			stdin: null,
+			timeoutMs: 100,
+			termGraceMs: 100,
+			maxOutputBytes: 1_024,
+			sandbox: { filesystem: "unrestricted", network: "none", resources: [] },
+		}))
+		const elapsedMs = performance.now() - startedAt
+		expect(outcome.kind).toBe("timeout")
+		if (outcome.kind !== "timeout") return
+		expect(outcome.signal).toBe("SIGTERM")
+		expect(elapsedMs).toBeGreaterThanOrEqual(100)
+		expect(elapsedMs).toBeLessThan(1_000)
+	}, 5_000)
+
 	test("interrupts and reaps the detached process group", async () => {
 		const root = mkdtempSync(join(tmpdir(), "coder-loop-subprocess-interrupt-"))
 		scratchRoots.push(root)
