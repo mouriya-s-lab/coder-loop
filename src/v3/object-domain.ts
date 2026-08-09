@@ -49,7 +49,7 @@ export type ClosureResourceState =
 	| { readonly kind: "active"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string }
 	| { readonly kind: "suspended"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string; readonly continuation: ContinuationFact }
 	| { readonly kind: "evidence-frozen"; readonly identity: ClosureIdentity; readonly basePin: string; readonly branch: string; readonly worktree: string; readonly scratch: string; readonly publication: PublicationEvidence }
-	| { readonly kind: "collected"; readonly identity: ClosureIdentity; readonly publication: PublicationEvidence; readonly collectedAt: number }
+	| { readonly kind: "collected"; readonly identity: ClosureIdentity; readonly basePin: string; readonly publication: PublicationEvidence; readonly collectedAt: number }
 
 export type ContinuationFact =
 	| { readonly kind: "present"; readonly sessionIdentity: string; readonly observedAt: number }

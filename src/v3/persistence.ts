@@ -61,7 +61,7 @@ const ClosureResourceStateBoundary = arkType.or(
 	},
 	{ kind: "'suspended'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", continuation: ContinuationFactBoundary },
 	{ kind: "'evidence-frozen'", identity: ClosureIdentityBoundary, basePin: "string > 0", branch: "string > 0", worktree: "string > 0", scratch: "string > 0", publication: PublicationEvidenceBoundary },
-	{ kind: "'collected'", identity: ClosureIdentityBoundary, publication: PublicationEvidenceBoundary, collectedAt: "number" },
+	{ kind: "'collected'", identity: ClosureIdentityBoundary, basePin: "string > 0", publication: PublicationEvidenceBoundary, collectedAt: "number" },
 )
 
 const ValueParseIssueBoundary = arkType({ path: "(string | number)[]", expected: "string", actual: "string" })

@@ -379,4 +379,58 @@ describe("v3 architecture contracts", () => {
 			await rm(root, { recursive: true, force: true })
 		}
 	})
+
+	test("closure base pin is validated at lease and retained after collection", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-base-pin-"))
+		try {
+			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+				const store = yield* ObjectDomainStore
+				const chain = { kind: "chain" as const, value: "base-pin" }
+				const group = { kind: "group" as const, chain, value: "root" }
+				const identity = { kind: "task" as const, chain, value: "task" }
+				const closureIdentity = { kind: "closure" as const, task: identity, attempt: 0 }
+				const run = { kind: "run" as const, closure: closureIdentity, value: "run" }
+				const task: Task = {
+					identity,
+					group,
+					input: {
+						definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } },
+						entrypoint: "root",
+						basePin: "expected-pin",
+						value: null,
+						valueIdentity: "input",
+					},
+					dependsOn: [],
+					priority: 0,
+					state: { kind: "ready" },
+					closure: { kind: "unallocated" },
+				}
+				yield* store.bootstrap({
+					chain,
+					tasks: { [taskKey(identity)]: task },
+					groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					awaits: {},
+					admittedFacts: {},
+				})
+				const resources = { kind: "active" as const, identity: closureIdentity, basePin: "expected-pin", branch: "branch", worktree: "/worktree", scratch: "/scratch" }
+				const rejected = yield* Effect.either(store.commit({
+					identity: "wrong-pin",
+					transition: { family: "lease-acquire", task: identity, run, closure: { ...resources, basePin: "wrong-pin" }, acquiredAt: 1, expiresAt: 2 },
+				}))
+				expect(rejected._tag).toBe("Left")
+				if (rejected._tag === "Left") expect(rejected.left).toEqual(expect.objectContaining({ kind: "transition-rejected", family: "lease-acquire", reason: "identity-mismatch" }))
+				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.closure.kind).toBe("unallocated")
+
+				yield* store.commit({ identity: "lease", transition: { family: "lease-acquire", task: identity, run, closure: resources, acquiredAt: 1, expiresAt: 2 } })
+				yield* store.commit({ identity: "freeze", transition: { family: "resource-intent", closure: closureIdentity, action: "freeze-evidence", publication: { kind: "no-work", observedAt: 3 } } })
+				yield* store.commit({ identity: "collect", transition: { family: "resource-intent", closure: closureIdentity, action: "collect", publication: { kind: "no-work", observedAt: 3 } } })
+				const collected = (yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.closure
+				expect(collected).toEqual({ kind: "collected", identity: closureIdentity, basePin: "expected-pin", publication: { kind: "no-work", observedAt: 3 }, collectedAt: expect.any(Number) })
+			}).pipe(Effect.provide(makeObjectDomainStoreLive(join(root, "runtime.sqlite"))))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
 })
