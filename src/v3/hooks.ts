@@ -124,29 +124,32 @@ export function makeHookRuntimeLive(root: string, declarations: readonly HookDec
 	return Layer.scoped(HookRuntime, Effect.acquireRelease(Effect.succeed(service), (runtime) => Effect.orDie(runtime.shutdown)))
 }
 
+type PersistedHookDelivery = Omit<HookDeliveryAudit, "status" | "executions">
+
 async function deliver(root: string, declaration: HookDeclaration, projection: HookProjection, state: HookRuntimeState): Promise<HookDeliveryAudit> {
 	const identity = deliveryIdentity(declaration.id, projection)
 	const path = deliveryPath(root, identity)
-	let delivery = await readDelivery(path)
+	let delivery = await readDelivery(root, path)
 	if (delivery === null) {
-		delivery = { identity, hookId: declaration.id, projection, status: "pending", executions: [] }
-		await atomicWrite(path, delivery)
+		const persisted: PersistedHookDelivery = { identity, hookId: declaration.id, projection }
+		await atomicWrite(path, persisted)
+		delivery = { ...persisted, status: "pending", executions: [] }
 	}
 	if (delivery.status === "completed") return delivery
 	return executeDelivery(root, declaration, delivery, state)
 }
 
 async function executeDelivery(root: string, declaration: HookDeclaration, delivery: HookDeliveryAudit, state: HookRuntimeState): Promise<HookDeliveryAudit> {
-	const started: HookExecutionAudit = {
+	const started: HookExecutionAudit & { readonly kind: "started" } = {
 		kind: "started",
 		identity: randomUUID(),
 		deliveryIdentity: delivery.identity,
 		startedAt: Date.now(),
 	}
-	const running: HookDeliveryAudit = { ...delivery, executions: [...delivery.executions, started] }
-	await atomicWrite(deliveryPath(root, delivery.identity), running)
+	const path = executionPath(root, started)
+	await atomicWrite(path, started)
 	const controller = new AbortController()
-	const completion = closeExecution(root, declaration, running, started, controller.signal)
+	const completion = closeExecution(root, declaration, delivery, started, path, controller.signal)
 	state.running.set(started.identity, { controller, completion })
 	try {
 		return await completion
@@ -155,20 +158,24 @@ async function executeDelivery(root: string, declaration: HookDeclaration, deliv
 	}
 }
 
-async function closeExecution(root: string, declaration: HookDeclaration, running: HookDeliveryAudit, started: HookExecutionAudit & { readonly kind: "started" }, abortSignal: AbortSignal): Promise<HookDeliveryAudit> {
-	const outcome = await Effect.runPromise(runSubprocess({ ...hookSubprocessSpec(declaration, running.projection), abortSignal }))
+async function closeExecution(
+	root: string,
+	declaration: HookDeclaration,
+	delivery: HookDeliveryAudit,
+	started: HookExecutionAudit & { readonly kind: "started" },
+	path: string,
+	abortSignal: AbortSignal,
+): Promise<HookDeliveryAudit> {
+	const outcome = await Effect.runPromise(runSubprocess({ ...hookSubprocessSpec(declaration, delivery.projection), abortSignal }))
 	const closed: HookExecutionAudit = {
 		...started,
 		kind: "closed",
 		closedAt: outcome.closedAt,
 		outcome: hookOutcome(outcome),
 	}
-	const completed: HookDeliveryAudit = {
-		...running,
-		status: "completed",
-		executions: running.executions.map((execution) => execution.identity === started.identity ? closed : execution),
-	}
-	await atomicWrite(deliveryPath(root, running.identity), completed)
+	await atomicWrite(path, closed)
+	const completed = await readDelivery(root, deliveryPath(root, delivery.identity))
+	if (completed === null) throw new Error(`hook delivery ${delivery.identity} disappeared after execution`)
 	return completed
 }
 
@@ -238,11 +245,11 @@ async function listDeliveries(root: string): Promise<HookDeliveryAudit[]> {
 		if (isFsCode(error, "ENOENT")) return []
 		throw error
 	}
-	const deliveries = await Promise.all(entries.filter((entry) => !entry.includes(".candidate.")).map((entry) => readDelivery(join(directory, entry))))
+	const deliveries = await Promise.all(entries.filter((entry) => !entry.includes(".candidate.")).map((entry) => readDelivery(root, join(directory, entry))))
 	return deliveries.filter((delivery): delivery is HookDeliveryAudit => delivery !== null).sort((left, right) => left.identity.localeCompare(right.identity))
 }
 
-async function readDelivery(path: string): Promise<HookDeliveryAudit | null> {
+async function readDelivery(root: string, path: string): Promise<HookDeliveryAudit | null> {
 	let candidate: unknown
 	try {
 		candidate = JSON.parse(await readFile(path, "utf8"))
@@ -250,11 +257,36 @@ async function readDelivery(path: string): Promise<HookDeliveryAudit | null> {
 		if (isFsCode(error, "ENOENT")) return null
 		throw error
 	}
-	const parsed = HookDeliveryBoundary(candidate)
+	const parsed = PersistedHookDeliveryBoundary(candidate)
 	if (parsed instanceof arkType.errors) throw new Error(parsed.summary)
 	const facts = parseDeclaredValue({ kind: "json" }, parsed.projection.facts)
 	if (facts.kind === "rejected") throw new Error("invalid hook projection facts")
-	return { ...parsed, projection: { ...parsed.projection, facts: facts.value } }
+	const executions = await listExecutions(root, parsed.identity)
+	return {
+		...parsed,
+		projection: { ...parsed.projection, facts: facts.value },
+		status: executions.length > 0 && executions.every((execution) => execution.kind === "closed") ? "completed" : "pending",
+		executions,
+	}
+}
+
+async function listExecutions(root: string, deliveryIdentity: string): Promise<HookExecutionAudit[]> {
+	const directory = executionDirectory(root, deliveryIdentity)
+	let entries: string[]
+	try {
+		entries = await readdir(directory)
+	} catch (error) {
+		if (isFsCode(error, "ENOENT")) return []
+		throw error
+	}
+	const executions = await Promise.all(entries.filter((entry) => !entry.includes(".candidate.")).map(async (entry) => {
+		const candidate: unknown = JSON.parse(await readFile(join(directory, entry), "utf8"))
+		const parsed = HookExecutionBoundary(candidate)
+		if (parsed instanceof arkType.errors) throw new Error(parsed.summary)
+		if (parsed.deliveryIdentity !== deliveryIdentity) throw new Error(`hook execution ${parsed.identity} belongs to unexpected delivery ${parsed.deliveryIdentity}`)
+		return parsed
+	}))
+	return executions.sort((left, right) => left.identity.localeCompare(right.identity))
 }
 
 const HookAnchorBoundary = arkType("'function-entry' | 'pre-map' | 'prompt-frozen' | 'agent-start' | 'post-map' | 'routing' | 'function-exit' | 'committed-transition'")
@@ -269,16 +301,14 @@ const HookExecutionBoundary = arkType.or(
 	{ kind: "'started'", identity: "string", deliveryIdentity: "string", startedAt: "number" },
 	{ kind: "'closed'", identity: "string", deliveryIdentity: "string", startedAt: "number", closedAt: "number", outcome: HookOutcomeBoundary },
 )
-const HookDeliveryBoundary = arkType({
+const PersistedHookDeliveryBoundary = arkType({
 	identity: "string",
 	hookId: "string",
 	projection: { anchor: HookAnchorBoundary, occurrenceIdentity: "string", observedAt: "number", facts: "unknown" },
-	status: "'pending' | 'completed'",
-	executions: HookExecutionBoundary.array(),
 	"+": "reject",
 })
 
-async function atomicWrite(path: string, value: HookDeliveryAudit): Promise<void> {
+async function atomicWrite(path: string, value: PersistedHookDelivery | HookExecutionAudit): Promise<void> {
 	await mkdir(dirname(path), { recursive: true })
 	const candidate = `${path}.candidate.${randomUUID()}`
 	const handle = await open(candidate, "wx")
@@ -307,6 +337,14 @@ function deliveryIdentity(hookId: string, projection: HookProjection): string {
 
 function deliveryPath(root: string, identity: string): string {
 	return join(root, "hook-deliveries", `${identity}.json`)
+}
+
+function executionDirectory(root: string, deliveryIdentity: string): string {
+	return join(root, "hook-executions", deliveryIdentity)
+}
+
+function executionPath(root: string, execution: HookExecutionAudit): string {
+	return join(executionDirectory(root, execution.deliveryIdentity), `${execution.identity}.json`)
 }
 
 function validateDeclarations(declarations: readonly HookDeclaration[]): void {
