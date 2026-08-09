@@ -4,16 +4,16 @@ import { dirname, join } from "node:path"
 import { type as arkType } from "arktype"
 import { Context, Effect, Layer } from "effect"
 import {
-	compilePresetDefinition,
+	compiledDefinitionProductIdentity,
 	definitionContentIdentity,
-	resolveCompileAssets,
 	strictCompiledProduct,
 	type CompileEnvelope,
+	type CompiledDefinitionProduct,
 	type CompiledProductIdentity,
 	type DefinitionContentIdentity,
 	type PresetDefinition,
 } from "./definition"
-import { parsePresetDefinition } from "./schema"
+import { parseCompiledDefinitionProduct, parsePresetDefinition } from "./schema"
 
 export type DefinitionRef = {
 	readonly kind: "published-definition"
@@ -25,6 +25,7 @@ export type DefinitionBundle = {
 	readonly ref: DefinitionRef
 	readonly assets: Readonly<Record<string, Uint8Array>>
 	readonly definition: PresetDefinition
+	readonly product: CompiledDefinitionProduct
 }
 
 export type DefinitionStoreError =
@@ -80,11 +81,13 @@ function publishDefinition(
 	const strict = strictCompiledProduct(envelope)
 	if (strict.kind === "rejected") return Effect.fail({ kind: strict.reason, envelope: strict.envelope })
 
-	const content = definitionContentIdentity(assets)
+	const publishedProduct = Buffer.from(`${JSON.stringify(strict.product)}\n`)
+	const publishedAssets = { ...assets, "compiled-product.json": publishedProduct }
+	const content = definitionContentIdentity(publishedAssets)
 	const ref: DefinitionRef = { kind: "published-definition", content, product: strict.product.identity }
 	const target = definitionPath(root, ref)
 	const staging = join(root, ".staging", `${content.digest}-${randomUUID()}`)
-	const normalizedAssets = Object.fromEntries(Object.entries(assets).map(([path, bytes]) => [path, typeof bytes === "string" ? Buffer.from(bytes) : bytes]))
+	const normalizedAssets = Object.fromEntries(Object.entries(publishedAssets).map(([path, bytes]) => [path, typeof bytes === "string" ? Buffer.from(bytes) : bytes]))
 	const manifest: Manifest = {
 		schemaVersion: 3,
 		contentIdentity: content.digest,
@@ -189,7 +192,7 @@ async function resolveBundleFromPath(
 		try {
 			bytes = await readFile(safeAssetPath(path, relativePath))
 		} catch {
-			return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "asset-missing", asset: relativePath } }
+			return { kind: "error", error: { kind: "definition-corrupt", ref, reason: relativePath === "compiled-product.json" ? "missing-artifact" : "asset-missing", asset: relativePath } }
 		}
 		if (bytes.byteLength !== expected.bytes || bytesDigest(bytes) !== expected.digest) {
 			return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "asset-digest-mismatch", asset: relativePath } }
@@ -210,11 +213,38 @@ async function resolveBundleFromPath(
 	}
 	const definition = parsePresetDefinition(definitionCandidate)
 	if (definition.kind === "rejected") return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "manifest-invalid", asset: "definition.json" } }
-	const product = strictCompiledProduct(resolveCompileAssets(compilePresetDefinition(definition.definition), assets))
-	if (product.kind === "rejected" || product.product.identity.digest !== ref.product.digest) {
+	const productAsset = assets["compiled-product.json"]
+	if (productAsset === undefined) return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "missing-artifact", asset: "compiled-product.json" } }
+	let productCandidate: unknown
+	try {
+		productCandidate = JSON.parse(new TextDecoder().decode(productAsset))
+	} catch {
+		return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "manifest-invalid", asset: "compiled-product.json" } }
+	}
+	const product = parseCompiledDefinitionProduct(productCandidate)
+	if (product === null) return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "manifest-invalid", asset: "compiled-product.json" } }
+	const expectedIdentity = compiledDefinitionProductIdentity(product.definition, product.taskIndex, product.valueIndex)
+	if (!publishedProductIndexesMatch(product) || product.identity.digest !== expectedIdentity.digest || product.identity.digest !== ref.product.digest) {
+		return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "identity-mismatch", asset: "compiled-product.json" } }
+	}
+	if (JSON.stringify(definition.definition) !== JSON.stringify(product.definition)) {
 		return { kind: "error", error: { kind: "definition-corrupt", ref, reason: "identity-mismatch", asset: "definition.json" } }
 	}
-	return { kind: "ok", bundle: { ref, assets, definition: definition.definition } }
+	return { kind: "ok", bundle: { ref, assets, definition: product.definition, product } }
+}
+
+function publishedProductIndexesMatch(product: CompiledDefinitionProduct): boolean {
+	const expectedTasks: Record<string, unknown> = {}
+	const visit = (task: CompiledDefinitionProduct["definition"]["task"]): void => {
+		expectedTasks[task.id] = task
+		if (task.kind === "leaf") return
+		if (task.kind === "par") expectedTasks[task.finalizer.task.id] = task.finalizer.task
+		for (const child of task.children) visit(child)
+	}
+	visit(product.definition.task)
+	const expectedValues = Object.fromEntries(product.definition.values.map((value) => [value.name, value]))
+	return JSON.stringify(product.taskIndex) === JSON.stringify(expectedTasks)
+		&& JSON.stringify(product.valueIndex) === JSON.stringify(expectedValues)
 }
 
 function definitionPath(root: string, ref: DefinitionRef): string {

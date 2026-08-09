@@ -161,13 +161,8 @@ export function compilePresetDefinition(definition: PresetDefinition): CompileEn
 
 	if (diagnostics.length > 0) return rejectedEnvelope(definition, nonEmpty(diagnostics))
 
-	const productShape = {
-		definition,
-		taskIds: [...taskIndex.keys()].sort(),
-		valueNames: [...scope.values.keys()].sort(),
-	}
 	const product: CompiledDefinitionProduct = {
-		identity: { kind: "compiled-product", digest: digest(productShape) },
+		identity: compiledDefinitionProductIdentity(definition, Object.fromEntries(taskIndex), Object.fromEntries(scope.values)),
 		definition,
 		taskIndex: Object.fromEntries(taskIndex),
 		valueIndex: Object.fromEntries(scope.values),
@@ -177,6 +172,17 @@ export function compilePresetDefinition(definition: PresetDefinition): CompileEn
 		identity: { kind: "compile-envelope", digest: digest({ product: product.identity, findings }) },
 		product,
 		findings,
+	}
+}
+
+export function compiledDefinitionProductIdentity(
+	definition: PresetDefinition,
+	taskIndex: Readonly<Record<string, RecursiveTaskDefinition>>,
+	valueIndex: Readonly<Record<string, DeclaredValue>>,
+): CompiledProductIdentity {
+	return {
+		kind: "compiled-product",
+		digest: digest({ definition, taskIds: Object.keys(taskIndex).sort(), valueNames: Object.keys(valueIndex).sort() }),
 	}
 }
 
