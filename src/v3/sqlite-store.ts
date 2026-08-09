@@ -557,6 +557,11 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 		case "group-consumption": {
 			const group = requireGroup(database, transition.group, transition.family)
 			if (group.state.kind !== "terminated" && group.state.kind !== "consuming") reject(transition.family, "state-mismatch", "group is neither terminated nor awaiting its fixed consumer result")
+			if (group.state.kind === "consuming") {
+				const consumer = requireTask(database, group.state.consumerTask, transition.family)
+				if (consumer.state.kind !== "settled") reject(transition.family, "state-mismatch", "fixed consumer task is not settled")
+			}
+			if (groupKey(transition.state.consumption.group) !== groupKey(group.identity)) reject(transition.family, "identity-mismatch", "consumption identity does not belong to the target group")
 			const settlements = group.members.map((identity) => requireTask(database, identity, transition.family).state).map((state) => {
 				if (state.kind !== "settled") reject(transition.family, "state-mismatch", "group member is not settled")
 				return state.settlement
