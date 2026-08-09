@@ -31,6 +31,7 @@ const CheckpointBoundary = arkType({
 	run: AgentAuthorityBoundary,
 	stepId: "string > 0",
 	runnerSessionIdentity: "string | null",
+	stage: "'initial'|'context-0'|'context-1'|'prompt-frozen'|'agent-open'|'context-2'|'context-3'",
 	context0: arkType.or({ stage: "'context-0'", values: "unknown", "+": "reject" }, "null"),
 	context1: arkType.or({ stage: "'context-1'", values: "unknown", "+": "reject" }, "null"),
 	context2: arkType.or({ stage: "'context-2'", values: "unknown", "+": "reject" }, "null"),
@@ -251,21 +252,68 @@ export function parseFunctionCheckpoint(candidate: unknown): PersistenceParseRes
 		if (inputValues.kind === "rejected") return inputValues
 		prompt = { kind: "frozen-prompt", text: parsed.prompt.text, inputValues: inputValues.value }
 	}
-	return {
-		kind: "accepted",
-		value: {
-			run: parsed.run,
-			stepId: parsed.stepId,
-			runnerSessionIdentity: parsed.runnerSessionIdentity,
-			context0: context0Values.value === null ? null : { stage: "context-0", values: context0Values.value },
-			context1: context1Values.value === null ? null : { stage: "context-1", values: context1Values.value },
-			context2: context2Values.value === null ? null : { stage: "context-2", values: context2Values.value },
-			context3: context3Values.value === null ? null : { stage: "context-3", values: context3Values.value },
-			prompt,
-			agent: { state: parsed.agent.state, accepted: accepted.value },
-			predicates: parsed.predicates,
-		},
+	const values = {
+		context0: context0Values.value === null ? null : { stage: "context-0" as const, values: context0Values.value },
+		context1: context1Values.value === null ? null : { stage: "context-1" as const, values: context1Values.value },
+		context2: context2Values.value === null ? null : { stage: "context-2" as const, values: context2Values.value },
+		context3: context3Values.value === null ? null : { stage: "context-3" as const, values: context3Values.value },
 	}
+	const common = { run: parsed.run, stepId: parsed.stepId, runnerSessionIdentity: parsed.runnerSessionIdentity }
+	const invalid = (message: string): PersistenceParseResult<FunctionCheckpoint> => rejected("checkpoint", message)
+	const isEmpty = (record: Readonly<Record<string, unknown>>): boolean => Object.keys(record).length === 0
+	const extendsValues = (prior: ContextValues, next: ContextValues): boolean => Object.entries(prior).every(([key, value]) => Object.hasOwn(next, key) && sameJson(value, next[key]))
+	const sameValues = (left: ContextValues, right: ContextValues): boolean => extendsValues(left, right) && extendsValues(right, left)
+	if (values.context0 !== null && values.context1 !== null && !extendsValues(values.context0.values, values.context1.values)) return invalid("context-1 must preserve every context-0 value")
+	if (values.context1 !== null && prompt !== null && !sameValues(values.context1.values, prompt.inputValues)) return invalid("frozen prompt inputs must equal context-1")
+	if (values.context1 !== null && values.context2 !== null && !extendsValues(values.context1.values, values.context2.values)) return invalid("context-2 must preserve every context-1 value")
+	if (values.context2 !== null && values.context3 !== null && !extendsValues(values.context2.values, values.context3.values)) return invalid("context-3 must preserve every context-2 value")
+	if (values.context2 !== null && !sameValues(values.context2.values, accepted.value)) return invalid("closed agent accepted values must equal context-2")
+
+	switch (parsed.stage) {
+		case "initial":
+			return values.context0 === null && values.context1 === null && values.context2 === null && values.context3 === null && prompt === null && parsed.agent.state === "not-opened" && isEmpty(accepted.value) && isEmpty(parsed.predicates)
+				? { kind: "accepted", value: { ...common, stage: "initial", context0: null, context1: null, context2: null, context3: null, prompt: null, agent: { state: "not-opened", accepted: {} }, predicates: {} } }
+				: invalid("initial checkpoint contains later temporal state")
+		case "context-0":
+			return values.context0 !== null && values.context1 === null && values.context2 === null && values.context3 === null && prompt === null && parsed.agent.state === "not-opened" && isEmpty(accepted.value) && isEmpty(parsed.predicates)
+				? { kind: "accepted", value: { ...common, stage: "context-0", context0: values.context0, context1: null, context2: null, context3: null, prompt: null, agent: { state: "not-opened", accepted: {} }, predicates: {} } }
+				: invalid("context-0 checkpoint has an invalid predecessor or successor")
+		case "context-1":
+			return values.context0 !== null && values.context1 !== null && values.context2 === null && values.context3 === null && prompt === null && parsed.agent.state === "not-opened" && isEmpty(accepted.value) && isEmpty(parsed.predicates)
+				? { kind: "accepted", value: { ...common, stage: "context-1", context0: values.context0, context1: values.context1, context2: null, context3: null, prompt: null, agent: { state: "not-opened", accepted: {} }, predicates: {} } }
+				: invalid("context-1 checkpoint has an invalid predecessor or successor")
+		case "prompt-frozen":
+			return values.context0 !== null && values.context1 !== null && values.context2 === null && values.context3 === null && prompt !== null && parsed.agent.state === "not-opened" && isEmpty(accepted.value) && isEmpty(parsed.predicates)
+				? { kind: "accepted", value: { ...common, stage: "prompt-frozen", context0: values.context0, context1: values.context1, context2: null, context3: null, prompt, agent: { state: "not-opened", accepted: {} }, predicates: {} } }
+				: invalid("prompt-frozen checkpoint has an invalid predecessor or successor")
+		case "agent-open":
+			return values.context0 !== null && values.context1 !== null && values.context2 === null && values.context3 === null && prompt !== null && parsed.agent.state === "open" && Object.keys(accepted.value).every((key) => !Object.hasOwn(values.context1?.values ?? {}, key)) && isEmpty(parsed.predicates)
+				? { kind: "accepted", value: { ...common, stage: "agent-open", context0: values.context0, context1: values.context1, context2: null, context3: null, prompt, agent: { state: "open", accepted: accepted.value }, predicates: {} } }
+				: invalid("agent-open checkpoint has an invalid predecessor or successor")
+		case "context-2":
+			return values.context0 !== null && values.context1 !== null && values.context2 !== null && values.context3 === null && prompt !== null && parsed.agent.state === "closed" && isEmpty(parsed.predicates)
+				? { kind: "accepted", value: { ...common, stage: "context-2", context0: values.context0, context1: values.context1, context2: values.context2, context3: null, prompt, agent: { state: "closed", accepted: accepted.value }, predicates: {} } }
+				: invalid("context-2 checkpoint has an invalid predecessor or successor")
+		case "context-3":
+			return values.context0 !== null && values.context1 !== null && values.context2 !== null && values.context3 !== null && prompt !== null && parsed.agent.state === "closed"
+				? { kind: "accepted", value: { ...common, stage: "context-3", context0: values.context0, context1: values.context1, context2: values.context2, context3: values.context3, prompt, agent: { state: "closed", accepted: accepted.value }, predicates: parsed.predicates } }
+				: invalid("context-3 checkpoint has an invalid predecessor")
+	}
+}
+
+function sameJson(left: JsonValue, right: JsonValue | undefined): boolean {
+	if (right === undefined || left === null || right === null || typeof left !== "object" || typeof right !== "object") return left === right
+	if (isJsonArray(left)) return isJsonArray(right) && left.length === right.length && left.every((value, index) => sameJson(value, right[index]))
+	if (isJsonArray(right)) return false
+	const leftRecord: Readonly<Record<string, JsonValue>> = left
+	const rightRecord: Readonly<Record<string, JsonValue>> = right
+	const leftKeys = Object.keys(leftRecord)
+	const rightKeys = Object.keys(rightRecord)
+	return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.hasOwn(rightRecord, key) && sameJson(leftRecord[key] ?? null, rightRecord[key]))
+}
+
+function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
+	return Array.isArray(value)
 }
 
 export function encodePersisted(value: Task | TaskGroup | AwaitRecord | TaskSettlement | ClosureResourceState | GroupState | PublicationEvidence): string {
