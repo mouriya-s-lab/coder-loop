@@ -73,7 +73,7 @@ async function parseInvocation(argv: readonly string[]): Promise<CliInvocation> 
 		const chain = requiredOption(args, "--chain")
 		const sinceText = requiredOption(args, "--since")
 		const since = Number(sinceText)
-		if (!Number.isFinite(since)) throw new Error("--since must be a finite number")
+		if (!Number.isInteger(since) || since < 0) throw new Error("--since must be a non-negative integer cursor")
 		assertNoArgs(args)
 		return { socket, caller: { kind: "operator" }, command: { kind: "events-read", chain: { kind: "chain", value: chain }, since } }
 	}

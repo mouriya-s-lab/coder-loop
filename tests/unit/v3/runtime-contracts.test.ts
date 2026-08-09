@@ -145,6 +145,13 @@ describe("v3 architecture contracts", () => {
 			command: { kind: "agent-submit", values: { result: "forged" } },
 		})
 		expect(request).toEqual({ kind: "rejected", rejection: { kind: "request-rejected", reason: "unauthorized", issues: ["agent-submit requires agent authority"] } })
+		const invalidCursor = parseDaemonRequest({
+			schemaVersion: 3,
+			requestId: "request-2",
+			caller: { kind: "operator" },
+			command: { kind: "events-read", chain: { kind: "chain", value: "chain" }, since: 0.5 },
+		})
+		expect(invalidCursor).toMatchObject({ kind: "rejected", rejection: { kind: "request-rejected", reason: "invalid-command" } })
 	})
 
 	test("operator CLI sends a typed status command when no action token is present", async () => {
@@ -257,7 +264,9 @@ describe("v3 architecture contracts", () => {
 		const base = join(process.cwd(), ".test-runs")
 		await mkdir(base, { recursive: true })
 		const root = await mkdtemp(join(base, "v3-store-"))
+		const originalNow = Date.now
 		try {
+			Date.now = () => 2_000
 			const databaseFile = join(root, "runtime.sqlite")
 			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
 				const store = yield* ObjectDomainStore
@@ -317,9 +326,20 @@ describe("v3 architecture contracts", () => {
 				const status = buildStatusProjection(durable)
 				expect(status.ready).toEqual(["chain/next"])
 				const events = buildEventProjection(chain.value, yield* store.listTransitions(chain, 0))
-				expect(events.transitions).toEqual([{ identity: "settle-and-admit", family: "task-settlement", committedAt: expect.any(Number) }])
+				expect(events.transitions).toEqual([{ identity: "settle-and-admit", family: "task-settlement", cursor: 1, committedAt: 2_000 }])
+				yield* store.commit({
+					identity: "hold-successor",
+					transition: { family: "task-held", task: successorIdentity, expectedRun: null, reason: { kind: "pre-spawn-absence", endpoint: "runner", detail: "missing", observedAt: 2_000 } },
+				})
+				Date.now = () => 1_000
+				yield* store.commit({ identity: "unhold-successor", transition: { family: "task-unhold", task: successorIdentity } })
+				expect(yield* store.listTransitions(chain, 1)).toEqual([
+					{ identity: "hold-successor", family: "task-held", cursor: 2, committedAt: 2_000 },
+					{ identity: "unhold-successor", family: "task-unhold", cursor: 3, committedAt: 1_000 },
+				])
 			}).pipe(Effect.provide(makeObjectDomainStoreLive(databaseFile)))))
 		} finally {
+			Date.now = originalNow
 			await rm(root, { recursive: true, force: true })
 		}
 	})

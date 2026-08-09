@@ -138,7 +138,7 @@ function parseCommand(candidate: unknown): CommandParseResult {
 		return parsed instanceof arkType.errors ? rejectedCommand(parsed.summary) : { kind: "accepted-command", command: parsed }
 	}
 	if (isCommandKind(candidate, "events-read")) {
-		const parsed = arkType({ kind: "'events-read'", chain: ChainBoundary, since: "number", "+": "reject" })(candidate)
+		const parsed = arkType({ kind: "'events-read'", chain: ChainBoundary, since: "number.integer >= 0", "+": "reject" })(candidate)
 		return parsed instanceof arkType.errors ? rejectedCommand(parsed.summary) : { kind: "accepted-command", command: parsed }
 	}
 	if (isCommandKind(candidate, "audit-read")) {
@@ -212,4 +212,3 @@ function rejected(reason: DaemonRequestRejection["reason"], issue: string): Daem
 function rejectedCommand(issue: string): { readonly kind: "rejected"; readonly rejection: DaemonRequestRejection } {
 	return { kind: "rejected", rejection: { kind: "request-rejected", reason: "invalid-command", issues: [issue] } }
 }
-
