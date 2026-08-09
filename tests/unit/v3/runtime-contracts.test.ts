@@ -108,7 +108,7 @@ describe("v3 architecture contracts", () => {
 
 			expect(facts.terminal.kind).toBe("terminal-winner")
 			expect(facts.loss.kind).toBe("terminal-winner")
-			expect(facts.listed.map((fact) => fact.kind)).toEqual(["terminal-winner"])
+			expect(facts.listed.map((record) => ({ identity: record.identity, kind: record.fact.kind }))).toEqual([{ identity: runProviderFactIdentity(run), kind: "terminal-winner" }])
 		} finally {
 			await rm(root, { recursive: true, force: true })
 		}

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Effect, Layer } from "effect"
-import { makeProviderFactStoreLive, makeRunnerProviderLive, RunnerProvider, type RunnerConfig } from "../../../src/v3/provider"
+import { makeProviderFactStoreLive, makeRunnerProviderLive, ProviderFactStore, RunnerProvider, type ProviderFact, type RunnerConfig } from "../../../src/v3/provider"
 
 describe("RunnerProvider endpoint probe", () => {
 	test("does not report a remote descriptor ready from its local executable", async () => {
@@ -76,3 +76,32 @@ function runnerConfig(endpoint: RunnerConfig["endpoint"]): RunnerConfig {
 		maxOutputBytes: 1_024,
 	}
 }
+
+describe("provider fact store", () => {
+	test("lists each durable winner with its committed identity", async () => {
+		const root = await providerRoot()
+		try {
+			const fact: ProviderFact = {
+				kind: "terminal-winner",
+				endpoint: { kind: "runner-endpoint", digest: "endpoint-a" },
+				run: {
+					kind: "run",
+					closure: { kind: "closure", task: { kind: "task", chain: { kind: "chain", value: "chain-a" }, value: "task-a" }, attempt: 0 },
+					value: "run-a",
+				},
+				payload: { ok: true },
+				sessionIdentity: null,
+				observedAt: 1,
+			}
+			const identities = ["chain-a/task-a/0/run-a/step-alpha", "chain-a/task-a/0/run-a/step-beta"] as const
+			const records = await Effect.runPromise(Effect.gen(function*() {
+				const store = yield* ProviderFactStore
+				for (const identity of identities) yield* store.commit(identity, fact)
+				return yield* store.list
+			}).pipe(Effect.provide(makeProviderFactStoreLive(root))))
+			expect(records).toEqual(identities.map((identity) => ({ identity, fact })))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+})
