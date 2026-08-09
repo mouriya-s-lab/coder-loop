@@ -459,7 +459,9 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				return state.settlement
 			})
 			if (JSON.stringify(settlements) !== JSON.stringify(transition.settlements)) reject(transition.family, "settlement-mismatch", "consumer input is not the complete committed settlement vector")
+			const value = { settlements }
 			const digest = createHash("sha256").update(JSON.stringify(settlements)).digest("hex")
+			const valueIdentity = createHash("sha256").update(JSON.stringify(value)).digest("hex")
 			if (
 				transition.state.settlementsDigest !== digest
 				|| taskKey(transition.state.consumerTask) !== taskKey(transition.task.identity)
@@ -480,6 +482,12 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				|| transition.task.input.definition.content.digest !== group.consumer.definition.content.digest
 				|| transition.task.input.definition.product.digest !== group.consumer.definition.product.digest
 			) reject(transition.family, "identity-mismatch", "fixed consumer task does not use the pinned group definition")
+			if (
+				transition.task.input.entrypoint !== group.consumer.entrypoint
+				|| JSON.stringify(transition.task.input.value) !== JSON.stringify(value)
+				|| transition.task.input.valueIdentity !== valueIdentity
+				|| JSON.stringify(transition.task.dependsOn.map(taskKey)) !== JSON.stringify(group.members.map(taskKey))
+			) reject(transition.family, "settlement-mismatch", "fixed consumer task is not derived from the committed settlement vector and group members")
 			if (exists(database, "v3_tasks", "task_key", taskKey(transition.task.identity)) || exists(database, "v3_groups", "group_key", groupKey(transition.consumerGroup.identity))) {
 				reject(transition.family, "already-exists", "fixed consumer task or group already exists")
 			}
