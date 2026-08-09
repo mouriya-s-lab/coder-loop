@@ -169,6 +169,10 @@ function listChains(database: Database): readonly ObjectDomainSnapshot["chain"][
 }
 
 function readSnapshot(database: Database, chain: ObjectDomainSnapshot["chain"]): ObjectDomainSnapshot {
+	return database.transaction(() => readSnapshotInTransaction(database, chain))()
+}
+
+function readSnapshotInTransaction(database: Database, chain: ObjectDomainSnapshot["chain"]): ObjectDomainSnapshot {
 	if (!exists(database, "v3_chains", "chain_key", chain.value)) reject("bootstrap", "not-found", `chain ${chain.value} not found`)
 	const tasks = Object.fromEntries(readIdentityPayloads(database, "v3_tasks", "task_key", chain.value).map((row) => {
 		const parsed = parsePersistedTask(parseJson(row.payload))
@@ -268,7 +272,7 @@ function admit(database: Database, chain: ObjectDomainSnapshot["chain"], request
 	const run = database.transaction((): AdmissionStoreResult => {
 		const replay = matchingTransition(database, identity, transition)
 		if (replay !== null) return { kind: "admitted", admission: { kind: "admitted", task, position: request.position }, commit: replay }
-		const admission = evaluateAdmission(readSnapshot(database, chain), request)
+		const admission = evaluateAdmission(readSnapshotInTransaction(database, chain), request)
 		if (admission.kind === "rejected") return admission
 		const committedTransition: Extract<CommittedTransition, { family: "task-admission" }> = { ...transition, task: admission.task, position: admission.position }
 		applyTransition(database, committedTransition)
@@ -373,7 +377,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			if (task.closure.kind !== "active") reject(transition.family, "state-mismatch", "leased task does not have an active closure")
 			if (taskKey(transition.record.identity.parent) !== taskKey(task.identity) || closureKey(transition.record.parentClosure) !== closureKey(transition.run.closure)) reject(transition.family, "identity-mismatch", "await identity does not belong to leased closure")
 			if (taskKey(transition.record.child) !== taskKey(transition.child.task.identity)) reject(transition.family, "identity-mismatch", "await child identity does not match its admission")
-			const admission = evaluateAdmission(readSnapshot(database, task.identity.chain), transition.child)
+			const admission = evaluateAdmission(readSnapshotInTransaction(database, task.identity.chain), transition.child)
 			if (admission.kind === "rejected") reject(transition.family, "invalid-transition", `await child admission was rejected: ${admission.reason.kind}`)
 			admitTask(database, {
 				fact: transition.child.fact,
