@@ -465,11 +465,50 @@ describe("v3 architecture contracts", () => {
 				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.closure.kind).toBe("unallocated")
 
 				yield* store.commit({ identity: "lease", transition: { family: "lease-acquire", task: identity, run, closure: resources, acquiredAt: 1, expiresAt: 2 } })
+				const settlement = { kind: "returned" as const, value: null }
+				yield* store.commit({ identity: "settle", transition: { family: "task-settlement", task: identity, run, settlement, successors: [] } })
+				yield* store.commit({ identity: "terminate", transition: { family: "group-termination", group, state: { kind: "terminated", reason: "immediate", memberVersion: 1, terminatedAt: 3 } } })
+				yield* store.commit({ identity: "consume", transition: { family: "group-consumption", group, state: { kind: "consumed", consumption: { kind: "consumption", group, value: "done" }, consumedAt: 3 }, settlements: [settlement] } })
 				yield* store.commit({ identity: "freeze", transition: { family: "resource-intent", closure: closureIdentity, action: "freeze-evidence", publication: { kind: "no-work", observedAt: 3 } } })
 				yield* store.commit({ identity: "collect", transition: { family: "resource-intent", closure: closureIdentity, action: "collect", publication: { kind: "no-work", observedAt: 3 } } })
 				const collected = (yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.closure
 				expect(collected).toEqual({ kind: "collected", identity: closureIdentity, basePin: "expected-pin", publication: { kind: "no-work", observedAt: 3 }, collectedAt: expect.any(Number) })
 			}).pipe(Effect.provide(makeObjectDomainStoreLive(join(root, "runtime.sqlite"))))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+	test("closure collection requires a consumed owning group reference", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-collect-"))
+		try {
+			for (const fixture of [
+				{ name: "open-member", consumed: false, member: true, reason: "state-mismatch" },
+				{ name: "consumed-missing-member", consumed: true, member: false, reason: "identity-mismatch" },
+			] as const) {
+				await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+					const store = yield* ObjectDomainStore
+					const chain = { kind: "chain" as const, value: fixture.name }
+					const group = { kind: "group" as const, chain, value: "group" }
+					const identity = { kind: "task" as const, chain, value: "task" }
+					const closure = { kind: "closure" as const, task: identity, attempt: 0 }
+					const publication = { kind: "no-work" as const, observedAt: 1 }
+					const snapshot: ObjectDomainSnapshot = {
+						chain,
+						groups: { [groupKey(group)]: { identity: group, members: fixture.member ? [identity] : [], memberVersion: fixture.member ? 1 : 0, wait: { kind: "none" }, consumer: { kind: "drain" }, state: fixture.consumed ? { kind: "consumed", consumption: { kind: "consumption", group, value: "done" }, consumedAt: 1 } : { kind: "open" } } },
+						tasks: { [taskKey(identity)]: { identity, group, input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: "input" }, dependsOn: [], priority: 0, state: { kind: "settled", settlement: { kind: "returned", value: null }, settledAt: 1 }, closure: { kind: "evidence-frozen", identity: closure, basePin: "base", branch: "coder-loop/v3/test", worktree: "/worktree", scratch: "/scratch", publication } } },
+						awaits: {},
+						admittedFacts: {},
+					}
+					yield* store.bootstrap(snapshot)
+					const result = yield* Effect.either(store.commit({ identity: `collect:${fixture.name}`, transition: { family: "resource-intent", closure, action: "collect", publication } }))
+					expect(result._tag).toBe("Left")
+					if (result._tag === "Left") expect(result.left).toMatchObject({ kind: "transition-rejected", reason: fixture.reason })
+					const after = yield* store.readSnapshot(chain)
+					expect(after.tasks[taskKey(identity)]?.closure.kind).toBe("evidence-frozen")
+				}).pipe(Effect.provide(makeObjectDomainStoreLive(join(root, `${fixture.name}.sqlite`))))))
+			}
 		} finally {
 			await rm(root, { recursive: true, force: true })
 		}

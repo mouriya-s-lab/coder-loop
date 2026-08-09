@@ -7,6 +7,7 @@ import {
 	type PublicationEvidence,
 	type RunIdentity,
 	type Task,
+	type TaskGroup,
 } from "./object-domain"
 import { ProviderFactStore, runProviderFactIdentity, type ProviderFact, type ProviderFactStoreError } from "./provider"
 import { RepositoryGit, type GitServiceError } from "./git-service"
@@ -54,7 +55,7 @@ export function makeRuntimeRecoveryLive(leaseMs: number): Layer.Layer<RuntimeRec
 		),
 		collect: (chains) => Effect.map(
 			Effect.forEach(chains, (chain) => Effect.flatMap(store.readSnapshot(chain), (snapshot) => Effect.forEach(
-				Object.values(snapshot.tasks).filter((task) => task.closure.kind === "evidence-frozen"),
+				Object.values(snapshot.tasks).filter((task) => isCollectEligible(snapshot.groups[groupKey(task.group)], task)),
 				(task) => collectTask(store, repository, task),
 				{ concurrency: 1 },
 			)), { concurrency: 1 }),
@@ -133,6 +134,12 @@ function collectTask(store: typeof ObjectDomainStore.Service, repository: typeof
 
 function isFreezeEligible(groupState: string | undefined, task: Task): boolean {
 	return groupState === "consumed" && task.state.kind === "settled" && (task.closure.kind === "active" || task.closure.kind === "suspended")
+}
+
+function isCollectEligible(group: TaskGroup | undefined, task: Task): boolean {
+	return group?.state.kind === "consumed"
+		&& group.members.some((member) => taskKey(member) === taskKey(task.identity))
+		&& task.closure.kind === "evidence-frozen"
 }
 
 function authorityFor(run: Extract<Task["state"], { readonly kind: "leased" }>["run"]): import("./context").AgentRunAuthority {
