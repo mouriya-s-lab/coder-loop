@@ -46,6 +46,7 @@ export type HookExecutionOutcome =
 	| { readonly kind: "timeout"; readonly signal: "SIGTERM" | "SIGKILL" }
 	| { readonly kind: "signal"; readonly signal: string }
 	| { readonly kind: "spawn-failure"; readonly message: string }
+	| { readonly kind: "crash-unknown" }
 
 export type HookExecutionAudit =
 	| {
@@ -112,10 +113,10 @@ export function makeHookRuntimeLive(root: string, declarations: readonly HookDec
 			if (!state.accepting) throw new Error("hook runtime is shutting down")
 			const pending = (await listDeliveries(root)).filter((delivery) => delivery.status === "pending")
 			const byId = new Map(declarations.map((declaration) => [declaration.id, declaration]))
-			return Promise.all(pending.map((delivery) => {
+			return Promise.all(pending.map(async (delivery) => {
 				const declaration = byId.get(delivery.hookId)
 				if (declaration === undefined) throw new Error(`hook declaration ${delivery.hookId} is unavailable for pending delivery ${delivery.identity}`)
-				return executeDelivery(root, declaration, delivery, state)
+				return executeDelivery(root, declaration, await closeOrphanExecutions(root, delivery, Date.now()), state)
 			}))
 		})),
 		listAudit: hookEffect("list-audit", () => listDeliveries(root)),
@@ -125,6 +126,19 @@ export function makeHookRuntimeLive(root: string, declarations: readonly HookDec
 }
 
 type PersistedHookDelivery = Omit<HookDeliveryAudit, "status" | "executions">
+
+async function closeOrphanExecutions(root: string, delivery: HookDeliveryAudit, closedAt: number): Promise<HookDeliveryAudit> {
+	const executions = delivery.executions.map((execution): HookExecutionAudit => execution.kind === "closed"
+		? execution
+		: { ...execution, kind: "closed", closedAt, outcome: { kind: "crash-unknown" } })
+	await Promise.all(executions.map((execution, index) => execution === delivery.executions[index]
+		? Promise.resolve()
+		: atomicWrite(executionPath(root, execution), execution)))
+	return {
+		...delivery,
+		executions,
+	}
+}
 
 async function deliver(root: string, declaration: HookDeclaration, projection: HookProjection, state: HookRuntimeState): Promise<HookDeliveryAudit> {
 	const identity = deliveryIdentity(declaration.id, projection)
@@ -296,6 +310,7 @@ const HookOutcomeBoundary = arkType.or(
 	{ kind: "'timeout'", signal: "'SIGTERM' | 'SIGKILL'" },
 	{ kind: "'signal'", signal: "string" },
 	{ kind: "'spawn-failure'", message: "string" },
+	{ kind: "'crash-unknown'" },
 )
 const HookExecutionBoundary = arkType.or(
 	{ kind: "'started'", identity: "string", deliveryIdentity: "string", startedAt: "number" },
