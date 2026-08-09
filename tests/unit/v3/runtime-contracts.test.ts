@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createServer } from "node:net"
 import { Effect, Layer } from "effect"
@@ -263,6 +263,62 @@ describe("v3 architecture contracts", () => {
 				termGraceMs: 500,
 				maxOutputBytes: 1_048_576,
 			}))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	test("Git closure cleanup rejects paths outside its canonical workspace namespace", async () => {
+		const git = Bun.which("git")
+		expect(git).not.toBeNull()
+		if (git === null) return
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-git-cleanup-"))
+		const repository = join(root, "repository")
+		const workspaceRoot = join(root, "workspaces")
+		const outsideRoot = join(root, "outside")
+		const run = (...argv: string[]): void => {
+			const outcome = Bun.spawnSync({ cmd: [git, ...argv], cwd: root, stdout: "pipe", stderr: "pipe" })
+			if (outcome.exitCode !== 0) throw new Error(new TextDecoder().decode(outcome.stderr))
+		}
+		try {
+			await mkdir(repository)
+			await mkdir(join(workspaceRoot, "closures"), { recursive: true })
+			await mkdir(join(outsideRoot, "worktree"), { recursive: true })
+			await writeFile(join(outsideRoot, "marker"), "keep")
+			run("-C", repository, "init")
+			run("-C", repository, "config", "user.email", "v3-test@example.invalid")
+			run("-C", repository, "config", "user.name", "v3 test")
+			await writeFile(join(repository, "seed.txt"), "seed\n")
+			run("-C", repository, "add", "seed.txt")
+			run("-C", repository, "commit", "-m", "seed")
+			const config = { repository, workspaceRoot: join(workspaceRoot, "..", "workspaces"), executable: git, env: {}, timeoutMs: 5_000, termGraceMs: 500, maxOutputBytes: 1_048_576 }
+			const identity = { kind: "closure" as const, task: { kind: "task" as const, chain: { kind: "chain" as const, value: "chain" }, value: "root" }, attempt: 0 }
+			const outsideClosure = { kind: "active" as const, identity, basePin: "base", branch: "coder-loop/v3/outside", worktree: join(outsideRoot, "worktree"), scratch: join(outsideRoot, "scratch") }
+			const outsideExit = await Effect.runPromiseExit(Effect.gen(function*() {
+				const service = yield* RepositoryGit
+				yield* service.discard(outsideClosure)
+			}).pipe(Effect.provide(makeRepositoryGitLive(config))))
+			expect(outsideExit._tag).toBe("Failure")
+			expect(await Bun.file(join(outsideRoot, "marker")).exists()).toBe(true)
+			const frozenOutsideClosure = { ...outsideClosure, kind: "evidence-frozen" as const, publication: { kind: "no-work" as const, observedAt: 1 } }
+			const collectExit = await Effect.runPromiseExit(Effect.gen(function*() {
+				const service = yield* RepositoryGit
+				yield* service.collect(frozenOutsideClosure)
+			}).pipe(Effect.provide(makeRepositoryGitLive(config))))
+			expect(collectExit._tag).toBe("Failure")
+			expect(await Bun.file(join(outsideRoot, "marker")).exists()).toBe(true)
+
+			const digest = "a".repeat(64)
+			await symlink(outsideRoot, join(workspaceRoot, "closures", digest))
+			const symlinkClosure = { ...outsideClosure, branch: "coder-loop/v3/symlink", worktree: join(workspaceRoot, "closures", digest, "worktree"), scratch: join(workspaceRoot, "closures", digest, "scratch") }
+			const symlinkExit = await Effect.runPromiseExit(Effect.gen(function*() {
+				const service = yield* RepositoryGit
+				yield* service.discard(symlinkClosure)
+			}).pipe(Effect.provide(makeRepositoryGitLive(config))))
+			expect(symlinkExit._tag).toBe("Failure")
+			expect(await Bun.file(join(outsideRoot, "marker")).exists()).toBe(true)
 		} finally {
 			await rm(root, { recursive: true, force: true })
 		}
