@@ -231,7 +231,7 @@ function listTransitions(database: Database, chain: ObjectDomainSnapshot["chain"
 	const boundary = arkType({
 		cursor: "number.integer > 0",
 		identity_key: "string",
-		family: "'task-admission' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
+		family: "'task-admission' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'await-consumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
 		committed_at: "number",
 		"+": "reject",
 	})
