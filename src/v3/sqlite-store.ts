@@ -328,6 +328,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 				if (requireTask(database, dependency, transition.family).state.kind !== "settled") reject(transition.family, "dependency-unsettled", taskKey(dependency))
 			}
 			if (taskKey(transition.run.closure.task) !== taskKey(task.identity) || closureKey(transition.closure.identity) !== closureKey(transition.run.closure)) reject(transition.family, "identity-mismatch", "run, closure, and task identities disagree")
+			if (transition.closure.basePin !== task.input.basePin) reject(transition.family, "identity-mismatch", "closure base pin differs from the task input base pin")
 			if (transition.expiresAt <= transition.acquiredAt) reject(transition.family, "invalid-transition", "lease expiry must follow acquisition")
 			updateTask(database, { ...task, state: { kind: "leased", run: transition.run, acquiredAt: transition.acquiredAt, expiresAt: transition.expiresAt }, closure: transition.closure })
 			return
@@ -510,7 +511,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			}
 			if (task.closure.kind !== "evidence-frozen") reject(transition.family, "state-mismatch", "collect requires frozen evidence")
 			if (transition.publication !== null && JSON.stringify(transition.publication) !== JSON.stringify(task.closure.publication)) reject(transition.family, "publication-mismatch", "collection evidence differs from frozen evidence")
-			updateTask(database, { ...task, closure: { kind: "collected", identity: transition.closure, publication: task.closure.publication, collectedAt: Date.now() } })
+			updateTask(database, { ...task, closure: { kind: "collected", identity: transition.closure, basePin: task.closure.basePin, publication: task.closure.publication, collectedAt: Date.now() } })
 			return
 	}
 }
