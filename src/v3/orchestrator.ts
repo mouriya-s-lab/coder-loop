@@ -263,8 +263,15 @@ function incompleteGroup(group: TaskGroup): Effect.Effect<never, ObjectStoreErro
 }
 
 function consumerAllowsCompletion(group: TaskGroup, value: JsonValue): boolean {
-	if (group.consumer.kind === "validator") return true
-	return typeof value === "object" && value !== null && "kind" in value && value.kind === "advance"
+	switch (group.consumer.kind) {
+		case "drain":
+			throw new Error("drain groups do not materialize consumer tasks")
+		case "validator":
+			return true
+		case "finalizer":
+			return typeof value === "object" && value !== null && "kind" in value && value.kind === "advance"
+	}
+	return assertNever(group.consumer)
 }
 
 function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<string, Task>>, settlements: readonly TaskSettlement[], now: number): {
@@ -272,8 +279,8 @@ function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<strin
 	readonly group: TaskGroup
 	readonly task: Task
 } {
-	if (group.consumer.kind === "drain") throw new Error("drain groups do not materialize consumer tasks")
-	const suffix = `${group.identity.value}/$${group.consumer.kind}/${group.memberVersion}`
+	const consumer = fixedGroupConsumer(group.consumer)
+	const suffix = `${group.identity.value}/$${consumer.kind}/${group.memberVersion}`
 	const consumerGroup: GroupIdentity = { kind: "group", chain: group.identity.chain, value: `${suffix}/group` }
 	const consumerTask = { kind: "task" as const, chain: group.identity.chain, value: `${suffix}/task` }
 	const settlementsDigest = createHash("sha256").update(JSON.stringify(settlements)).digest("hex")
@@ -285,7 +292,7 @@ function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<strin
 	const task: Task = {
 		identity: consumerTask,
 		group: consumerGroup,
-		input: { definition: group.consumer.definition, entrypoint: group.consumer.entrypoint, basePin, value, valueIdentity },
+		input: { definition: consumer.definition, entrypoint: consumer.entrypoint, basePin, value, valueIdentity },
 		dependsOn: [...group.members],
 		priority: Math.max(...members.map((member) => member.priority)),
 		state: { kind: "ready" },
@@ -296,6 +303,21 @@ function materializeGroupConsumer(group: TaskGroup, tasks: Readonly<Record<strin
 		group: { identity: consumerGroup, members: [consumerTask], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } },
 		task,
 	}
+}
+
+function fixedGroupConsumer(consumer: TaskGroup["consumer"]): Exclude<TaskGroup["consumer"], { readonly kind: "drain" }> {
+	switch (consumer.kind) {
+		case "drain":
+			throw new Error("drain groups do not materialize consumer tasks")
+		case "validator":
+		case "finalizer":
+			return consumer
+	}
+	return assertNever(consumer)
+}
+
+function assertNever(value: never): never {
+	throw new Error(`unreachable variant: ${JSON.stringify(value)}`)
 }
 
 function reconcileLifecycle(recovery: RecoveryService, chains: readonly ChainIdentity[]): Effect.Effect<readonly GarbageCollectionDecision[], RecoveryError> {

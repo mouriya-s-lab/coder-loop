@@ -503,6 +503,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			return
 	}
 }
+	return assertNever(transition)
 }
 
 function admitTask(database: Database, admission: Extract<CommittedTransition, { family: "task-admission" }> | Extract<CommittedTransition, { family: "task-settlement" }>["successors"][number], family: CommittedTransition["family"]): void {
@@ -604,6 +605,11 @@ function transitionChain(transition: CommittedTransition): string {
 		case "group-consumption": return transition.group.chain.value
 		case "resource-intent": return transition.closure.task.chain.value
 	}
+	return assertNever(transition)
+}
+
+function assertNever(value: never): never {
+	throw new Error(`unreachable variant: ${JSON.stringify(value)}`)
 }
 
 function awaitKey(identity: { readonly parent: Task["identity"]; readonly attempt: number; readonly site: string }): string {
