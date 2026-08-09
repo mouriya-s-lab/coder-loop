@@ -650,6 +650,8 @@ describe("v3 architecture contracts", () => {
 					awaits: {},
 					admittedFacts: {},
 				})
+				const allocation = { kind: "allocating" as const, identity: closureIdentity, allocation: "allocation", basePin: "expected-pin", branch: "branch" }
+				yield* store.commit({ identity: "allocation-start", transition: { family: "closure-allocation-start", task: identity, allocation } })
 				const resources = { kind: "active" as const, identity: closureIdentity, basePin: "expected-pin", branch: "branch", worktree: "/worktree", scratch: "/scratch" }
 				const rejected = yield* Effect.either(store.commit({
 					identity: "wrong-pin",
@@ -657,7 +659,7 @@ describe("v3 architecture contracts", () => {
 				}))
 				expect(rejected._tag).toBe("Left")
 				if (rejected._tag === "Left") expect(rejected.left).toEqual(expect.objectContaining({ kind: "transition-rejected", family: "lease-acquire", reason: "identity-mismatch" }))
-				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.closure.kind).toBe("unallocated")
+				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.closure.kind).toBe("allocating")
 
 				yield* store.commit({ identity: "lease", transition: { family: "lease-acquire", task: identity, run, closure: resources, acquiredAt: 1, expiresAt: 2 } })
 				const settlement = { kind: "returned" as const, value: null }

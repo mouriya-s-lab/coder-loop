@@ -16,6 +16,7 @@ import { ObjectDomainStore, type ObjectStoreError } from "./sqlite-store"
 export type RecoveryDecision =
 	| { readonly kind: "provider-fact-ready"; readonly task: Task["identity"]; readonly fact: Extract<ProviderFact, { kind: "terminal-winner" | "active-loss" }> }
 	| { readonly kind: "unknown-held"; readonly task: Task["identity"]; readonly detail: string }
+	| { readonly kind: "allocation-cleaned"; readonly task: Task["identity"]; readonly allocation: string }
 
 export type GarbageCollectionDecision =
 	| { readonly kind: "evidence-frozen"; readonly closure: ClosureIdentity; readonly publication: PublicationEvidence }
@@ -23,6 +24,7 @@ export type GarbageCollectionDecision =
 export type RecoveryError = ObjectStoreError | ProviderFactStoreError | GitServiceError
 
 export type RecoveryService = {
+	readonly recoverAllocations: (chains: readonly ChainIdentity[]) => Effect.Effect<readonly Extract<RecoveryDecision, { kind: "allocation-cleaned" }>[], RecoveryError>
 	readonly recoverExpiredLeases: (chains: readonly ChainIdentity[], now: number) => Effect.Effect<readonly RecoveryDecision[], RecoveryError>
 	readonly freezeEvidence: (chains: readonly ChainIdentity[]) => Effect.Effect<readonly GarbageCollectionDecision[], RecoveryError>
 	readonly collect: (chains: readonly ChainIdentity[]) => Effect.Effect<readonly GarbageCollectionDecision[], RecoveryError>
@@ -37,6 +39,14 @@ export function makeRuntimeRecoveryLive(leaseMs: number): Layer.Layer<RuntimeRec
 	const facts = yield* ProviderFactStore
 	const repository = yield* RepositoryGit
 	return {
+		recoverAllocations: (chains) => Effect.map(
+			Effect.forEach(chains, (chain) => Effect.flatMap(store.readSnapshot(chain), (snapshot) => Effect.forEach(
+				Object.values(snapshot.tasks).filter((task): task is Task & { readonly closure: Extract<Task["closure"], { kind: "allocating" }> } => task.closure.kind === "allocating"),
+				(task) => cleanupAllocation(store, repository, task),
+				{ concurrency: 1 },
+			)), { concurrency: 1 }),
+			(decisions) => decisions.flat(),
+		),
 		recoverExpiredLeases: (chains, now) => Effect.map(
 			Effect.forEach(chains, (chain) => Effect.flatMap(store.readSnapshot(chain), (snapshot) => Effect.forEach(
 				Object.values(snapshot.tasks).filter((task) => isRecoverable(task, now)),
@@ -63,6 +73,17 @@ export function makeRuntimeRecoveryLive(leaseMs: number): Layer.Layer<RuntimeRec
 		),
 	}
 	}))
+}
+
+function cleanupAllocation(store: typeof ObjectDomainStore.Service, repository: typeof RepositoryGit.Service, task: Task & { readonly closure: Extract<Task["closure"], { kind: "allocating" }> }): Effect.Effect<Extract<RecoveryDecision, { kind: "allocation-cleaned" }>, ObjectStoreError | GitServiceError> {
+	const allocation = task.closure
+	return Effect.as(
+		Effect.zipRight(
+			repository.discardAllocation(allocation),
+			store.commit({ identity: `allocation-cleaned:${taskKey(task.identity)}:${allocation.allocation}`, transition: { family: "closure-allocation-cleanup", task: task.identity, allocation } }),
+		),
+		{ kind: "allocation-cleaned", task: task.identity, allocation: allocation.allocation },
+	)
 }
 
 function recoverTask(store: typeof ObjectDomainStore.Service, facts: typeof ProviderFactStore.Service, task: Task, now: number, leaseMs: number): Effect.Effect<RecoveryDecision, ObjectStoreError | ProviderFactStoreError> {

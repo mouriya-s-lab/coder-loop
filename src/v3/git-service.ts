@@ -32,6 +32,7 @@ export type GitService = {
 	readonly resolveBasePin: (ref: string) => Effect.Effect<string, GitServiceError>
 	readonly prepare: (request: PrepareClosureRequest) => Effect.Effect<Extract<ClosureResourceState, { kind: "active" }>, GitServiceError>
 	readonly discard: (closure: Extract<ClosureResourceState, { kind: "active" }>) => Effect.Effect<void, GitServiceError>
+	readonly discardAllocation: (allocation: Extract<ClosureResourceState, { kind: "allocating" }>) => Effect.Effect<void, GitServiceError>
 	readonly publication: (closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>) => Effect.Effect<PublicationEvidence, GitServiceError>
 	readonly collect: (closure: Extract<ClosureResourceState, { kind: "evidence-frozen" }>) => Effect.Effect<void, GitServiceError>
 }
@@ -47,10 +48,30 @@ export function makeRepositoryGitLive(config: GitServiceConfig): Layer.Layer<Rep
 			resolveBasePin: (ref) => serialized(gitText(normalizedConfig, "resolve-base-pin", ["-C", normalizedConfig.repository, "rev-parse", `${ref}^{commit}`])),
 			prepare: (request) => serialized(prepareClosure(normalizedConfig, request)),
 			discard: (closure) => serialized(discardClosure(normalizedConfig, closure)),
+			discardAllocation: (allocation) => serialized(discardAllocation(normalizedConfig, allocation)),
 			publication: (closure) => serialized(observePublication(normalizedConfig, closure)),
 			collect: (closure) => serialized(collectClosure(normalizedConfig, closure)),
 		}
 	}))
+}
+
+function discardAllocation(config: GitServiceConfig, allocation: Extract<ClosureResourceState, { kind: "allocating" }>): Effect.Effect<void, GitServiceError> {
+	const root = closureRoot(config.workspaceRoot, allocation.identity, allocation.allocation)
+	const worktree = join(root, "worktree")
+	return Effect.gen(function*() {
+		if (!allocation.branch.startsWith("coder-loop/v3/")) return yield* Effect.fail<GitServiceError>({ kind: "git-service-error", operation: "discard-allocation", message: "allocation branch is outside the engine namespace" })
+		const worktrees = yield* gitText(config, "worktree-list", ["-C", config.repository, "worktree", "list", "--porcelain"])
+		if (worktrees.split("\n").includes(`worktree ${worktree}`)) {
+			const branch = yield* gitText(config, "resolve-allocation-branch", ["-C", worktree, "branch", "--show-current"])
+			const tip = yield* gitText(config, "resolve-allocation-tip", ["-C", worktree, "rev-parse", "HEAD"])
+			if (branch !== allocation.branch || tip !== allocation.basePin) return yield* Effect.fail<GitServiceError>({ kind: "git-service-error", operation: "discard-allocation", message: "allocation residue does not match its durable branch and base pin" })
+			yield* git(config, "worktree-remove", ["-C", config.repository, "worktree", "remove", "--force", worktree])
+		}
+		const branchTip = yield* gitOptionalText(config, ["-C", config.repository, "rev-parse", `refs/heads/${allocation.branch}`])
+		if (branchTip !== null && branchTip !== allocation.basePin) return yield* Effect.fail<GitServiceError>({ kind: "git-service-error", operation: "discard-allocation", message: "allocation branch tip does not match its durable base pin" })
+		yield* gitOptionalText(config, ["-C", config.repository, "branch", "-D", allocation.branch])
+		yield* fsEffect("remove-unclaimed-allocation-root", () => rm(root, { recursive: true, force: true }))
+	})
 }
 
 function prepareClosure(config: GitServiceConfig, request: PrepareClosureRequest): Effect.Effect<Extract<ClosureResourceState, { kind: "active" }>, GitServiceError> {
