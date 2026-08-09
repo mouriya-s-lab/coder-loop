@@ -73,6 +73,7 @@ const RuntimeConfigBoundary = arkType({
 		"+": "reject",
 	},
 	hooks: HookBoundary.array(),
+	hookShutdownWaitMs: "number.integer > 0",
 	leaseMs: "number.integer > 0",
 	maxConcurrency: "number.integer > 0",
 	cycleMs: "number.integer > 0",
