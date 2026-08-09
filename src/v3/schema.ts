@@ -1,5 +1,5 @@
 import { scope, type as arkType } from "arktype"
-import type { PresetDefinition, JsonValue } from "./definition"
+import type { CompiledDefinitionProduct, PresetDefinition, JsonValue } from "./definition"
 import { parseDeclaredValue } from "./definition"
 
 const v3Types = scope({
@@ -62,9 +62,17 @@ const v3Types = scope({
 		consumers: "ValueConsumer[]",
 		task: "RecursiveTaskDefinition",
 	},
+	CompiledProductIdentity: { kind: "'compiled-product'", digest: "string > 0" },
+	CompiledDefinitionProduct: {
+		identity: "CompiledProductIdentity",
+		definition: "PresetDefinition",
+		taskIndex: { "[string]": "RecursiveTaskDefinition" },
+		valueIndex: { "[string]": "DeclaredValue" },
+	},
 }).export()
 
 export const PresetDefinitionBoundary = v3Types.PresetDefinition
+export const CompiledDefinitionProductBoundary = v3Types.CompiledDefinitionProduct
 export const PresetDefinitionSchemaVersion = 3
 
 export type PresetDefinitionParseResult =
@@ -90,6 +98,11 @@ export function parsePresetDefinition(candidate: unknown): PresetDefinitionParse
 		}
 	}
 	return { kind: "accepted", definition: parsed }
+}
+
+export function parseCompiledDefinitionProduct(candidate: unknown): CompiledDefinitionProduct | null {
+	const parsed = CompiledDefinitionProductBoundary(candidate)
+	return parsed instanceof arkType.errors ? null : parsed
 }
 
 export function publicPresetDefinitionSchema(): JsonValue {
