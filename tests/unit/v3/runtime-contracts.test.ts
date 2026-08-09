@@ -25,8 +25,10 @@ import {
 	groupKey,
 	taskKey,
 	type ObjectDomainSnapshot,
+	type RunIdentity,
 	type Task,
 } from "../../../src/v3/object-domain"
+import { makeProviderFactStoreLive, ProviderFactStore, runProviderFactIdentity } from "../../../src/v3/provider"
 import { makeRepositoryGitLive, RepositoryGit } from "../../../src/v3/git-service"
 import { buildEventProjection, buildStatusProjection } from "../../../src/v3/projection"
 import { selectReadyTask } from "../../../src/v3/scheduler"
@@ -71,6 +73,31 @@ const authority: AgentRunAuthority = {
 }
 
 describe("v3 architecture contracts", () => {
+	test("provider terminal and loss facts share one durable winner per run", async () => {
+		const root = await mkdtemp("/tmp/coder-loop-provider-winner-")
+		const run: RunIdentity = {
+			kind: "run",
+			closure: { kind: "closure", task: { kind: "task", chain: { kind: "chain", value: "winner" }, value: "task" }, attempt: 0 },
+			value: "run",
+		}
+		const endpoint = { kind: "runner-endpoint" as const, digest: "endpoint" }
+		try {
+			const facts = await Effect.runPromise(Effect.gen(function*() {
+				const store = yield* ProviderFactStore
+				const identity = runProviderFactIdentity(run)
+				const terminal = yield* store.commit(identity, { kind: "terminal-winner", endpoint, run, payload: "result", sessionIdentity: null, observedAt: 1 })
+				const loss = yield* store.commit(identity, { kind: "active-loss", endpoint, run, reason: "timeout", detail: "late loss", observedAt: 2 })
+				return { terminal, loss, listed: yield* store.list }
+			}).pipe(Effect.provide(makeProviderFactStoreLive(root))))
+
+			expect(facts.terminal.kind).toBe("terminal-winner")
+			expect(facts.loss.kind).toBe("terminal-winner")
+			expect(facts.listed.map((fact) => fact.kind)).toEqual(["terminal-winner"])
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
 	test("task selection excludes every non-ready state", () => {
 		const chain = { kind: "chain" as const, value: "selection" }
 		const group = { kind: "group" as const, chain, value: "root" }
