@@ -86,11 +86,10 @@ function startSubprocess(spec: SubprocessSpec): SubprocessExecution {
 		terminate()
 	}, spec.timeoutMs)
 	const outcome = (async (): Promise<SubprocessOutcome> => {
-		const exitCode = await processHandle.exited
+		const [exitCode, stdout, stderr] = await Promise.all([processHandle.exited, stdoutPromise, stderrPromise])
 		clearTimeout(timeout)
 		clearTimeout(killTimer)
 		spec.abortSignal?.removeEventListener("abort", abort)
-		const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise])
 		const closedAt = Date.now()
 		if (timedOut) return { kind: "timeout", signal: escalated ? "SIGKILL" : "SIGTERM", stdout, stderr, startedAt, closedAt }
 		if (processHandle.signalCode !== null) return { kind: "signal", signal: processHandle.signalCode, stdout, stderr, startedAt, closedAt }
