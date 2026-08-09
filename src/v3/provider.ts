@@ -136,17 +136,34 @@ export function buildRunnerArgv(config: RunnerConfig, invocation: RunnerInvocati
 function probeEndpoint(config: RunnerConfig, endpoint: EndpointIdentity): Effect.Effect<EndpointProbe> {
 	return Effect.promise(async () => {
 		const observedAt = Date.now()
+		const descriptor = endpointDescriptorDetail(config.endpoint)
 		try {
 			const executable = Bun.which(config.executable) ?? config.executable
 			await access(executable, constants.X_OK)
-			return { kind: "ready", endpoint, evidence: { observedAt, detail: `executable:${executable}` } }
+			switch (config.endpoint.transport) {
+				case "local-process":
+					return hasExternalEndpointLocator(config.endpoint)
+						? { kind: "unknown", endpoint, evidence: { observedAt, detail: `no-side-effect-probe-contract:${descriptor};executable:${executable}` } }
+						: { kind: "ready", endpoint, evidence: { observedAt, detail: `endpoint:${descriptor};executable:${executable}` } }
+				case "remote-api":
+				case "session":
+					return { kind: "unknown", endpoint, evidence: { observedAt, detail: `no-side-effect-probe-contract:${descriptor};executable:${executable}` } }
+			}
 		} catch (error) {
 			const code = isBoundaryRecord(error) && typeof error.code === "string" ? error.code : "unknown"
 			return code === "ENOENT" || code === "EACCES"
-				? { kind: "absent", endpoint, evidence: { observedAt, detail: `${code}:${config.executable}` } }
-				: { kind: "unknown", endpoint, evidence: { observedAt, detail: `${code}:${config.executable}` } }
+				? { kind: "absent", endpoint, evidence: { observedAt, detail: `${code}:${config.executable};endpoint:${descriptor}` } }
+				: { kind: "unknown", endpoint, evidence: { observedAt, detail: `${code}:${config.executable};endpoint:${descriptor}` } }
 		}
 	})
+}
+
+function hasExternalEndpointLocator(endpoint: EndpointDescriptor): boolean {
+	return endpoint.server !== "" || endpoint.principal !== "" || endpoint.machine !== "" || endpoint.profile !== ""
+}
+
+function endpointDescriptorDetail(endpoint: EndpointDescriptor): string {
+	return JSON.stringify(endpoint)
 }
 
 function buildSubprocessSpec(config: RunnerConfig, invocation: RunnerInvocation): SubprocessSpec {
