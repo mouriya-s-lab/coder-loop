@@ -28,6 +28,7 @@ import {
 } from "../../../src/v3/object-domain"
 import { makeRepositoryGitLive, RepositoryGit } from "../../../src/v3/git-service"
 import { buildEventProjection, buildStatusProjection } from "../../../src/v3/projection"
+import { selectReadyTask } from "../../../src/v3/scheduler"
 import { makeObjectDomainStoreLive, ObjectDomainStore } from "../../../src/v3/sqlite-store"
 
 const definition: PresetDefinition = {
@@ -69,6 +70,35 @@ const authority: AgentRunAuthority = {
 }
 
 describe("v3 architecture contracts", () => {
+	test("task selection excludes every non-ready state", () => {
+		const chain = { kind: "chain" as const, value: "selection" }
+		const group = { kind: "group" as const, chain, value: "root" }
+		const makeTask = (value: string, state: Task["state"], priority: number): Task => ({
+			identity: { kind: "task", chain, value },
+			group,
+			input: {
+				definition: {
+					kind: "published-definition",
+					content: { kind: "definition-content", digest: "content" },
+					product: { kind: "compiled-product", digest: "product" },
+				},
+				entrypoint: "root",
+				basePin: "base",
+				value: null,
+				valueIdentity: value,
+			},
+			dependsOn: [],
+			priority,
+			state,
+			closure: { kind: "unallocated" },
+		})
+		const ready = makeTask("ready", { kind: "ready" }, 1)
+		const held = makeTask("held", { kind: "held", reason: { kind: "pre-spawn-absence", endpoint: "runner", detail: "missing", observedAt: 1 } }, 99)
+
+		expect(selectReadyTask([{ chain, tasks: [held, ready] }])?.task).toBe(ready)
+		expect(selectReadyTask([{ chain, tasks: [held] }])).toBeNull()
+	})
+
 	test("compile remains incomplete until every declared asset resolves", () => {
 		const compiled = compilePresetDefinition(definition)
 		expect(compiled.kind).toBe("compiled")
