@@ -32,6 +32,7 @@ import {
 
 const SCHEMA_VERSION = 3
 const PayloadRowBoundary = arkType({ payload: "string" })
+const IdentityPayloadRowBoundary = arkType({ identity_key: "string", chain_key: "string", payload: "string" })
 const IdentityRowBoundary = arkType({ identity_key: "string" })
 const TransitionRowBoundary = arkType({ chain_key: "string", family: "string", payload: "string" })
 
@@ -169,20 +170,26 @@ function listChains(database: Database): readonly ObjectDomainSnapshot["chain"][
 
 function readSnapshot(database: Database, chain: ObjectDomainSnapshot["chain"]): ObjectDomainSnapshot {
 	if (!exists(database, "v3_chains", "chain_key", chain.value)) reject("bootstrap", "not-found", `chain ${chain.value} not found`)
-	const tasks = Object.fromEntries(readPayloads(database, "v3_tasks", chain.value).map((payload) => {
-		const parsed = parsePersistedTask(parseJson(payload))
+	const tasks = Object.fromEntries(readIdentityPayloads(database, "v3_tasks", "task_key", chain.value).map((row) => {
+		const parsed = parsePersistedTask(parseJson(row.payload))
 		if (parsed.kind === "rejected") throw persistedShape(parsed.error)
-		return [taskKey(parsed.value.identity), parsed.value]
+		const identity = taskKey(parsed.value.identity)
+		requirePersistedIdentity("task", row, identity, parsed.value.identity.chain.value)
+		return [identity, parsed.value]
 	}))
-	const groups = Object.fromEntries(readPayloads(database, "v3_groups", chain.value).map((payload) => {
-		const parsed = parsePersistedGroup(parseJson(payload))
+	const groups = Object.fromEntries(readIdentityPayloads(database, "v3_groups", "group_key", chain.value).map((row) => {
+		const parsed = parsePersistedGroup(parseJson(row.payload))
 		if (parsed.kind === "rejected") throw persistedShape(parsed.error)
-		return [groupKey(parsed.value.identity), parsed.value]
+		const identity = groupKey(parsed.value.identity)
+		requirePersistedIdentity("group", row, identity, parsed.value.identity.chain.value)
+		return [identity, parsed.value]
 	}))
-	const awaits = Object.fromEntries(readPayloads(database, "v3_awaits", chain.value).map((payload) => {
-		const parsed = parsePersistedAwait(parseJson(payload))
+	const awaits = Object.fromEntries(readIdentityPayloads(database, "v3_awaits", "await_key", chain.value).map((row) => {
+		const parsed = parsePersistedAwait(parseJson(row.payload))
 		if (parsed.kind === "rejected") throw persistedShape(parsed.error)
-		return [awaitKey(parsed.value.identity), parsed.value]
+		const identity = awaitKey(parsed.value.identity)
+		requirePersistedIdentity("await", row, identity, parsed.value.identity.parent.chain.value)
+		return [identity, parsed.value]
 	}))
 	const admittedFacts = Object.fromEntries(database.query<BoundaryRecord, SqlParams>("SELECT fact_key AS identity_key,task_key FROM v3_facts WHERE chain_key=$chain").all({ chain: chain.value }).map((row) => {
 		const candidate = arkType({ identity_key: "string", task_key: "string" })(row)
@@ -573,8 +580,27 @@ function updateAwait(database: Database, chain: string, record: ObjectDomainSnap
 	database.query<never, SqlParams>("UPDATE v3_awaits SET chain_key=$chain,payload=$payload WHERE await_key=$await").run({ await: awaitKey(record.identity), chain, payload: encodePersisted(record) })
 }
 
-function readPayloads(database: Database, table: "v3_tasks" | "v3_groups" | "v3_awaits", chain: string): string[] {
-	return database.query<BoundaryRecord, SqlParams>(`SELECT payload FROM ${table} WHERE chain_key=$chain`).all({ chain }).map((row) => PayloadRowBoundary.assert(row).payload)
+type IdentityPayloadRow = typeof IdentityPayloadRowBoundary.infer
+
+function readIdentityPayloads(
+	database: Database,
+	table: "v3_tasks" | "v3_groups" | "v3_awaits",
+	keyColumn: "task_key" | "group_key" | "await_key",
+	chain: string,
+): IdentityPayloadRow[] {
+	return database.query<BoundaryRecord, SqlParams>(
+		`SELECT ${keyColumn} AS identity_key,chain_key,payload FROM ${table} WHERE chain_key=$chain`,
+	).all({ chain }).map((row) => IdentityPayloadRowBoundary.assert(row))
+}
+
+function requirePersistedIdentity(entity: "task" | "group" | "await", row: IdentityPayloadRow, identity: string, chain: string): void {
+	if (row.identity_key !== identity || row.chain_key !== chain) {
+		throw new StoreAbort({
+			kind: "store-schema",
+			reason: "persisted-shape-invalid",
+			message: `${entity}: relational identity ${row.identity_key} in chain ${row.chain_key} does not match payload identity ${identity} in chain ${chain}`,
+		})
+	}
 }
 
 function readPayload(database: Database, table: "v3_tasks" | "v3_groups" | "v3_awaits", keyColumn: "task_key" | "group_key" | "await_key", key: string): string | null {
