@@ -34,6 +34,7 @@ import { makeRepositoryGitLive, RepositoryGit } from "../../../src/v3/git-servic
 import { buildEventProjection, buildStatusProjection } from "../../../src/v3/projection"
 
 import { selectReadyTask } from "../../../src/v3/scheduler"
+import { insertObjectDomainFixture } from "./store-fixture"
 
 import {
 	parseFunctionCheckpoint,
@@ -501,7 +502,7 @@ describe("v3 architecture contracts", () => {
 					awaits: {},
 					admittedFacts: {},
 				}
-				yield* store.bootstrap(snapshot)
+				insertObjectDomainFixture(databaseFile, snapshot)
 				const run = parent.state.kind === "leased" ? parent.state.run : null
 				expect(run).not.toBeNull()
 				if (run === null) return
@@ -597,7 +598,7 @@ describe("v3 architecture contracts", () => {
 					state: { kind: "ready" },
 					closure: { kind: "unallocated" },
 				}
-				yield* store.bootstrap({
+				insertObjectDomainFixture(join(root, "runtime.sqlite"), {
 					chain,
 					tasks: { [taskKey(identity)]: task },
 					groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },
@@ -659,7 +660,7 @@ describe("v3 architecture contracts", () => {
 						awaits: { "chain/task/0/site": { kind: "waiting", identity: awaitIdentity, parentClosure: { kind: "closure", task: identity, attempt: 0 }, child: identity } },
 						admittedFacts: {},
 					}
-					yield* store.bootstrap(snapshot)
+					insertObjectDomainFixture(databaseFile, snapshot)
 					const database = new Database(databaseFile)
 					database.exec("PRAGMA foreign_keys = OFF")
 					database.exec(mutation)
@@ -701,7 +702,7 @@ describe("v3 architecture contracts", () => {
 					state: { kind: "ready" },
 					closure: { kind: "unallocated" },
 				}
-				yield* store.bootstrap({
+				insertObjectDomainFixture(join(root, "runtime.sqlite"), {
 					chain,
 					tasks: { [taskKey(identity)]: task },
 					groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },
@@ -756,7 +757,7 @@ describe("v3 architecture contracts", () => {
 						awaits: {},
 						admittedFacts: {},
 					}
-					yield* store.bootstrap(snapshot)
+					insertObjectDomainFixture(join(root, `${fixture.name}.sqlite`), snapshot)
 					const result = yield* Effect.either(store.commit({ identity: `collect:${fixture.name}`, transition: { family: "resource-intent", closure, action: "collect", publication } }))
 					expect(result._tag).toBe("Left")
 					if (result._tag === "Left") expect(result.left).toMatchObject({ kind: "transition-rejected", reason: fixture.reason })
@@ -778,7 +779,7 @@ describe("v3 architecture contracts", () => {
 			await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
 				const store = yield* ObjectDomainStore
 				const chain = { kind: "chain" as const, value: "events-await-consumption" }
-				yield* store.bootstrap({ chain, tasks: {}, groups: {}, awaits: {}, admittedFacts: {} })
+				insertObjectDomainFixture(databaseFile, { chain, tasks: {}, groups: {}, awaits: {}, admittedFacts: {} })
 				const database = new Database(databaseFile, { strict: true })
 				database.query("INSERT INTO v3_transitions(identity_key,chain_key,family,payload,committed_at) VALUES ($identity,$chain,$family,$payload,$at)").run({
 					identity: "await-consume:token-1", chain: chain.value, family: "await-consumption", payload: "{}", at: 42,
@@ -819,7 +820,7 @@ describe("v3 architecture contracts", () => {
 					state: { kind: "leased", run, acquiredAt: 1, expiresAt: 2 },
 					closure: { kind: "active", identity: closure, basePin: "base", branch: "branch", worktree: "/worktree", scratch: "/scratch" },
 				}
-				yield* store.bootstrap({
+				insertObjectDomainFixture(join(root, "runtime.sqlite"), {
 					chain,
 					tasks: { [taskKey(identity)]: task },
 					groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },

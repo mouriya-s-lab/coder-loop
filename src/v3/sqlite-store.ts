@@ -69,6 +69,10 @@ export type AdmissionStoreResult =
 	| { readonly kind: "admitted"; readonly admission: Extract<AdmissionResult, { kind: "admitted" }>; readonly commit: CommitResult }
 	| Extract<AdmissionResult, { kind: "rejected" }>
 
+type BootstrapTransition = Extract<CommittedTransition, { family: "task-admission"; mode: "bootstrap" }>
+type GrowthAdmissionTransition = Extract<CommittedTransition, { family: "task-admission"; mode: "growth" }>
+export type BootstrapRequest = Omit<BootstrapTransition, "family" | "mode">
+
 
 export type CommittedTransitionAudit = {
 	readonly identity: string
@@ -78,7 +82,7 @@ export type CommittedTransitionAudit = {
 }
 
 export type ObjectDomainStoreService = {
-	readonly bootstrap: (snapshot: ObjectDomainSnapshot) => Effect.Effect<void, ObjectStoreError>
+	readonly bootstrap: (request: BootstrapRequest) => Effect.Effect<void, ObjectStoreError>
 	readonly readSnapshot: (chain: ObjectDomainSnapshot["chain"]) => Effect.Effect<ObjectDomainSnapshot, ObjectStoreError>
 	readonly commit: (request: TransitionRequest) => Effect.Effect<CommitResult, ObjectStoreError>
 	readonly listChains: Effect.Effect<readonly ObjectDomainSnapshot["chain"][], ObjectStoreError>
@@ -167,17 +171,13 @@ function configureDatabase(database: Database): void {
 	})()
 }
 
-function bootstrap(database: Database, snapshot: ObjectDomainSnapshot): void {
+function bootstrap(database: Database, request: BootstrapRequest): void {
 	const run = database.transaction(() => {
-		const chain = snapshot.chain.value
+		const chain = request.chain.value
 		if (exists(database, "v3_chains", "chain_key", chain)) reject("bootstrap", "already-exists", `chain ${chain} already exists`)
-		database.query<never, SqlParams>("INSERT INTO v3_chains (chain_key,payload) VALUES ($key,$payload)").run({ key: chain, payload: JSON.stringify(snapshot.chain) })
-		for (const group of Object.values(snapshot.groups)) insertGroup(database, group)
-		for (const task of Object.values(snapshot.tasks)) insertTask(database, task)
-		for (const record of Object.values(snapshot.awaits)) insertAwait(database, chain, record)
-		for (const [key, task] of Object.entries(snapshot.admittedFacts)) {
-			database.query<never, SqlParams>("INSERT INTO v3_facts (fact_key,chain_key,task_key) VALUES ($fact,$chain,$task)").run({ fact: key, chain, task: taskKey(task) })
-		}
+		const transition: BootstrapTransition = { family: "task-admission", mode: "bootstrap", ...request }
+		applyTransition(database, transition)
+		insertTransition(database, `bootstrap:${chain}`, transition)
 	})
 	run.immediate()
 }
@@ -288,8 +288,9 @@ function functionRunKey(run: AgentRunAuthority): string {
 function admit(database: Database, chain: ObjectDomainSnapshot["chain"], request: AdmissionRequest): AdmissionStoreResult {
 	const identity = `admit:${request.fact.source}:${request.fact.value}`
 	const task: Task = { ...request.task, state: { kind: "ready" }, closure: { kind: "unallocated" } }
-	const transition: Extract<CommittedTransition, { family: "task-admission" }> = {
+	const transition: GrowthAdmissionTransition = {
 		family: "task-admission",
+		mode: "growth",
 		fact: request.fact,
 		task,
 		position: request.position,
@@ -299,7 +300,7 @@ function admit(database: Database, chain: ObjectDomainSnapshot["chain"], request
 		if (replay !== null) return { kind: "admitted", admission: { kind: "admitted", task, position: request.position }, commit: replay }
 		const admission = evaluateAdmission(readSnapshotInTransaction(database, chain), request)
 		if (admission.kind === "rejected") return admission
-		const committedTransition: Extract<CommittedTransition, { family: "task-admission" }> = { ...transition, task: admission.task, position: admission.position }
+		const committedTransition: GrowthAdmissionTransition = { ...transition, task: admission.task, position: admission.position }
 		applyTransition(database, committedTransition)
 		insertTransition(database, identity, committedTransition)
 		return { kind: "admitted", admission, commit: { kind: "committed", identity } }
@@ -350,9 +351,25 @@ function rejectTaskAdmissionCommit(transition: CommittedTransition): void {
 }
 function applyTransition(database: Database, transition: CommittedTransition): void {
 	switch (transition.family) {
-		case "task-admission":
-			admitTask(database, transition, transition.family)
+		case "task-admission": {
+			if (transition.mode === "growth") {
+				admitTask(database, transition, transition.family)
+				return
+			}
+			const chain = transition.chain.value
+			if (transition.admissions.length === 0) reject(transition.family, "invalid-transition", "bootstrap requires at least one initial task")
+			if (transition.group.identity.chain.value !== chain) reject(transition.family, "identity-mismatch", "bootstrap group does not belong to its chain")
+			database.query<never, SqlParams>("INSERT INTO v3_chains (chain_key,payload) VALUES ($key,$payload)").run({ key: chain, payload: JSON.stringify(transition.chain) })
+			insertGroup(database, { ...transition.group, members: [], memberVersion: 0, state: { kind: "open" } })
+			for (const [position, admission] of transition.admissions.entries()) {
+				admitTask(database, {
+					fact: admission.fact,
+					task: { ...admission.task, state: { kind: "ready" }, closure: { kind: "unallocated" } },
+					position: { group: transition.group.identity, expectedMemberVersion: position },
+				}, transition.family)
+			}
 			return
+		}
 		case "closure-allocation-start": {
 			const task = requireTask(database, transition.task, transition.family)
 			if (task.state.kind !== "ready" || task.closure.kind !== "unallocated") reject(transition.family, "state-mismatch", "allocation requires a ready unallocated task")
@@ -592,7 +609,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 	return assertNever(transition)
 }
 
-function admitTask(database: Database, admission: Extract<CommittedTransition, { family: "task-admission" }> | Extract<CommittedTransition, { family: "task-settlement" }>["successors"][number], family: CommittedTransition["family"]): void {
+function admitTask(database: Database, admission: GrowthAdmissionTransition | Extract<CommittedTransition, { family: "task-settlement" }>["successors"][number], family: CommittedTransition["family"]): void {
 	const task = admission.task
 	const group = requireGroup(database, admission.position.group, family)
 	if (group.memberVersion !== admission.position.expectedMemberVersion || (group.state.kind !== "open" && group.state.kind !== "waiting")) reject(family, "position-mismatch", "group position is no longer open")
@@ -694,7 +711,7 @@ function exists(database: Database, table: "v3_chains" | "v3_tasks" | "v3_groups
 
 function transitionChain(transition: CommittedTransition): string {
 	switch (transition.family) {
-		case "task-admission": return transition.task.identity.chain.value
+		case "task-admission": return transition.mode === "bootstrap" ? transition.chain.value : transition.task.identity.chain.value
 		case "closure-allocation-start":
 		case "closure-allocation-cleanup":
 		case "lease-acquire":

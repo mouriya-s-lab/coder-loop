@@ -13,10 +13,10 @@ import { DefinitionStore, type DefinitionRef, type DefinitionStoreError } from "
 import { FunctionRuntime, type FunctionRuntimeError } from "./function-runtime"
 import { RepositoryGit, type GitServiceError } from "./git-service"
 import { HookRuntime, type HookRuntimeError } from "./hooks"
-import { groupKey, taskKey, type AdmissionRequest, type GroupIdentity, type ObjectDomainSnapshot, type RunIdentity, type Task } from "./object-domain"
+import { groupKey, taskKey, type AdmissionRequest, type GroupIdentity, type RunIdentity } from "./object-domain"
 import { buildEventProjection, buildSideEffectAuditProjection, buildStatusProjection, type EventProjectionV3, type SideEffectAuditProjection, type StatusProjectionV3 } from "./projection"
 import { ProviderFactStore, type ProviderFactStoreError } from "./provider"
-import { ObjectDomainStore, type CommitResult, type ObjectStoreError } from "./sqlite-store"
+import { ObjectDomainStore, type BootstrapRequest, type CommitResult, type ObjectStoreError } from "./sqlite-store"
 
 export type DaemonCommandSuccess =
 	| { readonly kind: "definition-published"; readonly ref: DefinitionRef }
@@ -106,8 +106,8 @@ function dispatch(
 				const input = parseContext0(bundle.definition.values, command.input)
 				if (input.kind === "rejected") return yield* Effect.fail<ChainBootstrapError>({ kind: "chain-bootstrap-rejected", fields: input.fields })
 				const basePin = yield* repository.resolveBasePin(command.basePin)
-				const snapshot = bootstrapSnapshot({ ...command, basePin, input: input.context.values }, bundle.definition.task)
-				return yield* Effect.as(store.bootstrap(snapshot), { kind: "chain-bootstrapped" as const, chain: command.chain.value })
+				const bootstrap = bootstrapRequest({ ...command, basePin, input: input.context.values }, bundle.definition.task)
+				return yield* Effect.as(store.bootstrap(bootstrap), { kind: "chain-bootstrapped" as const, chain: command.chain.value })
 			})
 		case "status-read":
 			return Effect.map(store.readSnapshot(command.chain), (snapshot): DaemonCommandSuccess => ({ kind: "status", projection: buildStatusProjection(snapshot) }))
@@ -221,36 +221,28 @@ function requestIdentity(candidate: unknown): string | null {
 	return typeof candidate.requestId === "string" ? candidate.requestId : null
 }
 
-function bootstrapSnapshot(command: ChainBootstrapCommand, root: RecursiveTaskDefinition): ObjectDomainSnapshot {
+function bootstrapRequest(command: ChainBootstrapCommand, root: RecursiveTaskDefinition): BootstrapRequest {
 	const group = { kind: "group" as const, chain: command.chain, value: root.id }
-	const identities = initialLeafDefinitions(root).map((leaf) => ({ kind: "task" as const, chain: command.chain, value: leaf.id }))
 	const valueIdentity = createHash("sha256").update(JSON.stringify(command.input)).digest("hex")
-	const tasks = Object.fromEntries(identities.map((identity): [string, Task] => [taskKey(identity), {
-		kind: "task",
-		identity,
-		group,
-		input: { definition: command.definition, entrypoint: identity.value, basePin: command.basePin, value: command.input, valueIdentity },
-		dependsOn: [],
-		priority: command.priority,
-		state: { kind: "ready" },
-		closure: { kind: "unallocated" },
-	}]))
 	return {
 		chain: command.chain,
-		tasks,
-		groups: {
-			[groupKey(group)]: {
-				kind: "task-group",
-				identity: group,
-				members: identities,
-				memberVersion: identities.length,
-				wait: waitWindow(root),
-				join: root.kind === "par" ? { kind: "finalizer", definition: command.definition, entrypoint: root.finalizer.task.id } : { kind: "drain" },
-				state: { kind: "open" },
-			},
+		group: {
+			kind: "task-group",
+			identity: group,
+			wait: waitWindow(root),
+			join: root.kind === "par" ? { kind: "finalizer", definition: command.definition, entrypoint: root.finalizer.task.id } : { kind: "drain" },
 		},
-		awaits: {},
-		admittedFacts: {},
+		admissions: initialLeafDefinitions(root).map((leaf) => ({
+			fact: { kind: "fact" as const, source: "bootstrap", value: leaf.id },
+			task: {
+				kind: "task",
+				identity: { kind: "task" as const, chain: command.chain, value: leaf.id },
+				group,
+				input: { definition: command.definition, entrypoint: leaf.id, basePin: command.basePin, value: command.input, valueIdentity },
+				dependsOn: [],
+				priority: command.priority,
+			},
+		})),
 	}
 }
 

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Effect, Exit } from "effect"
 import { groupKey, taskKey, type ObjectDomainSnapshot, type Task, type TaskSettlement } from "../../../src/v3/object-domain"
+import { insertObjectDomainFixture } from "./store-fixture"
 import { makeObjectDomainStoreLive, ObjectDomainStore } from "../../../src/v3/sqlite-store"
 
 type ConsumerField = "entrypoint" | "value" | "valueIdentity" | "dependsOn"
@@ -47,7 +48,7 @@ describe("group consumer committed transition", () => {
 						awaits: {},
 						admittedFacts: {},
 					}
-					yield* store.bootstrap(snapshot)
+					insertObjectDomainFixture(join(root, "runtime.sqlite"), snapshot)
 					const consumerGroup = { kind: "group" as const, chain, value: "source/$validator/2/group" }
 					const consumerTask = { kind: "task" as const, chain, value: "source/$validator/2/task" }
 					const value = { settlements }
