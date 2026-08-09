@@ -189,7 +189,9 @@ function shutdownRuntime(state: HookRuntimeState, shutdownWaitMs: number): Promi
 		if (state.operations.size === 0) return
 		await Promise.race([Promise.allSettled([...state.operations]), delay(shutdownWaitMs)])
 		for (const execution of state.running.values()) execution.controller.abort()
-		await Promise.allSettled([...state.operations])
+		const settled = await Promise.allSettled([...state.operations])
+		const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected")
+		if (failed !== undefined) throw failed.reason
 	})()
 	return state.shutdown
 }
