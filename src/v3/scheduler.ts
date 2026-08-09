@@ -104,7 +104,9 @@ export const SchedulerLive: Layer.Layer<Scheduler, never, ObjectDomainStore> = L
 }))
 
 export function selectReadyTask(chains: readonly { readonly chain: ChainIdentity; readonly tasks: readonly Task[] }[]): ReadySelection | null {
-	const candidates = chains.flatMap(({ chain, tasks }) => tasks.map((task) => ({ chain, task })))
+	const candidates = chains.flatMap(({ chain, tasks }) => tasks
+		.filter((task) => task.state.kind === "ready")
+		.map((task) => ({ chain, task })))
 	candidates.sort((left, right) => right.task.priority - left.task.priority || taskKey(left.task.identity).localeCompare(taskKey(right.task.identity)))
 	return candidates[0] ?? null
 }
