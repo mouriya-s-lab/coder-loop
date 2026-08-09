@@ -58,7 +58,7 @@ export type ObjectStoreError =
 
 export type TransitionRequest = {
 	readonly identity: string
-	readonly transition: CommittedTransition
+	readonly transition: Exclude<CommittedTransition, { readonly family: "task-admission" }>
 }
 
 export type CommitResult =
@@ -331,6 +331,7 @@ function insertTransition(database: Database, identity: string, transition: Comm
 }
 
 function commit(database: Database, request: TransitionRequest): CommitResult {
+	rejectTaskAdmissionCommit(request.transition)
 	const run = database.transaction((): CommitResult => {
 		const replay = matchingTransition(database, request.identity, request.transition)
 		if (replay !== null) return replay
@@ -339,6 +340,12 @@ function commit(database: Database, request: TransitionRequest): CommitResult {
 		return { kind: "committed", identity: request.identity }
 	})
 	return run.immediate()
+}
+
+function rejectTaskAdmissionCommit(transition: CommittedTransition): void {
+	if (transition.family === "task-admission") {
+		reject(transition.family, "invalid-transition", "task admission must use the typed admit port")
+	}
 }
 function applyTransition(database: Database, transition: CommittedTransition): void {
 	switch (transition.family) {

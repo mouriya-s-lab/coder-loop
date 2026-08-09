@@ -424,6 +424,28 @@ describe("v3 architecture contracts", () => {
 					state: { kind: "ready" },
 					closure: { kind: "unallocated" },
 				}
+				const bypass = yield* Effect.either(store.commit({
+					identity: "bypass-admit",
+					transition: {
+						// @ts-expect-error task admission is only available through store.admit
+						family: "task-admission",
+						fact: { kind: "fact", source: "handoff", value: "bypass" },
+						task: successor,
+						position: { group, expectedMemberVersion: 1 },
+					},
+				}))
+				expect(bypass).toMatchObject({
+					_tag: "Left",
+					left: {
+						kind: "transition-rejected",
+						family: "task-admission",
+						reason: "invalid-transition",
+						message: "task admission must use the typed admit port",
+					},
+				})
+				const unchanged = yield* store.readSnapshot(chain)
+				expect(unchanged.tasks[taskKey(successorIdentity)]).toBeUndefined()
+				expect(unchanged.groups[groupKey(group)]?.memberVersion).toBe(1)
 				const commit = yield* store.commit({
 					identity: "settle-and-admit",
 					transition: {
