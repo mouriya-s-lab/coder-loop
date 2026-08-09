@@ -572,6 +572,58 @@ describe("v3 architecture contracts", () => {
 		}
 	})
 
+	test("task hold reason matches its ready or leased predecessor", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-task-held-"))
+		try {
+			await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+				const store = yield* ObjectDomainStore
+				const chain = { kind: "chain" as const, value: "task-held" }
+				const group = { kind: "group" as const, chain, value: "root" }
+				const identity = { kind: "task" as const, chain, value: "task" }
+				const closure = { kind: "closure" as const, task: identity, attempt: 0 }
+				const run = { kind: "run" as const, closure, value: "run" }
+				const wrongRun = { ...run, value: "wrong-run" }
+				const task: Task = {
+					identity,
+					group,
+					input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: "input" },
+					dependsOn: [],
+					priority: 0,
+					state: { kind: "ready" },
+					closure: { kind: "unallocated" },
+				}
+				yield* store.bootstrap({
+					chain,
+					tasks: { [taskKey(identity)]: task },
+					groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					awaits: {},
+					admittedFacts: {},
+				})
+
+				const readyDisguised = yield* Effect.either(store.commit({ identity: "ready-disguised", transition: { family: "task-held", task: identity, expectedRun: null, reason: { kind: "unknown-effect", endpoint: "runner", run, detail: "unknown", observedAt: 1 } } }))
+				expect(readyDisguised._tag).toBe("Left")
+				if (readyDisguised._tag === "Left") expect(readyDisguised.left).toEqual(expect.objectContaining({ kind: "transition-rejected", family: "task-held", reason: "state-mismatch" }))
+				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.state.kind).toBe("ready")
+
+				yield* store.commit({ identity: "lease", transition: { family: "lease-acquire", task: identity, run, closure: { kind: "active", identity: closure, basePin: "base", branch: "branch", worktree: join(root, "worktree"), scratch: join(root, "scratch") }, acquiredAt: 2, expiresAt: 3 } })
+				const leasedDisguised = yield* Effect.either(store.commit({ identity: "leased-disguised", transition: { family: "task-held", task: identity, expectedRun: run, reason: { kind: "pre-spawn-absence", endpoint: "runner", detail: "missing", observedAt: 2 } } }))
+				expect(leasedDisguised._tag).toBe("Left")
+				if (leasedDisguised._tag === "Left") expect(leasedDisguised.left).toEqual(expect.objectContaining({ kind: "transition-rejected", family: "task-held", reason: "run-mismatch" }))
+				const wrongReasonRun = yield* Effect.either(store.commit({ identity: "wrong-reason-run", transition: { family: "task-held", task: identity, expectedRun: run, reason: { kind: "unknown-effect", endpoint: "runner", run: wrongRun, detail: "unknown", observedAt: 2 } } }))
+				expect(wrongReasonRun._tag).toBe("Left")
+				if (wrongReasonRun._tag === "Left") expect(wrongReasonRun.left).toEqual(expect.objectContaining({ kind: "transition-rejected", family: "task-held", reason: "run-mismatch" }))
+				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.state).toEqual(expect.objectContaining({ kind: "leased", run }))
+
+				expect((yield* store.commit({ identity: "valid-unknown", transition: { family: "task-held", task: identity, expectedRun: run, reason: { kind: "unknown-effect", endpoint: "runner", run, detail: "unknown", observedAt: 2 } } })).kind).toBe("committed")
+				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.state).toEqual({ kind: "held", reason: { kind: "unknown-effect", endpoint: "runner", run, detail: "unknown", observedAt: 2 } })
+			}).pipe(Effect.provide(makeObjectDomainStoreLive(join(root, "runtime.sqlite"))))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
 	test("snapshot rejects relational identities that disagree with payload identities", async () => {
 		const base = join(process.cwd(), ".test-runs")
 		await mkdir(base, { recursive: true })
