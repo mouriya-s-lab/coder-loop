@@ -81,31 +81,50 @@ export type HookRuntimeService = {
 	readonly trigger: (projection: HookProjection) => Effect.Effect<readonly HookDeliveryAudit[], HookRuntimeError>
 	readonly recover: Effect.Effect<readonly HookDeliveryAudit[], HookRuntimeError>
 	readonly listAudit: Effect.Effect<readonly HookDeliveryAudit[], HookRuntimeError>
+	readonly shutdown: Effect.Effect<void, HookRuntimeError>
 }
 
 export class HookRuntime extends Context.Tag("coder-loop/v3/HookRuntime")<HookRuntime, HookRuntimeService>() {}
 
-export function makeHookRuntimeLive(root: string, declarations: readonly HookDeclaration[]): Layer.Layer<HookRuntime> {
+type RunningExecution = {
+	readonly controller: AbortController
+	readonly completion: Promise<HookDeliveryAudit>
+}
+
+type HookRuntimeState = {
+	accepting: boolean
+	shutdown: Promise<void> | null
+	readonly operations: Set<Promise<readonly HookDeliveryAudit[]>>
+	readonly running: Map<string, RunningExecution>
+}
+
+export function makeHookRuntimeLive(root: string, declarations: readonly HookDeclaration[], shutdownWaitMs: number): Layer.Layer<HookRuntime> {
 	validateDeclarations(declarations)
-	return Layer.succeed(HookRuntime, {
-		trigger: (projection) => hookEffect("trigger", async () => {
+	if (!Number.isInteger(shutdownWaitMs) || shutdownWaitMs <= 0) throw new Error("hook shutdownWaitMs must be a positive integer")
+	const state: HookRuntimeState = { accepting: true, shutdown: null, operations: new Set(), running: new Map() }
+	const service: HookRuntimeService = {
+		trigger: (projection) => hookEffect("trigger", () => trackOperation(state, async () => {
+			if (!state.accepting) throw new Error("hook runtime is shutting down")
 			const matching = declarations.filter((declaration) => declaration.anchors.includes(projection.anchor))
-			return Promise.all(matching.map((declaration) => deliver(root, declaration, projection)))
-		}),
-		recover: hookEffect("recover", async () => {
+			return Promise.all(matching.map((declaration) => deliver(root, declaration, projection, state)))
+		})),
+		recover: hookEffect("recover", () => trackOperation(state, async () => {
+			if (!state.accepting) throw new Error("hook runtime is shutting down")
 			const pending = (await listDeliveries(root)).filter((delivery) => delivery.status === "pending")
 			const byId = new Map(declarations.map((declaration) => [declaration.id, declaration]))
 			return Promise.all(pending.map((delivery) => {
 				const declaration = byId.get(delivery.hookId)
 				if (declaration === undefined) throw new Error(`hook declaration ${delivery.hookId} is unavailable for pending delivery ${delivery.identity}`)
-				return executeDelivery(root, declaration, delivery)
+				return executeDelivery(root, declaration, delivery, state)
 			}))
-		}),
+		})),
 		listAudit: hookEffect("list-audit", () => listDeliveries(root)),
-	})
+		shutdown: hookEffect("shutdown", () => shutdownRuntime(state, shutdownWaitMs)),
+	}
+	return Layer.scoped(HookRuntime, Effect.acquireRelease(Effect.succeed(service), (runtime) => Effect.orDie(runtime.shutdown)))
 }
 
-async function deliver(root: string, declaration: HookDeclaration, projection: HookProjection): Promise<HookDeliveryAudit> {
+async function deliver(root: string, declaration: HookDeclaration, projection: HookProjection, state: HookRuntimeState): Promise<HookDeliveryAudit> {
 	const identity = deliveryIdentity(declaration.id, projection)
 	const path = deliveryPath(root, identity)
 	let delivery = await readDelivery(path)
@@ -114,10 +133,10 @@ async function deliver(root: string, declaration: HookDeclaration, projection: H
 		await atomicWrite(path, delivery)
 	}
 	if (delivery.status === "completed") return delivery
-	return executeDelivery(root, declaration, delivery)
+	return executeDelivery(root, declaration, delivery, state)
 }
 
-async function executeDelivery(root: string, declaration: HookDeclaration, delivery: HookDeliveryAudit): Promise<HookDeliveryAudit> {
+async function executeDelivery(root: string, declaration: HookDeclaration, delivery: HookDeliveryAudit, state: HookRuntimeState): Promise<HookDeliveryAudit> {
 	const started: HookExecutionAudit = {
 		kind: "started",
 		identity: randomUUID(),
@@ -126,7 +145,18 @@ async function executeDelivery(root: string, declaration: HookDeclaration, deliv
 	}
 	const running: HookDeliveryAudit = { ...delivery, executions: [...delivery.executions, started] }
 	await atomicWrite(deliveryPath(root, delivery.identity), running)
-	const outcome = await Effect.runPromise(runSubprocess(hookSubprocessSpec(declaration, delivery.projection)))
+	const controller = new AbortController()
+	const completion = closeExecution(root, declaration, running, started, controller.signal)
+	state.running.set(started.identity, { controller, completion })
+	try {
+		return await completion
+	} finally {
+		state.running.delete(started.identity)
+	}
+}
+
+async function closeExecution(root: string, declaration: HookDeclaration, running: HookDeliveryAudit, started: HookExecutionAudit & { readonly kind: "started" }, abortSignal: AbortSignal): Promise<HookDeliveryAudit> {
+	const outcome = await Effect.runPromise(runSubprocess({ ...hookSubprocessSpec(declaration, running.projection), abortSignal }))
 	const closed: HookExecutionAudit = {
 		...started,
 		kind: "closed",
@@ -138,8 +168,34 @@ async function executeDelivery(root: string, declaration: HookDeclaration, deliv
 		status: "completed",
 		executions: running.executions.map((execution) => execution.identity === started.identity ? closed : execution),
 	}
-	await atomicWrite(deliveryPath(root, delivery.identity), completed)
+	await atomicWrite(deliveryPath(root, running.identity), completed)
 	return completed
+}
+
+async function trackOperation(state: HookRuntimeState, work: () => Promise<readonly HookDeliveryAudit[]>): Promise<readonly HookDeliveryAudit[]> {
+	const operation = work()
+	state.operations.add(operation)
+	try {
+		return await operation
+	} finally {
+		state.operations.delete(operation)
+	}
+}
+
+function shutdownRuntime(state: HookRuntimeState, shutdownWaitMs: number): Promise<void> {
+	if (state.shutdown !== null) return state.shutdown
+	state.accepting = false
+	state.shutdown = (async () => {
+		if (state.operations.size === 0) return
+		await Promise.race([Promise.allSettled([...state.operations]), delay(shutdownWaitMs)])
+		for (const execution of state.running.values()) execution.controller.abort()
+		await Promise.allSettled([...state.operations])
+	})()
+	return state.shutdown
+}
+
+function delay(milliseconds: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
 function hookSubprocessSpec(declaration: HookDeclaration, projection: HookProjection): SubprocessSpec {

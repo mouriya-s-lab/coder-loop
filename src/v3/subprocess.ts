@@ -16,6 +16,7 @@ export type SubprocessSpec = {
 	readonly termGraceMs: number
 	readonly maxOutputBytes: number
 	readonly sandbox: SandboxDeclaration
+	readonly abortSignal?: AbortSignal
 }
 
 export type SubprocessOutcome =
@@ -70,18 +71,25 @@ function startSubprocess(spec: SubprocessSpec): SubprocessExecution {
 	let timedOut = false
 	let escalated = false
 	let killTimer: Timer | undefined
-	const timeout = setTimeout(() => {
-		timedOut = true
+	const terminate = (): void => {
 		signalProcessGroup(processHandle.pid, "SIGTERM")
-		killTimer = setTimeout(() => {
+		killTimer ??= setTimeout(() => {
 			escalated = true
 			signalProcessGroup(processHandle.pid, "SIGKILL")
 		}, spec.termGraceMs)
+	}
+	const abort = (): void => terminate()
+	if (spec.abortSignal?.aborted === true) abort()
+	else spec.abortSignal?.addEventListener("abort", abort, { once: true })
+	const timeout = setTimeout(() => {
+		timedOut = true
+		terminate()
 	}, spec.timeoutMs)
 	const outcome = (async (): Promise<SubprocessOutcome> => {
 		const exitCode = await processHandle.exited
 		clearTimeout(timeout)
 		clearTimeout(killTimer)
+		spec.abortSignal?.removeEventListener("abort", abort)
 		const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise])
 		const closedAt = Date.now()
 		if (timedOut) return { kind: "timeout", signal: escalated ? "SIGKILL" : "SIGTERM", stdout, stderr, startedAt, closedAt }
@@ -94,6 +102,7 @@ function startSubprocess(spec: SubprocessSpec): SubprocessExecution {
 		interrupt: async () => {
 			clearTimeout(timeout)
 			clearTimeout(killTimer)
+			spec.abortSignal?.removeEventListener("abort", abort)
 			signalProcessGroup(processHandle.pid, "SIGTERM")
 			const lifecyclePromise = Promise.all([processHandle.exited, stdoutPromise, stderrPromise])
 			const closedDuringGrace = await Promise.race([

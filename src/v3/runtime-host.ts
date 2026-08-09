@@ -25,6 +25,7 @@ export type RuntimeHostConfig = {
 	readonly git: GitServiceConfig
 	readonly runner: RunnerConfig
 	readonly hooks: readonly HookDeclaration[]
+	readonly hookShutdownWaitMs: number
 	readonly leaseMs: number
 	readonly maxConcurrency: number
 	readonly cycleMs: number
@@ -40,7 +41,7 @@ export function runRuntimeHost(config: RuntimeHostConfig): Effect.Effect<never, 
 	const definitions = makeDefinitionStoreLive(config.definitionRoot)
 	const providerFacts = makeProviderFactStoreLive(config.providerFactRoot)
 	const repository = makeRepositoryGitLive(config.git)
-	const hooks = makeHookRuntimeLive(config.hookRoot, config.hooks)
+	const hooks = makeHookRuntimeLive(config.hookRoot, config.hooks, config.hookShutdownWaitMs)
 	const maps = makeMapRuntimeLive(config.map).pipe(Layer.provide(definitions))
 	const predicates = PredicateRuntimeLive
 	const consumers = GroupConsumerRuntimeLive
