@@ -72,6 +72,7 @@ export type AdmissionStoreResult =
 export type CommittedTransitionAudit = {
 	readonly identity: string
 	readonly family: CommittedTransition["family"]
+	readonly cursor: number
 	readonly committedAt: number
 }
 
@@ -135,7 +136,7 @@ function configureDatabase(database: Database): void {
 		CREATE TABLE IF NOT EXISTS v3_tasks (task_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, group_key TEXT NOT NULL REFERENCES v3_groups(group_key), payload TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS v3_awaits (await_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, payload TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS v3_facts (fact_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, task_key TEXT NOT NULL REFERENCES v3_tasks(task_key));
-		CREATE TABLE IF NOT EXISTS v3_transitions (identity_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, family TEXT NOT NULL, payload TEXT NOT NULL, committed_at INTEGER NOT NULL);
+		CREATE TABLE IF NOT EXISTS v3_transitions (cursor INTEGER PRIMARY KEY AUTOINCREMENT, identity_key TEXT NOT NULL UNIQUE, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, family TEXT NOT NULL, payload TEXT NOT NULL, committed_at INTEGER NOT NULL);
 		CREATE TABLE IF NOT EXISTS v3_function_checkpoints (run_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, payload TEXT NOT NULL);
 	`)
 	const version = database.query<{ schema_version: number }, []>("SELECT schema_version FROM v3_meta").get()
@@ -206,17 +207,18 @@ function readSnapshotInTransaction(database: Database, chain: ObjectDomainSnapsh
 }
 function listTransitions(database: Database, chain: ObjectDomainSnapshot["chain"], since: number): readonly CommittedTransitionAudit[] {
 	const boundary = arkType({
+		cursor: "number.integer > 0",
 		identity_key: "string",
 		family: "'task-admission' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
 		committed_at: "number",
 		"+": "reject",
 	})
 	return database.query<BoundaryRecord, SqlParams>(
-		"SELECT identity_key,family,committed_at FROM v3_transitions WHERE chain_key=$chain AND committed_at >= $since ORDER BY committed_at,rowid",
+		"SELECT cursor,identity_key,family,committed_at FROM v3_transitions WHERE chain_key=$chain AND cursor > $since ORDER BY cursor",
 	).all({ chain: chain.value, since }).map((row) => {
 		const parsed = boundary(row)
 		if (parsed instanceof arkType.errors) throw new Error(parsed.summary)
-		return { identity: parsed.identity_key, family: parsed.family, committedAt: parsed.committed_at }
+		return { identity: parsed.identity_key, family: parsed.family, cursor: parsed.cursor, committedAt: parsed.committed_at }
 	})
 }
 function readFunctionCheckpoint(database: Database, run: AgentRunAuthority): FunctionCheckpoint | null {
