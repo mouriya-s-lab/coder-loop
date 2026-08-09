@@ -400,6 +400,10 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			const matchesLease = task.state.kind === "leased" && runKey(task.state.run) === runKey(transition.run)
 			const matchesHold = task.state.kind === "held" && task.state.reason.kind === "unknown-effect" && runKey(task.state.reason.run) === runKey(transition.run)
 			if (!matchesLease && !matchesHold) reject(transition.family, "run-mismatch", "task settlement requires the matching lease or unknown-effect hold")
+			if (transition.settlement.kind === "exception" && (
+				transition.settlement.attempt !== transition.run.closure.attempt
+				|| closureKey(transition.settlement.closure) !== closureKey(transition.run.closure)
+			)) reject(transition.family, "run-mismatch", "exception settlement provenance must match the settling run closure")
 			updateTask(database, { ...task, state: { kind: "settled", settlement: transition.settlement, settledAt: Date.now() } })
 			for (const successor of transition.successors) admitTask(database, successor, transition.family)
 			return
