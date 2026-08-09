@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createServer } from "node:net"
@@ -319,6 +320,50 @@ describe("v3 architecture contracts", () => {
 				const events = buildEventProjection(chain.value, yield* store.listTransitions(chain, 0))
 				expect(events.transitions).toEqual([{ identity: "settle-and-admit", family: "task-settlement", committedAt: expect.any(Number) }])
 			}).pipe(Effect.provide(makeObjectDomainStoreLive(databaseFile)))))
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	test("snapshot rejects relational identities that disagree with payload identities", async () => {
+		const base = join(process.cwd(), ".test-runs")
+		await mkdir(base, { recursive: true })
+		const root = await mkdtemp(join(base, "v3-store-identity-"))
+		try {
+			for (const mutation of [
+				"UPDATE v3_tasks SET task_key='wrong/task'",
+				"UPDATE v3_groups SET group_key='wrong/group'",
+				"UPDATE v3_awaits SET await_key='wrong/await'",
+			]) {
+				const databaseFile = join(root, `${Bun.hash(mutation)}.sqlite`)
+				await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+					const store = yield* ObjectDomainStore
+					const chain = { kind: "chain" as const, value: "chain" }
+					const group = { kind: "group" as const, chain, value: "root" }
+					const identity = { kind: "task" as const, chain, value: "task" }
+					const task: Task = {
+						identity,
+						group,
+						input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: "input" },
+						dependsOn: [], priority: 0, state: { kind: "ready" }, closure: { kind: "unallocated" },
+					}
+					const awaitIdentity = { kind: "await" as const, parent: identity, attempt: 0, site: "site" }
+					const snapshot: ObjectDomainSnapshot = {
+						chain,
+						tasks: { [taskKey(identity)]: task },
+						groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+						awaits: { "chain/task/0/site": { kind: "waiting", identity: awaitIdentity, parentClosure: { kind: "closure", task: identity, attempt: 0 }, child: identity } },
+						admittedFacts: {},
+					}
+					yield* store.bootstrap(snapshot)
+					const database = new Database(databaseFile)
+					database.exec("PRAGMA foreign_keys = OFF")
+					database.exec(mutation)
+					database.close()
+					const error = yield* Effect.flip(store.readSnapshot(chain))
+					expect(error).toMatchObject({ kind: "store-schema", reason: "persisted-shape-invalid" })
+				}).pipe(Effect.provide(makeObjectDomainStoreLive(databaseFile)))))
+			}
 		} finally {
 			await rm(root, { recursive: true, force: true })
 		}
