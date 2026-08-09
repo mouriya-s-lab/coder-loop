@@ -12,12 +12,12 @@ export const GroupConsumerRuntimeLive: Layer.Layer<GroupConsumerRuntime> = Layer
 		const vector = settlements.map((settlement) => settlement.kind === "returned"
 			? { kind: settlement.kind, value: settlement.value }
 			: { kind: settlement.kind, attempt: settlement.attempt, closure: settlement.closure })
-		const consumer = groupConsumerIdentity(group.consumer)
+		const consumer = groupConsumerIdentity(group.join)
 		return Effect.succeed({ kind: "consumption", group: group.identity, value: `${consumer}:${group.memberVersion}:${JSON.stringify(vector)}` })
 	},
 })
 
-function groupConsumerIdentity(consumer: TaskGroup["consumer"]): string {
+function groupConsumerIdentity(consumer: TaskGroup["join"]): string {
 	switch (consumer.kind) {
 		case "drain":
 			return "drain"

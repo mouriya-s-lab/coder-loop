@@ -23,6 +23,7 @@ import { DaemonSocket, makeDaemonSocketLive } from "../../../src/v3/daemon-socke
 import { parseDaemonRequest } from "../../../src/v3/daemon-protocol"
 import {
 	groupKey,
+	replaceTaskLifecycle,
 	taskKey,
 	type ObjectDomainSnapshot,
 	type RunIdentity,
@@ -117,25 +118,10 @@ describe("v3 architecture contracts", () => {
 	test("task selection excludes every non-ready state", () => {
 		const chain = { kind: "chain" as const, value: "selection" }
 		const group = { kind: "group" as const, chain, value: "root" }
-		const makeTask = (value: string, state: Task["state"], priority: number): Task => ({
-			identity: { kind: "task", chain, value },
-			group,
-			input: {
-				definition: {
-					kind: "published-definition",
-					content: { kind: "definition-content", digest: "content" },
-					product: { kind: "compiled-product", digest: "product" },
-				},
-				entrypoint: "root",
-				basePin: "base",
-				value: null,
-				valueIdentity: value,
-			},
-			dependsOn: [],
-			priority,
-			state,
-			closure: { kind: "unallocated" },
-		})
+		const makeTask = (value: string, state: Task["state"], priority: number): Task => {
+			const task: Task = { kind: "task", identity: { kind: "task", chain, value }, group, input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: value }, dependsOn: [], priority, state: { kind: "ready" }, closure: { kind: "unallocated" } }
+			return replaceTaskLifecycle(task, state, task.closure)
+		}
 		const ready = makeTask("ready", { kind: "ready" }, 1)
 		const held = makeTask("held", { kind: "held", reason: { kind: "pre-spawn-absence", endpoint: "runner", detail: "missing", observedAt: 1 } }, 99)
 
@@ -466,6 +452,20 @@ describe("v3 architecture contracts", () => {
 		}
 	})
 
+	test("object persistence rejects untagged and contradictory task/group join shapes", () => {
+		const chain = { kind: "chain" as const, value: "adt" }
+		const identity = { kind: "task" as const, chain, value: "member" }
+		const group = { kind: "group" as const, chain, value: "root" }
+		const definition = { kind: "published-definition" as const, content: { kind: "definition-content" as const, digest: "content" }, product: { kind: "compiled-product" as const, digest: "product" } }
+		const task = { kind: "task" as const, identity, group, input: { definition, entrypoint: "member", basePin: "base", value: null, valueIdentity: "null" }, dependsOn: [], priority: 0, state: { kind: "ready" as const }, closure: { kind: "unallocated" as const } }
+		const taskGroup = { kind: "task-group" as const, identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" as const }, join: { kind: "drain" as const }, state: { kind: "open" as const } }
+		expect(parsePersistedTask(task).kind).toBe("accepted")
+		expect(parsePersistedGroup(taskGroup).kind).toBe("accepted")
+		expect(parsePersistedTask({ ...task, kind: undefined }).kind).toBe("rejected")
+		expect(parsePersistedTask({ ...task, state: { kind: "leased", run: { kind: "run", closure: { kind: "closure", task: identity, attempt: 0 }, value: "run" }, acquiredAt: 1, expiresAt: 2 } }).kind).toBe("rejected")
+		expect(parsePersistedGroup({ ...taskGroup, state: { kind: "consuming", consumerTask: identity, consumerGroup: group, settlementsDigest: "digest", startedAt: 1 } }).kind).toBe("rejected")
+	})
+
 	test("settlement and successor admission commit atomically and project from durable facts", async () => {
 		const base = join(process.cwd(), ".test-runs")
 		await mkdir(base, { recursive: true })
@@ -485,6 +485,7 @@ describe("v3 architecture contracts", () => {
 					product: { kind: "compiled-product" as const, digest: "product" },
 				}
 				const parent: Task = {
+					kind: "task",
 					identity: parentIdentity,
 					group,
 					input: { definition: definitionRef, entrypoint: "root", basePin: "base", value: { request: "work" }, valueIdentity: "input" },
@@ -496,7 +497,7 @@ describe("v3 architecture contracts", () => {
 				const snapshot: ObjectDomainSnapshot = {
 					chain,
 					tasks: { [taskKey(parentIdentity)]: parent },
-					groups: { [groupKey(group)]: { identity: group, members: [parentIdentity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [parentIdentity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },
 					awaits: {},
 					admittedFacts: {},
 				}
@@ -506,6 +507,7 @@ describe("v3 architecture contracts", () => {
 				if (run === null) return
 				const successorIdentity = { kind: "task" as const, chain, value: "next" }
 				const successor: Task = {
+					kind: "task",
 					identity: successorIdentity,
 					group,
 					input: { definition: definitionRef, entrypoint: "root", basePin: "base", value: { result: "done" }, valueIdentity: "next-input" },
@@ -586,6 +588,7 @@ describe("v3 architecture contracts", () => {
 				const run = { kind: "run" as const, closure, value: "run" }
 				const wrongRun = { ...run, value: "wrong-run" }
 				const task: Task = {
+					kind: "task",
 					identity,
 					group,
 					input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: "input" },
@@ -597,7 +600,7 @@ describe("v3 architecture contracts", () => {
 				yield* store.bootstrap({
 					chain,
 					tasks: { [taskKey(identity)]: task },
-					groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },
 					awaits: {},
 					admittedFacts: {},
 				})
@@ -642,6 +645,7 @@ describe("v3 architecture contracts", () => {
 					const group = { kind: "group" as const, chain, value: "root" }
 					const identity = { kind: "task" as const, chain, value: "task" }
 					const task: Task = {
+						kind: "task",
 						identity,
 						group,
 						input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: "input" },
@@ -651,7 +655,7 @@ describe("v3 architecture contracts", () => {
 					const snapshot: ObjectDomainSnapshot = {
 						chain,
 						tasks: { [taskKey(identity)]: task },
-						groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+						groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },
 						awaits: { "chain/task/0/site": { kind: "waiting", identity: awaitIdentity, parentClosure: { kind: "closure", task: identity, attempt: 0 }, child: identity } },
 						admittedFacts: {},
 					}
@@ -682,6 +686,7 @@ describe("v3 architecture contracts", () => {
 				const closureIdentity = { kind: "closure" as const, task: identity, attempt: 0 }
 				const run = { kind: "run" as const, closure: closureIdentity, value: "run" }
 				const task: Task = {
+					kind: "task",
 					identity,
 					group,
 					input: {
@@ -699,7 +704,7 @@ describe("v3 architecture contracts", () => {
 				yield* store.bootstrap({
 					chain,
 					tasks: { [taskKey(identity)]: task },
-					groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },
 					awaits: {},
 					admittedFacts: {},
 				})
@@ -746,8 +751,8 @@ describe("v3 architecture contracts", () => {
 					const publication = { kind: "no-work" as const, observedAt: 1 }
 					const snapshot: ObjectDomainSnapshot = {
 						chain,
-						groups: { [groupKey(group)]: { identity: group, members: fixture.member ? [identity] : [], memberVersion: fixture.member ? 1 : 0, wait: { kind: "none" }, consumer: { kind: "drain" }, state: fixture.consumed ? { kind: "consumed", consumption: { kind: "consumption", group, value: "done" }, consumedAt: 1 } : { kind: "open" } } },
-						tasks: { [taskKey(identity)]: { identity, group, input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: "input" }, dependsOn: [], priority: 0, state: { kind: "settled", settlement: { kind: "returned", value: null }, settledAt: 1 }, closure: { kind: "evidence-frozen", identity: closure, basePin: "base", branch: "coder-loop/v3/test", worktree: "/worktree", scratch: "/scratch", publication } } },
+						groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: fixture.member ? [identity] : [], memberVersion: fixture.member ? 1 : 0, wait: { kind: "none" }, join: { kind: "drain" }, state: fixture.consumed ? { kind: "consumed", consumption: { kind: "consumption", group, value: "done" }, consumedAt: 1 } : { kind: "open" } } },
+						tasks: { [taskKey(identity)]: { kind: "task", identity, group, input: { definition: { kind: "published-definition", content: { kind: "definition-content", digest: "content" }, product: { kind: "compiled-product", digest: "product" } }, entrypoint: "root", basePin: "base", value: null, valueIdentity: "input" }, dependsOn: [], priority: 0, state: { kind: "settled", settlement: { kind: "returned", value: null }, settledAt: 1 }, closure: { kind: "evidence-frozen", identity: closure, basePin: "base", branch: "coder-loop/v3/test", worktree: "/worktree", scratch: "/scratch", publication } } },
 						awaits: {},
 						admittedFacts: {},
 					}
@@ -799,6 +804,7 @@ describe("v3 architecture contracts", () => {
 				const closure = { kind: "closure" as const, task: identity, attempt: 0 }
 				const run = { kind: "run" as const, closure, value: "run" }
 				const task: Task = {
+					kind: "task",
 					identity,
 					group,
 					input: {
@@ -816,7 +822,7 @@ describe("v3 architecture contracts", () => {
 				yield* store.bootstrap({
 					chain,
 					tasks: { [taskKey(identity)]: task },
-					groups: { [groupKey(group)]: { identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, consumer: { kind: "drain" }, state: { kind: "open" } } },
+					groups: { [groupKey(group)]: { kind: "task-group", identity: group, members: [identity], memberVersion: 1, wait: { kind: "none" }, join: { kind: "drain" }, state: { kind: "open" } } },
 					awaits: {},
 					admittedFacts: {},
 				})

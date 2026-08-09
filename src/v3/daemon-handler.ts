@@ -226,6 +226,7 @@ function bootstrapSnapshot(command: ChainBootstrapCommand, root: RecursiveTaskDe
 	const identities = initialLeafDefinitions(root).map((leaf) => ({ kind: "task" as const, chain: command.chain, value: leaf.id }))
 	const valueIdentity = createHash("sha256").update(JSON.stringify(command.input)).digest("hex")
 	const tasks = Object.fromEntries(identities.map((identity): [string, Task] => [taskKey(identity), {
+		kind: "task",
 		identity,
 		group,
 		input: { definition: command.definition, entrypoint: identity.value, basePin: command.basePin, value: command.input, valueIdentity },
@@ -239,11 +240,12 @@ function bootstrapSnapshot(command: ChainBootstrapCommand, root: RecursiveTaskDe
 		tasks,
 		groups: {
 			[groupKey(group)]: {
+				kind: "task-group",
 				identity: group,
 				members: identities,
 				memberVersion: identities.length,
 				wait: waitWindow(root),
-				consumer: root.kind === "par" ? { kind: "finalizer", definition: command.definition, entrypoint: root.finalizer.task.id } : { kind: "drain" },
+				join: root.kind === "par" ? { kind: "finalizer", definition: command.definition, entrypoint: root.finalizer.task.id } : { kind: "drain" },
 				state: { kind: "open" },
 			},
 		},

@@ -455,7 +455,7 @@ function makeSuccessor(parent: Task, target: string, context: ContextValues, dec
 	const itemNames = new Set(declarations.filter((declaration) => declaration.source.kind === "item").map((declaration) => declaration.name))
 	const value = Object.fromEntries(Object.entries(context).filter(([name]) => itemNames.has(name)))
 	const valueIdentity = createHash("sha256").update(JSON.stringify(value)).digest("hex")
-	return { identity, group: parent.group, input: { definition: parent.input.definition, entrypoint: identity.value, basePin: parent.input.basePin, value, valueIdentity }, dependsOn: [parent.identity], priority: parent.priority, state: { kind: "ready" }, closure: { kind: "unallocated" } }
+	return { kind: "task", identity, group: parent.group, input: { definition: parent.input.definition, entrypoint: identity.value, basePin: parent.input.basePin, value, valueIdentity }, dependsOn: [parent.identity], priority: parent.priority, state: { kind: "ready" }, closure: { kind: "unallocated" } }
 }
 
 function failureSuccessor(contract: Extract<RecursiveTaskDefinition, { readonly kind: "leaf" }>["contract"]): string | null {
