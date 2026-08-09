@@ -371,10 +371,18 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 		}
 		case "task-held": {
 			const task = requireTask(database, transition.task, transition.family)
-			if (transition.expectedRun === null) {
-				if (task.state.kind !== "ready") reject(transition.family, "state-mismatch", "pre-spawn hold requires a ready task")
-			} else {
-				if (task.state.kind !== "leased" || runKey(task.state.run) !== runKey(transition.expectedRun)) reject(transition.family, "run-mismatch", "unknown-effect hold requires the matching lease")
+			switch (transition.reason.kind) {
+				case "pre-spawn-absence":
+					if (transition.expectedRun !== null) reject(transition.family, "run-mismatch", "pre-spawn hold cannot reference a run")
+					if (task.state.kind !== "ready") reject(transition.family, "state-mismatch", "pre-spawn hold requires a ready task")
+					break
+				case "unknown-effect":
+					if (transition.expectedRun === null) reject(transition.family, "state-mismatch", "unknown-effect hold requires a leased task")
+					if (runKey(transition.reason.run) !== runKey(transition.expectedRun)) reject(transition.family, "run-mismatch", "unknown-effect hold requires one matching run identity")
+					if (task.state.kind !== "leased" || runKey(task.state.run) !== runKey(transition.expectedRun)) reject(transition.family, "run-mismatch", "unknown-effect hold requires the matching lease")
+					break
+				default:
+					return assertNever(transition.reason)
 			}
 			updateTask(database, { ...task, state: { kind: "held", reason: transition.reason } })
 			return
