@@ -100,6 +100,27 @@ describe("v3 architecture contracts", () => {
 		expect(selectReadyTask([{ chain, tasks: [held] }])).toBeNull()
 	})
 
+	test("store rejects an existing unversioned shape without changing it", async () => {
+		const root = await mkdtemp(join(process.cwd(), ".v3-store-schema-"))
+		const databaseFile = join(root, "legacy.sqlite")
+		try {
+			const seed = new Database(databaseFile)
+			seed.exec("CREATE TABLE v3_meta(schema_version INTEGER); CREATE TABLE v3_chains(old_column TEXT)")
+			const before = seed.query<{ name: string; sql: string }, []>("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name").all()
+			seed.close()
+
+			const exit = await Effect.runPromiseExit(Effect.scoped(ObjectDomainStore.pipe(Effect.provide(makeObjectDomainStoreLive(databaseFile)))))
+			expect(exit._tag).toBe("Failure")
+
+			const observed = new Database(databaseFile)
+			expect(observed.query<{ name: string; sql: string }, []>("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name").all()).toEqual(before)
+			expect(observed.query<{ schema_version: number }, []>("SELECT schema_version FROM v3_meta").all()).toEqual([])
+			observed.close()
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
 	test("compile remains incomplete until every declared asset resolves", () => {
 		const compiled = compilePresetDefinition(definition)
 		expect(compiled.kind).toBe("compiled")

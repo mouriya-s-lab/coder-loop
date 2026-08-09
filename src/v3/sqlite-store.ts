@@ -95,8 +95,13 @@ export function makeObjectDomainStoreLive(databaseFile: string): Layer.Layer<Obj
 			try: async () => {
 				await mkdir(dirname(databaseFile), { recursive: true })
 				const database = new Database(databaseFile, { create: true, strict: true })
-				configureDatabase(database)
-				return makeService(database)
+				try {
+					configureDatabase(database)
+					return makeService(database)
+				} catch (error) {
+					database.close()
+					throw error
+				}
 			},
 			catch: (error) => error instanceof StoreAbort ? error.detail : storeIo("open", error),
 		}),
@@ -119,17 +124,35 @@ function makeService(database: Database): ObjectDomainStoreService & { readonly 
 }
 
 function configureDatabase(database: Database): void {
+	const existingTables = database.query<BoundaryRecord, []>("SELECT name AS identity_key FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()
+		.map((row) => IdentityRowBoundary.assert(row).identity_key)
+	const allowedTables = new Set(["v3_meta", "v3_chains", "v3_groups", "v3_tasks", "v3_awaits", "v3_facts", "v3_transitions", "v3_function_checkpoints"])
+	const isFresh = existingTables.length === 0
+	if (!isFresh && (existingTables.length !== allowedTables.size || existingTables.some((table) => !allowedTables.has(table)))) {
+		throw new StoreAbort({ kind: "store-schema", reason: "legacy-schema", message: "v3 store refuses to interpret a legacy or mixed schema" })
+	}
+	if (!isFresh) {
+		let versions: readonly { readonly schema_version: number }[]
+		try {
+			versions = database.query<{ schema_version: number }, []>("SELECT schema_version FROM v3_meta").all()
+		} catch {
+			throw new StoreAbort({ kind: "store-schema", reason: "legacy-schema", message: "v3 store cannot prove the existing metadata shape" })
+		}
+		if (versions.length !== 1) {
+			throw new StoreAbort({ kind: "store-schema", reason: "legacy-schema", message: "v3 store requires exactly one existing schema version" })
+		}
+		const version = versions[0]
+		if (version === undefined || version.schema_version !== SCHEMA_VERSION) {
+			throw new StoreAbort({ kind: "store-schema", reason: "version-mismatch", message: `expected schema ${SCHEMA_VERSION}, got ${version?.schema_version ?? "missing"}` })
+		}
+	}
 	database.exec("PRAGMA foreign_keys = ON")
 	database.exec("PRAGMA busy_timeout = 5000")
 	const journal = database.query<{ journal_mode: string }, []>("PRAGMA journal_mode = WAL").get()
 	if (journal?.journal_mode.toLowerCase() !== "wal") throw new Error(`expected WAL, got ${journal?.journal_mode ?? "missing"}`)
-	const existingTables = database.query<BoundaryRecord, []>("SELECT name AS identity_key FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()
-		.map((row) => IdentityRowBoundary.assert(row).identity_key)
-	const allowedTables = new Set(["v3_meta", "v3_chains", "v3_groups", "v3_tasks", "v3_awaits", "v3_facts", "v3_transitions", "v3_function_checkpoints"])
-	if (existingTables.some((table) => !allowedTables.has(table)) || (existingTables.length > 0 && !existingTables.includes("v3_meta"))) {
-		throw new StoreAbort({ kind: "store-schema", reason: "legacy-schema", message: "v3 store refuses to interpret a legacy or mixed schema" })
-	}
-	database.exec(`
+	if (!isFresh) return
+	database.transaction(() => {
+		database.exec(`
 		CREATE TABLE IF NOT EXISTS v3_meta (schema_version INTEGER NOT NULL CHECK (schema_version = 3));
 		CREATE TABLE IF NOT EXISTS v3_chains (chain_key TEXT PRIMARY KEY, payload TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS v3_groups (group_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, payload TEXT NOT NULL);
@@ -138,10 +161,9 @@ function configureDatabase(database: Database): void {
 		CREATE TABLE IF NOT EXISTS v3_facts (fact_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, task_key TEXT NOT NULL REFERENCES v3_tasks(task_key));
 		CREATE TABLE IF NOT EXISTS v3_transitions (cursor INTEGER PRIMARY KEY AUTOINCREMENT, identity_key TEXT NOT NULL UNIQUE, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, family TEXT NOT NULL, payload TEXT NOT NULL, committed_at INTEGER NOT NULL);
 		CREATE TABLE IF NOT EXISTS v3_function_checkpoints (run_key TEXT PRIMARY KEY, chain_key TEXT NOT NULL REFERENCES v3_chains(chain_key) ON DELETE CASCADE, payload TEXT NOT NULL);
-	`)
-	const version = database.query<{ schema_version: number }, []>("SELECT schema_version FROM v3_meta").get()
-	if (version === null) database.query<never, { version: number }>("INSERT INTO v3_meta (schema_version) VALUES ($version)").run({ version: SCHEMA_VERSION })
-	else if (version.schema_version !== SCHEMA_VERSION) throw new StoreAbort({ kind: "store-schema", reason: "version-mismatch", message: `expected schema ${SCHEMA_VERSION}, got ${version.schema_version}` })
+		`)
+		database.query<never, { version: number }>("INSERT INTO v3_meta (schema_version) VALUES ($version)").run({ version: SCHEMA_VERSION })
+	})()
 }
 
 function bootstrap(database: Database, snapshot: ObjectDomainSnapshot): void {
