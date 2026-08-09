@@ -11,6 +11,7 @@ import { HookRuntime } from "../../../src/v3/hooks"
 import { groupKey, taskKey, type ObjectDomainSnapshot, type Task } from "../../../src/v3/object-domain"
 import { ProviderFactStore, RunnerProvider } from "../../../src/v3/provider"
 import { makeObjectDomainStoreLive, ObjectDomainStore } from "../../../src/v3/sqlite-store"
+import { insertObjectDomainFixture } from "./store-fixture"
 
 const run = { kind: "agent-run" as const, chainId: "chain", taskId: "task", closureId: "closure", runId: "run" }
 const common = { run, stepId: "step", runnerSessionIdentity: null }
@@ -140,7 +141,7 @@ describe("function checkpoint persistence", () => {
 				await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
 					const objectStore = yield* ObjectDomainStore
 					const runtime = yield* FunctionRuntime
-					yield* objectStore.bootstrap(snapshot)
+					insertObjectDomainFixture(join(root, `${stage}.sqlite`), snapshot)
 					yield* objectStore.writeFunctionCheckpoint(checkpoint)
 					const result = yield* runtime.execute(identity)
 					expect(result, stage).toMatchObject({ kind: "settled", settlement: { kind: "exception", cause: { cause: { kind: "policy", reason: "program-fault" } } } })

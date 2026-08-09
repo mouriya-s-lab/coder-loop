@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { Effect } from "effect"
 import { groupKey, taskKey, type GroupIdentity, type ObjectDomainSnapshot, type Task } from "../../../src/v3/object-domain"
 import { makeObjectDomainStoreLive, ObjectDomainStore } from "../../../src/v3/sqlite-store"
+import { insertObjectDomainFixture } from "./store-fixture"
 
 type ConsumptionCase = "consumer-ready" | "wrong-group" | "valid"
 
@@ -58,7 +59,7 @@ async function runCase(mode: ConsumptionCase, databaseFile: string): Promise<{ r
 	}
 	return Effect.runPromise(Effect.scoped(Effect.gen(function*() {
 		const store = yield* ObjectDomainStore
-		yield* store.bootstrap(snapshot)
+		insertObjectDomainFixture(databaseFile, snapshot)
 		const exit = yield* Effect.exit(store.commit({
 			identity: `consume-${mode}`,
 			transition: { family: "group-consumption", group, state: { kind: "consumed", consumption: { kind: "consumption", group: consumptionGroup, value: "checkpoint" }, consumedAt: 3 }, settlements: [memberSettlement] },

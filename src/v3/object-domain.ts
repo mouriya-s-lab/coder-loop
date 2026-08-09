@@ -218,7 +218,14 @@ export type ObjectDomainAction =
 	| { readonly kind: "stop-engine" }
 
 export type CommittedTransition =
-	| { readonly family: "task-admission"; readonly fact: FactIdentity; readonly task: Task; readonly position: AdmissionPosition }
+	| {
+		readonly family: "task-admission"
+		readonly mode: "bootstrap"
+		readonly chain: ChainIdentity
+		readonly group: Omit<TaskGroup, "members" | "memberVersion" | "state">
+		readonly admissions: readonly { readonly fact: FactIdentity; readonly task: Omit<Task, "state" | "closure"> }[]
+	}
+	| { readonly family: "task-admission"; readonly mode: "growth"; readonly fact: FactIdentity; readonly task: Task; readonly position: AdmissionPosition }
 	| { readonly family: "closure-allocation-start"; readonly task: TaskIdentity; readonly allocation: Extract<ClosureResourceState, { kind: "allocating" }> }
 	| { readonly family: "closure-allocation-cleanup"; readonly task: TaskIdentity; readonly allocation: Extract<ClosureResourceState, { kind: "allocating" }> }
 	| { readonly family: "lease-acquire"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>; readonly acquiredAt: number; readonly expiresAt: number }
