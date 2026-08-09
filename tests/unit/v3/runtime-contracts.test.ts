@@ -31,7 +31,21 @@ import {
 import { makeProviderFactStoreLive, ProviderFactStore, runProviderFactIdentity } from "../../../src/v3/provider"
 import { makeRepositoryGitLive, RepositoryGit } from "../../../src/v3/git-service"
 import { buildEventProjection, buildStatusProjection } from "../../../src/v3/projection"
+
 import { selectReadyTask } from "../../../src/v3/scheduler"
+
+import {
+	parseFunctionCheckpoint,
+	parsePersistedAwait,
+	parsePersistedClosure,
+	parsePersistedGroup,
+	parsePersistedGroupState,
+	parsePersistedPublication,
+	parsePersistedSettlement,
+	parsePersistedTask,
+} from "../../../src/v3/persistence"
+import { parsePresetDefinition } from "../../../src/v3/schema"
+
 import { makeObjectDomainStoreLive, ObjectDomainStore } from "../../../src/v3/sqlite-store"
 
 const definition: PresetDefinition = {
@@ -73,6 +87,7 @@ const authority: AgentRunAuthority = {
 }
 
 describe("v3 architecture contracts", () => {
+
 	test("provider terminal and loss facts share one durable winner per run", async () => {
 		const root = await mkdtemp("/tmp/coder-loop-provider-winner-")
 		const run: RunIdentity = {
@@ -97,6 +112,7 @@ describe("v3 architecture contracts", () => {
 			await rm(root, { recursive: true, force: true })
 		}
 	})
+
 
 	test("task selection excludes every non-ready state", () => {
 		const chain = { kind: "chain" as const, value: "selection" }
@@ -127,6 +143,7 @@ describe("v3 architecture contracts", () => {
 		expect(selectReadyTask([{ chain, tasks: [held] }])).toBeNull()
 	})
 
+
 	test("store rejects an existing unversioned shape without changing it", async () => {
 		const root = await mkdtemp(join(process.cwd(), ".v3-store-schema-"))
 		const databaseFile = join(root, "legacy.sqlite")
@@ -146,6 +163,79 @@ describe("v3 architecture contracts", () => {
 		} finally {
 			await rm(root, { recursive: true, force: true })
 		}
+	})
+
+	test("untrusted v3 object boundaries reject undeclared fields", () => {
+		if (definition.task.kind !== "leaf") throw new Error("test fixture must remain a leaf definition")
+		const leaf = definition.task
+		const definitionCandidates = [
+			{ ...definition, phases: [] },
+			{ ...definition, sourceIdentity: { ...definition.sourceIdentity, alias: "legacy" } },
+			{ ...definition, values: [{ ...definition.values[0]!, alias: "legacy" }, ...definition.values.slice(1)] },
+			{ ...definition, consumers: [{ ...definition.consumers[0]!, alias: "legacy" }, ...definition.consumers.slice(1)] },
+			{ ...definition, task: { ...leaf, phases: [] } },
+			{ ...definition, task: { ...leaf, contract: { ...leaf.contract, alias: "legacy" } } },
+		]
+		for (const candidate of definitionCandidates) expect(parsePresetDefinition(candidate).kind).toBe("rejected")
+
+		const chain = { kind: "chain" as const, value: "chain" }
+		const taskIdentity = { kind: "task" as const, chain, value: "task" }
+		const groupIdentity = { kind: "group" as const, chain, value: "group" }
+		const closureIdentity = { kind: "closure" as const, task: taskIdentity, attempt: 0 }
+		const definitionRef = {
+			kind: "published-definition" as const,
+			content: { kind: "definition-content" as const, digest: "content" },
+			product: { kind: "compiled-product" as const, digest: "product" },
+		}
+		const task = {
+			identity: taskIdentity,
+			group: groupIdentity,
+			input: { definition: definitionRef, entrypoint: "root", basePin: "base", value: "input", valueIdentity: "value" },
+			dependsOn: [],
+			priority: 0,
+			state: { kind: "ready" as const },
+			closure: { kind: "unallocated" as const },
+		}
+		const group = {
+			identity: groupIdentity,
+			members: [taskIdentity],
+			memberVersion: 0,
+			wait: { kind: "none" as const },
+			consumer: { kind: "drain" as const },
+			state: { kind: "open" as const },
+		}
+		const awaitIdentity = { kind: "await" as const, parent: taskIdentity, attempt: 0, site: "site" }
+		const authority = { kind: "agent-run" as const, chainId: "chain", taskId: "task", closureId: "closure", runId: "run" }
+		const checkpoint = {
+			run: authority,
+			stepId: "step",
+			runnerSessionIdentity: null,
+			context0: null,
+			context1: null,
+			context2: null,
+			context3: null,
+			prompt: null,
+			agent: { state: "not-opened" as const, accepted: {} },
+			predicates: {},
+		}
+		const persistedCandidates = [
+			parsePersistedTask({ ...task, legacy: true }),
+			parsePersistedTask({ ...task, identity: { ...task.identity, legacy: true } }),
+			parsePersistedTask({ ...task, state: { ...task.state, legacy: true } }),
+			parsePersistedGroup({ ...group, legacy: true }),
+			parsePersistedGroup({ ...group, consumer: { ...group.consumer, legacy: true } }),
+			parsePersistedAwait({ kind: "waiting", identity: awaitIdentity, parentClosure: closureIdentity, child: taskIdentity, legacy: true }),
+			parsePersistedPublication({ kind: "no-work", observedAt: 1, legacy: true }),
+			parsePersistedClosure({ kind: "unallocated", legacy: true }),
+			parsePersistedGroupState({ kind: "open", legacy: true }),
+			parsePersistedSettlement({ kind: "returned", value: "ok", legacy: true }),
+			parsePersistedSettlement({ kind: "exception", cause: { kind: "exception", cause: { kind: "policy", reason: "program-fault", legacy: true } }, attempt: 0, closure: closureIdentity }),
+			parseFunctionCheckpoint({ ...checkpoint, legacy: true }),
+			parseFunctionCheckpoint({ ...checkpoint, run: { ...checkpoint.run, legacy: true } }),
+		]
+		for (const candidate of persistedCandidates) expect(candidate).toMatchObject({ kind: "rejected", error: { kind: "persisted-shape-invalid" } })
+
+
 	})
 
 	test("compile remains incomplete until every declared asset resolves", () => {
