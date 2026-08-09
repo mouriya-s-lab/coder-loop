@@ -607,6 +607,7 @@ describe("v3 architecture contracts", () => {
 				if (readyDisguised._tag === "Left") expect(readyDisguised.left).toEqual(expect.objectContaining({ kind: "transition-rejected", family: "task-held", reason: "state-mismatch" }))
 				expect((yield* store.readSnapshot(chain)).tasks[taskKey(identity)]?.state.kind).toBe("ready")
 
+				yield* store.commit({ identity: "allocation-start", transition: { family: "closure-allocation-start", task: identity, allocation: { kind: "allocating", identity: closure, allocation: "allocation", basePin: "base", branch: "branch" } } })
 				yield* store.commit({ identity: "lease", transition: { family: "lease-acquire", task: identity, run, closure: { kind: "active", identity: closure, basePin: "base", branch: "branch", worktree: join(root, "worktree"), scratch: join(root, "scratch") }, acquiredAt: 2, expiresAt: 3 } })
 				const leasedDisguised = yield* Effect.either(store.commit({ identity: "leased-disguised", transition: { family: "task-held", task: identity, expectedRun: run, reason: { kind: "pre-spawn-absence", endpoint: "runner", detail: "missing", observedAt: 2 } } }))
 				expect(leasedDisguised._tag).toBe("Left")
