@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { type as arkType } from "arktype"
-import { parseDaemonRequest } from "./daemon-protocol"
+import { parseDaemonRequest, type DaemonRequest } from "./daemon-protocol"
 
 export type CliIo = {
 	readonly stdout: (text: string) => void
@@ -15,8 +15,12 @@ export async function runCli(argv: readonly string[], io: CliIo = defaultIo): Pr
 		const parsed = parseDaemonRequest({ schemaVersion: 3, requestId: randomUUID(), caller: invocation.caller, command: invocation.command })
 		if (parsed.kind === "rejected") throw new Error(parsed.rejection.issues.join("; "))
 		const response = await requestDaemon(invocation.socket, parsed.request, 8 * 1024 * 1024)
-		io.stdout(`${JSON.stringify(response.value, null, 2)}\n`)
-		return response.outcomeKind === "success" ? 0 : 1
+		if (response.kind !== "success") {
+			io.stderr(`${JSON.stringify(response.detail)}\n`)
+			return 1
+		}
+		io.stdout(`${JSON.stringify(response.output, null, 2)}\n`)
+		return 0
 	} catch (error) {
 		io.stderr(`${error instanceof Error ? error.message : String(error)}\n`)
 		return 2
@@ -29,12 +33,43 @@ type CliInvocation = {
 	readonly command: unknown
 }
 
-const ResponseBoundary = arkType({ schemaVersion: "3", requestId: "string|null", outcome: { kind: "'success'|'rejected'|'failure'", "[string]": "unknown" }, "+": "reject" })
+const ResponseEnvelopeBoundary = arkType({ schemaVersion: "3", requestId: "string|null", outcome: "unknown", "+": "reject" })
+const RejectedOutcomeBoundary = arkType({ kind: "'rejected'", rejection: "unknown", "+": "reject" })
+const FailureOutcomeBoundary = arkType({ kind: "'failure'", error: "unknown", "+": "reject" })
+const SuccessOutcomeBoundary = arkType({ kind: "'success'", value: "unknown", "+": "reject" })
 
-type ParsedResponse = {
-	readonly outcomeKind: "success" | "rejected" | "failure"
-	readonly value: typeof ResponseBoundary.infer
-}
+const StatusProjectionBoundary = arkType({
+	schemaVersion: "3",
+	chain: "string",
+	taskCounts: { ready: "number.integer >= 0", leased: "number.integer >= 0", suspended: "number.integer >= 0", held: "number.integer >= 0", settled: "number.integer >= 0", "+": "reject" },
+	ready: "string[]",
+	tasks: "object[]",
+	groups: "object[]",
+	awaits: "number.integer >= 0",
+	admittedFacts: "number.integer >= 0",
+	"+": "reject",
+})
+const EventProjectionBoundary = arkType({ schemaVersion: "3", chain: "string", transitions: "object[]", "+": "reject" })
+const AuditProjectionBoundary = arkType({ schemaVersion: "3", hooks: "object[]", providers: "object[]", "+": "reject" })
+const StatusSuccessBoundary = arkType({ kind: "'status'", projection: StatusProjectionBoundary, "+": "reject" })
+const EventsSuccessBoundary = arkType({ kind: "'events'", projection: EventProjectionBoundary, "+": "reject" })
+const AuditSuccessBoundary = arkType({ kind: "'audit'", projection: AuditProjectionBoundary, "+": "reject" })
+
+const SuccessKindByCommand = {
+	"definition-publish": "definition-published",
+	"chain-bootstrap": "chain-bootstrapped",
+	"status-read": "status",
+	"events-read": "events",
+	"audit-read": "audit",
+	"task-admit": "admission",
+	"task-unhold": "task-unheld",
+	"agent-await": "await-suspended",
+	"agent-submit": "agent-submission",
+} as const
+
+type ParsedResponse =
+	| { readonly kind: "success"; readonly output: unknown }
+	| { readonly kind: "rejected" | "failure"; readonly detail: unknown }
 
 async function parseInvocation(argv: readonly string[]): Promise<CliInvocation> {
 	const args = [...argv]
@@ -127,7 +162,7 @@ async function parseInvocation(argv: readonly string[]): Promise<CliInvocation> 
 	throw new Error("usage: coder-loop-v3 --socket PATH <definition publish|chain bootstrap|status|events|audit|task admit|task unhold|agent admit|agent await|agent submit> [options]")
 }
 
-function requestDaemon(socketPath: string, request: unknown, maxResponseBytes: number): Promise<ParsedResponse> {
+function requestDaemon(socketPath: string, request: DaemonRequest, maxResponseBytes: number): Promise<ParsedResponse> {
 	const { promise, resolve, reject } = Promise.withResolvers<ParsedResponse>()
 	const socket = createConnection(socketPath)
 	let buffer = ""
@@ -148,15 +183,44 @@ function requestDaemon(socketPath: string, request: unknown, maxResponseBytes: n
 		let candidate: unknown
 		try { candidate = JSON.parse(buffer.slice(0, newline)) }
 		catch (error) { return fail(new Error(`daemon returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`)) }
-		const parsed = ResponseBoundary(candidate)
-		if (parsed instanceof arkType.errors) return fail(new Error(`daemon returned an invalid response: ${parsed.summary}`))
+		const parsed = parseResponse(candidate, request)
+		if (parsed instanceof Error) return fail(parsed)
 		settled = true
 		socket.end()
-		resolve({ outcomeKind: parsed.outcome.kind, value: parsed })
+		resolve(parsed)
 	})
 	socket.once("error", fail)
 	socket.once("end", () => { if (!settled) fail(new Error("daemon closed before returning a response")) })
 	return promise
+}
+
+function parseResponse(candidate: unknown, request: DaemonRequest): ParsedResponse | Error {
+	const envelope = ResponseEnvelopeBoundary(candidate)
+	if (envelope instanceof arkType.errors) return new Error(`daemon returned an invalid response: ${envelope.summary}`)
+	if (envelope.requestId !== request.requestId) return new Error(`daemon response requestId mismatch: expected ${request.requestId}, received ${envelope.requestId ?? "null"}`)
+	const rejected = RejectedOutcomeBoundary(envelope.outcome)
+	if (!(rejected instanceof arkType.errors)) return { kind: "rejected", detail: rejected.rejection }
+	const failure = FailureOutcomeBoundary(envelope.outcome)
+	if (!(failure instanceof arkType.errors)) return { kind: "failure", detail: failure.error }
+	const success = SuccessOutcomeBoundary(envelope.outcome)
+	if (success instanceof arkType.errors) return new Error(`daemon returned an invalid response outcome: ${success.summary}`)
+	const expectedKind = SuccessKindByCommand[request.command.kind]
+	if (request.command.kind === "status-read") return parseProjectionSuccess(StatusSuccessBoundary, success.value, expectedKind)
+	if (request.command.kind === "events-read") return parseProjectionSuccess(EventsSuccessBoundary, success.value, expectedKind)
+	if (request.command.kind === "audit-read") return parseProjectionSuccess(AuditSuccessBoundary, success.value, expectedKind)
+	if (!isRecordWithKind(success.value) || success.value.kind !== expectedKind) return new Error(`daemon returned success kind ${isRecordWithKind(success.value) ? success.value.kind : "<missing>"}; expected ${expectedKind}`)
+	return { kind: "success", output: success.value }
+}
+
+function parseProjectionSuccess<T extends { readonly projection: unknown }>(boundary: (candidate: unknown) => T | arkType.errors, candidate: unknown, expectedKind: string): ParsedResponse | Error {
+	const parsed = boundary(candidate)
+	return parsed instanceof arkType.errors
+		? new Error(`daemon returned an invalid ${expectedKind} response: ${parsed.summary}`)
+		: { kind: "success", output: parsed.projection }
+}
+
+function isRecordWithKind(value: unknown): value is { readonly kind: string } {
+	return typeof value === "object" && value !== null && "kind" in value && typeof value.kind === "string"
 }
 
 function parseEnvironmentJson(name: string): unknown {

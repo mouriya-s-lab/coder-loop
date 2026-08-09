@@ -161,8 +161,19 @@ describe("v3 architecture contracts", () => {
 				buffer += chunk
 				const newline = buffer.indexOf("\n")
 				if (newline < 0) return
-				request.resolve(JSON.parse(buffer.slice(0, newline)))
-				socket.end(`${JSON.stringify({ schemaVersion: 3, requestId: "response", outcome: { kind: "success", value: { kind: "status" } } })}\n`)
+				const candidate = JSON.parse(buffer.slice(0, newline))
+				request.resolve(candidate)
+				socket.end(`${JSON.stringify({
+					schemaVersion: 3,
+					requestId: candidate.requestId,
+					outcome: {
+						kind: "success",
+						value: {
+							kind: "status",
+							projection: { schemaVersion: 3, chain: "chain", taskCounts: { ready: 0, leased: 0, suspended: 0, held: 0, settled: 0 }, ready: [], tasks: [], groups: [], awaits: 0, admittedFacts: 0 },
+						},
+					},
+				})}\n`)
 			})
 		})
 		try {
@@ -175,7 +186,7 @@ describe("v3 architecture contracts", () => {
 			const exit = await runCli(["status", "--socket", socketPath, "--chain", "chain"], { stdout: (text) => stdout.push(text), stderr: (text) => stderr.push(text) })
 			expect(exit).toBe(0)
 			expect(stderr).toEqual([])
-			expect(stdout).toHaveLength(1)
+			expect(JSON.parse(stdout.join(""))).toEqual({ schemaVersion: 3, chain: "chain", taskCounts: { ready: 0, leased: 0, suspended: 0, held: 0, settled: 0 }, ready: [], tasks: [], groups: [], awaits: 0, admittedFacts: 0 })
 			expect(await request.promise).toMatchObject({ caller: { kind: "operator" }, command: { kind: "status-read", chain: { kind: "chain", value: "chain" } } })
 		} finally {
 			await new Promise<void>((resolve) => server.close(() => resolve()))
