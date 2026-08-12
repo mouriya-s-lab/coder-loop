@@ -34,6 +34,11 @@ export type DefinitionStoreError =
 	| { readonly kind: "publish-io"; readonly stage: "prepare" | "write" | "fsync" | "rename"; readonly path: string; readonly message: string }
 	| { readonly kind: "identity-collision"; readonly ref: DefinitionRef }
 	| {
+		readonly kind: "resolve-rejected"
+		readonly ref: DefinitionRef
+		readonly reason: "path-traversal" | "invalid-digest"
+	}
+	| {
 		readonly kind: "definition-corrupt"
 		readonly ref: DefinitionRef
 		readonly reason: "missing-artifact" | "manifest-invalid" | "asset-missing" | "asset-digest-mismatch" | "identity-mismatch"
@@ -97,44 +102,49 @@ function publishDefinition(
 
 	return Effect.tryPromise({
 		try: async () => {
-			await mkdir(staging, { recursive: true })
+			await stagedIo("prepare", staging, () => mkdir(staging, { recursive: true }))
 			const directories = new Set<string>([staging])
 			for (const [relativePath, bytes] of Object.entries(normalizedAssets)) {
 				const path = safeAssetPath(staging, relativePath)
-				await mkdir(dirname(path), { recursive: true })
+				await stagedIo("prepare", dirname(path), () => mkdir(dirname(path), { recursive: true }))
 				directories.add(dirname(path))
-				const handle = await open(path, "wx")
+				const handle = await stagedIo("write", path, () => open(path, "wx"))
 				try {
-					await handle.writeFile(bytes)
-					await handle.sync()
+					await stagedIo("write", path, () => handle.writeFile(bytes))
+					await stagedIo("fsync", path, () => handle.sync())
 				} finally {
 					await handle.close()
 				}
 			}
-			for (const directory of [...directories].sort((left, right) => right.length - left.length)) await syncDirectory(directory)
+			for (const directory of [...directories].sort((left, right) => right.length - left.length)) {
+				await stagedIo("fsync", directory, () => syncDirectory(directory))
+			}
 			const manifestPath = join(staging, "manifest.json")
-			const manifestHandle = await open(manifestPath, "wx")
+			const manifestHandle = await stagedIo("write", manifestPath, () => open(manifestPath, "wx"))
 			try {
-				await manifestHandle.writeFile(`${JSON.stringify(manifest)}\n`)
-				await manifestHandle.sync()
+				await stagedIo("write", manifestPath, () => manifestHandle.writeFile(`${JSON.stringify(manifest)}\n`))
+				await stagedIo("fsync", manifestPath, () => manifestHandle.sync())
 			} finally {
 				await manifestHandle.close()
 			}
-			const stagingHandle = await open(staging, "r")
+			const stagingHandle = await stagedIo("fsync", staging, () => open(staging, "r"))
 			try {
-				await stagingHandle.sync()
+				await stagedIo("fsync", staging, () => stagingHandle.sync())
 			} finally {
 				await stagingHandle.close()
 			}
 
 			const verified = await resolveBundleFromPath(staging, ref)
 			if (verified.kind === "error") throw new DefinitionProtocolFailure(verified.error)
-			await mkdir(dirname(target), { recursive: true })
+			await stagedIo("prepare", dirname(target), () => mkdir(dirname(target), { recursive: true }))
 			try {
-				await rename(staging, target)
-				await syncDirectory(dirname(target))
+				await stagedIo("rename", staging, () => rename(staging, target))
+				await stagedIo("fsync", dirname(target), () => syncDirectory(dirname(target)))
 			} catch (error) {
-				if (!(await pathExists(target))) throw error
+				if (error instanceof DefinitionProtocolFailure) throw error
+				if (!(await pathExists(target))) {
+					throw error instanceof StagedIoFailure ? error : new StagedIoFailure("rename", staging, error)
+				}
 				const existing = await resolveBundleFromPath(target, ref)
 				if (existing.kind === "error") throw new DefinitionProtocolFailure({ kind: "identity-collision", ref })
 				await rm(staging, { recursive: true, force: true })
@@ -143,21 +153,28 @@ function publishDefinition(
 		},
 		catch: (error): DefinitionStoreError => {
 			if (error instanceof DefinitionProtocolFailure) return error.failure
-			return { kind: "publish-io", stage: "write", path: staging, message: error instanceof Error ? error.message : String(error) }
+			if (error instanceof StagedIoFailure) return { kind: "publish-io", stage: error.stage, path: error.path, message: error.message }
+			throw error
 		},
 	})
 }
 
 function resolveDefinition(root: string, ref: DefinitionRef): Effect.Effect<DefinitionBundle, DefinitionStoreError> {
+	const digest = ref.content.digest
+	if (digest.length === 0) return Effect.fail({ kind: "resolve-rejected", ref, reason: "invalid-digest" })
+	if (digest.startsWith("/") || digest.split(/[\\/]+/u).includes("..")) {
+		return Effect.fail({ kind: "resolve-rejected", ref, reason: "path-traversal" })
+	}
 	return Effect.tryPromise({
 		try: async () => {
 			const resolved = await resolveBundleFromPath(definitionPath(root, ref), ref)
 			if (resolved.kind === "error") throw new DefinitionProtocolFailure(resolved.error)
 			return resolved.bundle
 		},
-		catch: (error): DefinitionStoreError => error instanceof DefinitionProtocolFailure
-			? error.failure
-			: { kind: "definition-corrupt", ref, reason: "missing-artifact", asset: null },
+		catch: (error): DefinitionStoreError => {
+			if (error instanceof DefinitionProtocolFailure) return error.failure
+			throw error
+		},
 	})
 }
 
@@ -251,6 +268,7 @@ function definitionPath(root: string, ref: DefinitionRef): string {
 	return join(root, "definitions", ref.content.digest)
 }
 
+
 function safeAssetPath(root: string, relativePath: string): string {
 	if (relativePath.length === 0 || relativePath.startsWith("/") || relativePath.split(/[\\/]+/u).includes("..")) {
 		throw new Error(`invalid definition asset path: ${relativePath}`)
@@ -283,5 +301,28 @@ async function pathExists(path: string): Promise<boolean> {
 class DefinitionProtocolFailure extends Error {
 	constructor(readonly failure: DefinitionStoreError) {
 		super(failure.kind)
+	}
+}
+
+class StagedIoFailure extends Error {
+	constructor(
+		readonly stage: Extract<DefinitionStoreError, { kind: "publish-io" }>["stage"],
+		readonly path: string,
+		cause: unknown,
+	) {
+		super(cause instanceof Error ? cause.message : String(cause))
+	}
+}
+
+async function stagedIo<T>(
+	stage: Extract<DefinitionStoreError, { kind: "publish-io" }>["stage"],
+	path: string,
+	run: () => Promise<T>,
+): Promise<T> {
+	try {
+		return await run()
+	} catch (error) {
+		if (error instanceof StagedIoFailure || error instanceof DefinitionProtocolFailure) throw error
+		throw new StagedIoFailure(stage, path, error)
 	}
 }
