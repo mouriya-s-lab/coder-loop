@@ -320,15 +320,6 @@ export function encodePersisted(value: Task | TaskGroup | AwaitRecord | TaskSett
 	return JSON.stringify(value)
 }
 
-export function decodePersisted(raw: string): PersistenceParseResult<JsonValue> {
-	let candidate: unknown
-	try {
-		candidate = JSON.parse(raw)
-	} catch (error) {
-		return rejected("task", error instanceof Error ? error.message : String(error))
-	}
-	return jsonValue(candidate, "persisted JSON")
-}
 
 function parseTaskState(candidate: typeof TaskStateBoundary.infer): PersistenceParseResult<Task["state"]> {
 	if (candidate.kind !== "settled") return { kind: "accepted", value: candidate }
