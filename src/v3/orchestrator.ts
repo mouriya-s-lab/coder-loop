@@ -130,7 +130,7 @@ function runCycle(dependencies: OrchestratorDependencies, chains: readonly Chain
 			{ concurrency: dependencies.maxConcurrency },
 		)
 		actions.push(...executed)
-		const reconciled = yield* reconcileChains(dependencies, chains, Date.now())
+		const reconciled = yield* reconcileChains(dependencies, chains, now)
 		const garbageCollected = yield* reconcileLifecycle(dependencies.recovery, chains)
 		return {
 			recovered,
