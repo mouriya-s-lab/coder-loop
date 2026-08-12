@@ -232,7 +232,7 @@ function listTransitions(database: Database, chain: ObjectDomainSnapshot["chain"
 	const boundary = arkType({
 		cursor: "number.integer > 0",
 		identity_key: "string",
-		family: "'task-admission' | 'closure-allocation-start' | 'closure-allocation-cleanup' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'await-consumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
+		family: "'task-admission' | 'closure-allocation-start' | 'closure-allocation-cleanup' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'await-consumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'group-hold' | 'group-stop' | 'resource-intent'",
 		committed_at: "number",
 		"+": "reject",
 	})
@@ -587,6 +587,33 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			updateGroup(database, { ...group, state: transition.state })
 			return
 		}
+		case "group-hold": {
+			const group = requireGroup(database, transition.group, transition.family)
+			if (group.state.kind !== "consuming") reject(transition.family, "state-mismatch", "only a consuming group can hold after a non-advance consumer")
+			const consumer = requireTask(database, group.state.consumerTask, transition.family)
+			if (consumer.state.kind !== "settled" || consumer.state.settlement.kind !== "returned") reject(transition.family, "state-mismatch", "group hold requires a returned fixed consumer settlement")
+			if (
+				taskKey(transition.state.consumerTask) !== taskKey(group.state.consumerTask)
+				|| groupKey(transition.state.consumerGroup) !== groupKey(group.state.consumerGroup)
+				|| transition.state.settlementsDigest !== group.state.settlementsDigest
+				|| transition.state.memberVersion !== group.memberVersion
+			) reject(transition.family, "identity-mismatch", "held state does not identify the settled consumer")
+			updateGroup(database, { ...group, state: transition.state })
+			return
+		}
+		case "group-stop": {
+			const group = requireGroup(database, transition.group, transition.family)
+			if (group.state.kind !== "consuming") reject(transition.family, "state-mismatch", "only a consuming group can stop after a consumer exception")
+			const consumer = requireTask(database, group.state.consumerTask, transition.family)
+			if (consumer.state.kind !== "settled" || consumer.state.settlement.kind !== "exception") reject(transition.family, "state-mismatch", "group stop requires an exception fixed consumer settlement")
+			if (
+				taskKey(transition.state.consumerTask) !== taskKey(group.state.consumerTask)
+				|| groupKey(transition.state.consumerGroup) !== groupKey(group.state.consumerGroup)
+				|| transition.state.settlementsDigest !== group.state.settlementsDigest
+			) reject(transition.family, "identity-mismatch", "stopped state does not identify the settled consumer")
+			updateGroup(database, { ...group, state: transition.state })
+			return
+		}
 		case "resource-intent": {
 			const task = requireTask(database, transition.closure.task, transition.family)
 			if (task.state.kind !== "settled") reject(transition.family, "state-mismatch", "closure evidence lifecycle requires a settled task")
@@ -612,7 +639,7 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 function admitTask(database: Database, admission: GrowthAdmissionTransition | Extract<CommittedTransition, { family: "task-settlement" }>["successors"][number], family: CommittedTransition["family"]): void {
 	const task = admission.task
 	const group = requireGroup(database, admission.position.group, family)
-	if (group.memberVersion !== admission.position.expectedMemberVersion || (group.state.kind !== "open" && group.state.kind !== "waiting")) reject(family, "position-mismatch", "group position is no longer open")
+	if (group.memberVersion !== admission.position.expectedMemberVersion || (group.state.kind !== "open" && group.state.kind !== "waiting" && group.state.kind !== "held")) reject(family, "position-mismatch", "group position is no longer open")
 	if (task.identity.chain.value !== group.identity.chain.value || groupKey(task.group) !== groupKey(group.identity)) reject(family, "identity-mismatch", "task and group identities disagree")
 	if (task.state.kind !== "ready" || task.closure.kind !== "unallocated") reject(family, "invalid-transition", "admitted task must start ready and unallocated")
 	if (exists(database, "v3_tasks", "task_key", taskKey(task.identity)) || exists(database, "v3_facts", "fact_key", factKey(admission.fact))) reject(family, "already-exists", "task or admitted fact already exists")
@@ -726,7 +753,9 @@ function transitionChain(transition: CommittedTransition): string {
 		case "group-waiting":
 		case "group-termination":
 		case "group-consumer-start":
-		case "group-consumption": return transition.group.chain.value
+		case "group-consumption":
+		case "group-hold":
+		case "group-stop": return transition.group.chain.value
 		case "resource-intent": return transition.closure.task.chain.value
 	}
 	return assertNever(transition)

@@ -213,16 +213,57 @@ function reconcileChains(dependencies: OrchestratorDependencies, chains: readonl
 				}
 				if (current.state.kind === "consuming") {
 					const consumer = latest.tasks[taskKey(current.state.consumerTask)]
-					if (consumer?.state.kind !== "settled" || consumer.state.settlement.kind !== "returned" || !consumerAllowsCompletion(current, consumer.state.settlement.value)) {
+					if (consumer?.state.kind !== "settled") {
 						reconciled.push({ kind: "consuming", group: current.identity })
 						continue
 					}
-					const settlements = committedSettlements(current, latest.tasks)
-					if (settlements === null) return yield* incompleteGroup(current)
-					const consumption = yield* dependencies.consumers.consume(current, settlements)
-					yield* dependencies.scheduler.consumeGroup(current.identity, consumption, now)
-					reconciled.push({ kind: "consumed", group: current.identity })
-					continue
+					const settlement = consumer.state.settlement
+					if (settlement.kind === "returned" && consumerAllowsCompletion(current, settlement.value)) {
+						const settlements = committedSettlements(current, latest.tasks)
+						if (settlements === null) return yield* incompleteGroup(current)
+						const consumption = yield* dependencies.consumers.consume(current, settlements)
+						yield* dependencies.scheduler.consumeGroup(current.identity, consumption, now)
+						reconciled.push({ kind: "consumed", group: current.identity })
+						continue
+					}
+					if (settlement.kind === "returned") {
+						yield* dependencies.store.commit({
+							identity: `group-hold:${groupKey(current.identity)}:${current.state.settlementsDigest}:${current.memberVersion}`,
+							transition: {
+								family: "group-hold",
+								group: current.identity,
+								state: {
+									kind: "held",
+									consumerTask: current.state.consumerTask,
+									consumerGroup: current.state.consumerGroup,
+									settlementsDigest: current.state.settlementsDigest,
+									memberVersion: current.memberVersion,
+									heldAt: now,
+								},
+							},
+						})
+						reconciled.push({ kind: "held", group: current.identity })
+						continue
+					}
+					if (settlement.kind === "exception") {
+						yield* dependencies.store.commit({
+							identity: `group-stop:${groupKey(current.identity)}:${current.state.settlementsDigest}`,
+							transition: {
+								family: "group-stop",
+								group: current.identity,
+								state: {
+									kind: "stopped",
+									consumerTask: current.state.consumerTask,
+									consumerGroup: current.state.consumerGroup,
+									settlementsDigest: current.state.settlementsDigest,
+									stoppedAt: now,
+								},
+							},
+						})
+						reconciled.push({ kind: "stopped", group: current.identity })
+						continue
+					}
+					return assertNever(settlement)
 				}
 				if (reconciliation.kind !== "terminated") {
 					reconciled.push(reconciliation)

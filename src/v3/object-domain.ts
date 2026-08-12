@@ -107,6 +107,21 @@ export type GroupState =
 		readonly settlementsDigest: string
 		readonly startedAt: number
 	}
+	| {
+		readonly kind: "held"
+		readonly consumerTask: TaskIdentity
+		readonly consumerGroup: GroupIdentity
+		readonly settlementsDigest: string
+		readonly memberVersion: number
+		readonly heldAt: number
+	}
+	| {
+		readonly kind: "stopped"
+		readonly consumerTask: TaskIdentity
+		readonly consumerGroup: GroupIdentity
+		readonly settlementsDigest: string
+		readonly stoppedAt: number
+	}
 	| { readonly kind: "consumed"; readonly consumption: ConsumptionIdentity; readonly consumedAt: number }
 
 export type GroupJoin =
@@ -248,6 +263,8 @@ export type CommittedTransition =
 		readonly settlements: readonly TaskSettlement[]
 	}
 	| { readonly family: "group-consumption"; readonly group: GroupIdentity; readonly state: Extract<GroupState, { kind: "consumed" }>; readonly settlements: readonly TaskSettlement[] }
+	| { readonly family: "group-hold"; readonly group: GroupIdentity; readonly state: Extract<GroupState, { kind: "held" }> }
+	| { readonly family: "group-stop"; readonly group: GroupIdentity; readonly state: Extract<GroupState, { kind: "stopped" }> }
 	| { readonly family: "resource-intent"; readonly closure: ClosureIdentity; readonly action: "freeze-evidence" | "collect"; readonly publication: PublicationEvidence | null }
 
 export type ObjectDomainSnapshot = {
@@ -273,7 +290,7 @@ export function factKey(identity: FactIdentity): string {
 export function evaluateAdmission(snapshot: ObjectDomainSnapshot, request: AdmissionRequest): AdmissionResult {
 	const group = snapshot.groups[groupKey(request.position.group)]
 	const frontier = openFrontier(snapshot)
-	if (group === undefined || group.state.kind === "terminated" || group.state.kind === "consuming" || group.state.kind === "consumed" || group.memberVersion !== request.position.expectedMemberVersion) {
+	if (group === undefined || group.state.kind === "terminated" || group.state.kind === "consuming" || group.state.kind === "stopped" || group.state.kind === "consumed" || group.memberVersion !== request.position.expectedMemberVersion) {
 		return { kind: "rejected", reason: { kind: "position-unavailable", frontier } }
 	}
 	if (!authorityAllows(snapshot, request.authority, request.position.group)) {
@@ -317,7 +334,8 @@ export function evaluateEscalation(policy: EscalationPolicy, attempt: number): r
 }
 
 export function nextGroupState(group: TaskGroup, tasks: Readonly<Record<string, Task>>, now: number): GroupState {
-	if (group.state.kind === "terminated" || group.state.kind === "consuming" || group.state.kind === "consumed") return group.state
+	if (group.state.kind === "terminated" || group.state.kind === "consuming" || group.state.kind === "stopped" || group.state.kind === "consumed") return group.state
+	if (group.state.kind === "held" && group.state.memberVersion === group.memberVersion) return group.state
 	const allSettled = group.members.every((identity) => tasks[taskKey(identity)]?.state.kind === "settled")
 	if (!allSettled) return { kind: "open" }
 	if (group.wait.kind === "none") return { kind: "terminated", reason: "immediate", memberVersion: group.memberVersion, terminatedAt: now }
@@ -333,7 +351,7 @@ export function nextGroupState(group: TaskGroup, tasks: Readonly<Record<string, 
 
 export function openFrontier(snapshot: ObjectDomainSnapshot): OpenFrontier {
 	return Object.values(snapshot.groups)
-		.filter((group) => group.state.kind === "open" || group.state.kind === "waiting")
+		.filter((group) => group.state.kind === "open" || group.state.kind === "waiting" || group.state.kind === "held")
 		.map((group) => ({
 			group: group.identity,
 			memberVersion: group.memberVersion,
