@@ -33,6 +33,8 @@ export type GroupReconciliation =
 	| { readonly kind: "waiting"; readonly group: GroupIdentity; readonly deadline: number }
 	| { readonly kind: "terminated"; readonly group: GroupIdentity }
 	| { readonly kind: "consuming"; readonly group: GroupIdentity }
+	| { readonly kind: "held"; readonly group: GroupIdentity }
+	| { readonly kind: "stopped"; readonly group: GroupIdentity }
 	| { readonly kind: "consumed"; readonly group: GroupIdentity }
 
 export type SchedulerService = {
@@ -66,6 +68,7 @@ export const SchedulerLive: Layer.Layer<Scheduler, never, ObjectDomainStore> = L
 			const current = snapshot.groups[groupKey(group)]
 			if (current === undefined) return Effect.fail<ObjectStoreError>({ kind: "transition-rejected", family: "group-termination", reason: "not-found", message: `group ${groupKey(group)} not found` })
 			if (current.state.kind === "consumed") return Effect.succeed({ kind: "consumed", group })
+			if (current.state.kind === "stopped") return Effect.succeed({ kind: "stopped", group })
 			if (current.state.kind === "terminated") return Effect.succeed({ kind: "terminated", group })
 			if (current.state.kind === "consuming") return Effect.succeed({ kind: "consuming", group })
 			const next = nextGroupState(current, snapshot.tasks, now)
@@ -79,8 +82,10 @@ export const SchedulerLive: Layer.Layer<Scheduler, never, ObjectDomainStore> = L
 					{ kind: "waiting", group, deadline: next.deadline },
 				)
 			}
+			if (next.kind === "held") return Effect.succeed({ kind: "held", group })
 			if (next.kind === "consuming") return Effect.succeed({ kind: "consuming", group })
 			if (next.kind === "consumed") return Effect.succeed({ kind: "consumed", group })
+			if (next.kind === "stopped") return Effect.succeed({ kind: "stopped", group })
 			return Effect.as(
 				store.commit({ identity: `group-terminated:${groupKey(group)}:${next.memberVersion}:${next.terminatedAt}`, transition: { family: "group-termination", group, state: next } }),
 				{ kind: "terminated", group },

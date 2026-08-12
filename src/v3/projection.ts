@@ -20,7 +20,7 @@ export type TaskProjection =
 
 export type GroupProjection = {
 	readonly identity: string
-	readonly state: "open" | "waiting" | "terminated" | "consuming" | "consumed"
+	readonly state: "open" | "waiting" | "terminated" | "consuming" | "held" | "stopped" | "consumed"
 	readonly memberCount: number
 	readonly memberVersion: number
 	readonly deadline: number | null

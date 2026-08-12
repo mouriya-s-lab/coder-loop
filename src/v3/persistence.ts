@@ -129,6 +129,23 @@ const GroupStateBoundary = arkType.or(
 		startedAt: "number",
 		"+": "reject",
 	},
+	{
+		kind: "'held'",
+		consumerTask: TaskIdentityBoundary,
+		consumerGroup: GroupIdentityBoundary,
+		settlementsDigest: "string > 0",
+		memberVersion: "number.integer >= 0",
+		heldAt: "number",
+		"+": "reject",
+	},
+	{
+		kind: "'stopped'",
+		consumerTask: TaskIdentityBoundary,
+		consumerGroup: GroupIdentityBoundary,
+		settlementsDigest: "string > 0",
+		stoppedAt: "number",
+		"+": "reject",
+	},
 	{ kind: "'consumed'", consumption: { kind: "'consumption'", group: GroupIdentityBoundary, value: "string > 0", "+": "reject" }, consumedAt: "number", "+": "reject" },
 )
 const GroupConsumerBoundary = arkType.or(
@@ -199,7 +216,7 @@ export function parsePersistedTask(candidate: unknown): PersistenceParseResult<T
 export function parsePersistedGroup(candidate: unknown): PersistenceParseResult<TaskGroup> {
 	const parsed = TaskGroupBoundary(candidate)
 	if (parsed instanceof arkType.errors) return rejected("group", parsed.summary)
-	if (parsed.state.kind === "consuming" && parsed.join.kind === "drain") return rejected("group", "drain join cannot enter consuming")
+	if ((parsed.state.kind === "consuming" || parsed.state.kind === "held" || parsed.state.kind === "stopped") && parsed.join.kind === "drain") return rejected("group", "drain join cannot enter consuming")
 	return { kind: "accepted", value: parsed }
 }
 
