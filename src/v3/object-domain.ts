@@ -192,31 +192,6 @@ export type AdmissionResult =
 	| { readonly kind: "admitted"; readonly task: Task; readonly position: AdmissionPosition }
 	| { readonly kind: "rejected"; readonly reason: AdmissionRejection }
 
-export type RetryPolicy =
-	| { readonly kind: "never" }
-	| { readonly kind: "limited"; readonly maxAttempts: number; readonly backoffMs: number }
-
-export type ExhaustionPolicy = {
-	readonly step: "skip-step" | "stop-task"
-	readonly task: "skip-task" | "stop-group"
-	readonly group: "advance-next-item" | "stay-on-current-item"
-}
-
-export type EscalationPolicy = {
-	readonly retry: RetryPolicy
-	readonly exhausted: ExhaustionPolicy
-}
-
-export type ObjectDomainAction =
-	| { readonly kind: "retry-step"; readonly afterMs: number }
-	| { readonly kind: "skip-step" }
-	| { readonly kind: "settle-task-exception" }
-	| { readonly kind: "skip-task" }
-	| { readonly kind: "terminate-group" }
-	| { readonly kind: "advance-next-item" }
-	| { readonly kind: "stay-on-current-item" }
-	| { readonly kind: "stop-engine" }
-
 export type CommittedTransition =
 	| {
 		readonly family: "task-admission"
@@ -229,7 +204,6 @@ export type CommittedTransition =
 	| { readonly family: "closure-allocation-start"; readonly task: TaskIdentity; readonly allocation: Extract<ClosureResourceState, { kind: "allocating" }> }
 	| { readonly family: "closure-allocation-cleanup"; readonly task: TaskIdentity; readonly allocation: Extract<ClosureResourceState, { kind: "allocating" }> }
 	| { readonly family: "lease-acquire"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly closure: Extract<ClosureResourceState, { kind: "active" | "suspended" }>; readonly acquiredAt: number; readonly expiresAt: number }
-	| { readonly family: "lease-release"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly reason: "cancelled" }
 	| { readonly family: "task-held"; readonly task: TaskIdentity; readonly expectedRun: RunIdentity | null; readonly reason: TaskHoldReason }
 	| { readonly family: "task-unhold"; readonly task: TaskIdentity }
 	| { readonly family: "task-resume"; readonly task: TaskIdentity; readonly run: RunIdentity; readonly resumedAt: number; readonly expiresAt: number }
@@ -304,18 +278,6 @@ export function readyTasks(snapshot: ObjectDomainSnapshot): readonly Task[] {
 		.sort((left, right) => right.priority - left.priority || taskKey(left.identity).localeCompare(taskKey(right.identity)))
 }
 
-export function evaluateEscalation(policy: EscalationPolicy, attempt: number): readonly ObjectDomainAction[] {
-	if (policy.retry.kind === "limited" && attempt < policy.retry.maxAttempts) {
-		return [{ kind: "retry-step", afterMs: policy.retry.backoffMs }]
-	}
-	if (policy.exhausted.step === "skip-step") return [{ kind: "skip-step" }]
-	if (policy.exhausted.task === "skip-task") return [{ kind: "settle-task-exception" }, { kind: "skip-task" }]
-	if (policy.exhausted.group === "advance-next-item") {
-		return [{ kind: "settle-task-exception" }, { kind: "terminate-group" }, { kind: "advance-next-item" }]
-	}
-	return [{ kind: "settle-task-exception" }, { kind: "terminate-group" }, { kind: "stay-on-current-item" }]
-}
-
 export function nextGroupState(group: TaskGroup, tasks: Readonly<Record<string, Task>>, now: number): GroupState {
 	if (group.state.kind === "terminated" || group.state.kind === "consuming" || group.state.kind === "consumed") return group.state
 	const allSettled = group.members.every((identity) => tasks[taskKey(identity)]?.state.kind === "settled")
@@ -331,7 +293,7 @@ export function nextGroupState(group: TaskGroup, tasks: Readonly<Record<string, 
 	return { kind: "waiting", deadline: now + group.wait.durationMs, memberVersion: group.memberVersion }
 }
 
-export function openFrontier(snapshot: ObjectDomainSnapshot): OpenFrontier {
+function openFrontier(snapshot: ObjectDomainSnapshot): OpenFrontier {
 	return Object.values(snapshot.groups)
 		.filter((group) => group.state.kind === "open" || group.state.kind === "waiting")
 		.map((group) => ({
