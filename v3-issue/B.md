@@ -194,7 +194,7 @@ v3 正从六篇旧 RFC 重划为八个责任面，但重划不能让各面重新
 
 ## 0.2 纯函数化公理：引擎只推理被提升的值
 
-AI agent 不是没有副作用的函数。它会修改 worktree、调用外部程序、形成 session 内判断，也可能留下日志、进程和 Git 残迹。v3 所谓“纯函数化”，不是消灭这些 effect，而是收窄引擎承认的观察面：只有被明确提升为值的 effect 才能参与 prompt、检查与流转，其余副作用对本次交接语义一律丢弃。
+AI agent 不是没有副作用的函数。它会修改工作空间中的文件、调用外部程序、形成 session 内判断，也可能留下日志、进程和外部系统残迹。v3 所谓“纯函数化”，不是消灭这些 effect，而是收窄引擎承认的观察面：只有被明确提升为值的 effect 才能参与 prompt、检查与流转，其余副作用对本次交接语义一律丢弃。
 
 针对 agent 执行及其副作用的提升口只有两个。第一，agent 在运行时向 context 填入声明允许的值，这是 self-report；第二，agent 运行结束后，由声明的脚本测量外部状态并把结果映射为 context 值，这是 measurement。除此之外的副作用并未被物理清除，只是不进入本次交接；以后若要消费，必须重新通过一个声明过的采样与 map 入口提升为值。agent 出生前的前置脚本负责准备函数输入，不构成观察 agent 副作用的第三个提升口。
 
@@ -331,7 +331,7 @@ context 单调累积意味着后一个时态保留前一个时态已经形成的
 
 step 与 task 都存在“执行结束后把结果交给下一段”的动作，因而共享同一个交接合同形状：交付值包，完成必写值解析与声明测量，在完整 context 上求流转谓词，然后得到正常路由或 fail / NIL 结局。两层的抽象对象不同，打包的值也不同，但合同不应因此分裂成两种方言。preset 只需提供一份交接文法，在 task 接缝与 step 接缝两个作用域实例化；同一交接内部仍按五时态串行，而彼此无关的交接只依赖前向、单调与可交换的结果，因此合同本身不要求把可并发实例强行串行化。
 
-共享形状不意味着共享持久性。task 层的前向推进经过 committed transition 写入 daemon 日志，是已经发生、不可撤销且崩溃后必须恢复的历史事实。step 层的前向只是一条执行纪律：现场可以随 worktree 或 session 一起蒸发，也可以整体丢弃并重放；恢复单位是 attempt，不是某一个 step。打包值所在的记账位置不同，决定了同一句“仅前向”在 task 层是历史承诺，在 step 层只是禁止写回退逻辑。
+共享形状不意味着共享持久性。task 层的前向推进经过 committed transition 写入 daemon 日志，是已经发生、不可撤销且崩溃后必须恢复的历史事实。step 层的前向只是一条执行纪律：现场可以随工作空间或 session 一起蒸发，也可以整体丢弃并重放；恢复单位是 attempt，不是某一个 step。打包值所在的记账位置不同，决定了同一句“仅前向”在 task 层是历史承诺，在 step 层只是禁止写回退逻辑。
 
 这一区分还要求可见性严格单向。step 粒度的进度、校验与失败不得进入 daemon 账本，否则分形会退化为两层共用一个执法者，重新制造 item/phase 上浮。step 层无论经历多少内部事实，对 task 层只折叠为 `returned(value) | exception`；task 层消费折叠结果，不反向解释或恢复某个 step。正因为合同形状可复用而事实账本不复用，两层才能各自保持前向并发而不互相泄漏调度语义。
 
@@ -365,7 +365,7 @@ fail 是一个特殊 step，而不是引擎硬编码的业务失败枚举。pres
 
 hook 是挂在五时态转换点上的 **effectful subprocess runtime**，独立于既定主流转。它可以执行带外部副作用的脚本，因此“只读”不是它的能力边界；真正的边界是权威。map 由 preset 声明，产值进入 context，并参与主流转；hook 由 operator 声明，执行结果不进入 context，不拥有检查或路由的裁决权，也不产生领域 mutation 的权威。hook 即使改变了外部世界，该副作用也不能自行改写 daemon 账本或冒充 committed transition。面 6 只围绕时态锚点、subprocess primitive、进程所有权与审计展开，不再承担 gate 状态机。
 
-GUI 的本体是 context 与副作用的可观测手段。context 面展示被提升并参与交接的值、各时态快照、谓词结果、正常/fail 路径和对象域值账本；副作用面展示未进入交接语义但对人仍有诊断价值的 worktree、进程三证、events、日志和 Git 残迹。GUI 读取这些事实，不重建或美化它们。
+GUI 的本体是 context 与副作用的可观测手段。context 面展示被提升并参与交接的值、各时态快照、谓词结果、正常/fail 路径和对象域值账本；副作用面展示未进入交接语义但对人仍有诊断价值的工作空间、进程三证、events、日志和外部系统残迹。GUI 读取这些事实，不重建或美化它们；本地路径与远程现场位置由工作空间 owner 投影，不能把远程路径当成本机文件读取。
 
 观测本体并不禁止 #544 已经定义的有限运维动作。daemon 生命周期操作、unblock、chain 暂停/恢复与 item 重排作为附属动作面保留，并与观察面分栏；二者共享稳定 identity，却不共享权威，所有 mutation 仍由 daemon 裁决并回到权威读面核验。
 
@@ -390,6 +390,7 @@ GUI 的本体是 context 与副作用的可观测手段。context 面展示被�
 - **hook**：operator 声明、挂在时态锚点上的 effectful subprocess runtime；有副作用能力，但不参与 context、不裁决主流转、不产生领域 mutation 权威。
 - **GUI**：context 面与副作用面的可观测产品，并附带与观察分权、分栏呈现的有限运维动作面。
 - **preset / step**：preset 是完整工作流及其不可变发布 bundle；step 是 task 闭包内部按五时态求值的定义单元。step 的正常路由值名为 `nextStep`。
+- **工作空间**：为 task 提供私有执行目录及其访问、保留、恢复和回收能力的资源接口；Git worktree、文件复制和远程容器是可替换的实现，不是任务链或值管道的分类。
 
 来源：公共词汇汇总自 record-3 第 6—18 轮、record-2 3:23—3:24 与 division-plan.md 面 0、面 6、面 7；preset/step 的双粒度命名按 identity 唯一性完成插入判定。
 
@@ -915,14 +916,14 @@ fail 处理路径因而可以采用零 agent 成本的程序行为，例如测�
 
 `claude`、`codex`、`opencode` 与 `hapi` 对本面只是不同的 argv builder。
 函数调用的语义输入是 pinned prompt 定义与当前 context 的声明投影；provider 把固化输入送入副作用世界执行，函数域只从 self-report 与 measurement 两个提升口采样输出。
-stdout、worktree 改动、后台进程与 session 内判断若没有经过这两个口提升，就属于本次交接明确丢弃的副作用面。
+stdout、工作空间中的文件改动、后台进程与 session 内判断若没有经过这两个口提升，就属于本次交接明确丢弃的副作用面。
 
 本面必须封堵两个会改变函数输入的漏气孔。
 第一，prompt 内容全部来自 pinned 声明的消费面；引擎硬编码的 epilogue 常量必须并入可编译、可发布、可 pin 的 prompt 或文档渲染声明，运行时不得再隐藏拼接。
 第二，废除“传地址不传值”：`SHARED_CONTEXT_FILE` 一类路径不能仅因被注入 argv 或 env 就成为 context。
 若文件内容要参与 prompt、检查或路由，必须由声明 map 读取、解析并提升为值；若不提升，其路径与内容都只属于被丢弃的副作用面。
 
-provider 合同本体、endpoint 与 loss、env/sandbox 边界以及 session identity 与 resume 归面 5。
+工作空间的统一资源合同与生命周期归面 3；provider 合同本体、endpoint 与 loss、env/sandbox 边界以及 session identity 与 resume 归面 5。需要访问任务文件的前置或后置 map 与 runner 必须绑定同一工作空间；脚本输出仍由 map 解析提升，准备或访问现场本身不产生业务 context。
 这些传输和隔离差异可以改变调用是否成功，却不能改变五时态、typed context 或两个提升口。
 
 来源：record-3 第 17 轮；A.md 第 0 篇 0.2、0.5；division-plan.md“面 2”“面 5”。
@@ -982,7 +983,7 @@ flowchart TB
 ```mermaid
 flowchart LR
     O[对象域 task 群组 锁 committed transition]
-    F[函数域 worktree branch session scratch]
+    F[函数域 工作空间 session scratch]
     V[值域 item phase status tag binding exit]
     V -->|输入| F
     F -->|returned或exception| O
@@ -1055,7 +1056,7 @@ stateDiagram-v2
     Suspended --> Running: 下级结局回注
     Running --> Settled: returned或exception提交
     Settled --> Consumed: 群组消费者提交
-    Consumed --> EvidenceFrozen: 采样publication与审计证据
+    Consumed --> EvidenceFrozen: 冻结已声明的观测与审计证据
     EvidenceFrozen --> Reclaimed: 无活run且无未来可达引用
     Reclaimed --> [*]
 ```
@@ -1085,9 +1086,9 @@ sequenceDiagram
 
 ## 1. 先看一个并不特殊的工作流
 
-设一个 chain 刚创建时有三个工作单元 A、B、C。它们处理同一项目里的三个问题，却没有业务依赖，因此应该同时取得运行机会。A 完成第一次工作后，根据返回结果产生一个后继 A2；B 运行到一半发现必须等待一个审查任务 B-check；C 的 runner 进程崩溃，重试次数最终耗尽。与此同时，操作员向仍未结束的顶层工作集合追加 D。所有分支落定以后，一个 finalizer 检查这批工作是否足以结束 chain。运行期间 daemon 可能在任意两次持久化动作之间崩溃；运行结束后，系统还要判断哪些 worktree、分支和 session 可以回收，并如实报告工作成果是否曾经发布到自己负责的远端通道。
+设一个 chain 刚创建时有三个工作单元 A、B、C。它们处理同一项目里的三个问题，却没有业务依赖，因此应该同时取得运行机会。A 完成第一次工作后，根据返回结果产生一个后继 A2；B 运行到一半发现必须等待一个审查任务 B-check；C 的 runner 进程崩溃，重试次数最终耗尽。与此同时，操作员向仍未结束的顶层工作集合追加 D。所有分支落定以后，一个 finalizer 检查这批工作是否足以结束 chain。运行期间 daemon 可能在任意两次持久化动作之间崩溃；运行结束后，系统还要判断哪些工作空间和 session 可以回收，并保留已声明的观测证据。Git 交付工作流可以观察远端发布状态，但这不是工作空间后端的共同前提。
 
-这个案例会迫使系统回答一些看似属于不同模块、实则共享同一逻辑根的问题。A2 为什么有资格运行？B-check 是 B 的内部步骤还是一个独立并发对象？C 的崩溃会不会阻止 A、B、D？追加 D 时，谁决定它属于哪一个并行集合？finalizer 看见的是哪一批已落定结果？daemon 在“记录 C 已异常”和“释放 C 的锁”之间退出后，重启应相信什么？删除 worktree 后，审计记录还能否证明那个任务存在过？
+这个案例会迫使系统回答一些看似属于不同模块、实则共享同一逻辑根的问题。A2 为什么有资格运行？B-check 是 B 的内部步骤还是一个独立并发对象？C 的崩溃会不会阻止 A、B、D？追加 D 时，谁决定它属于哪一个并行集合？finalizer 看见的是哪一批已落定结果？daemon 在“记录 C 已异常”和“释放 C 的锁”之间退出后，重启应相信什么？回收工作空间后，审计记录还能否证明那个任务存在过？
 
 v2 的队列可以分别为这些问题增加条件分支，但那样得到的只是更多互相校正的状态字段。真正的困难不是缺少一个 `status` 值，而是系统没有明确区分：什么东西在被调度，什么东西在执行中积累状态，什么东西只是函数的输入或输出；也没有一组封闭的组合规则说明并发结构怎样产生、怎样落定、怎样被消费。
 
@@ -1109,13 +1110,13 @@ v2 的队列可以分别为这些问题增加条件分支，但那样得到的�
 
 ## 3. 三个域解决的是责任混淆，不是命名问题
 
-设计把案例中的实体拆成三个域。对象域只有 task：A、A2、B-check、D、finalizer 都是 task。它们拥有稳定身份、在组合结构中的位置以及运行锁，但不保存 agent 的业务判断。函数域是每个 task 执行时的闭包：A 的 worktree、branch、runner session、scratch 和等待 B-check 时需要保留的现场属于这里。值域是不变数据：创建 A 的 item 是种子参数，phase 是将要调用的函数标签，status tag 是函数返回值的一部分，binding 和 exit 是参数或结果。
+设计把案例中的实体拆成三个域。对象域只有 task：A、A2、B-check、D、finalizer 都是 task。它们拥有稳定身份、在组合结构中的位置以及运行锁，但不保存 agent 的业务判断。函数域是每个 task 执行时的闭包：A 的私有工作空间、runner session、scratch 和等待 B-check 时需要保留的现场属于这里。值域是不变数据：创建 A 的 item 是种子参数，phase 是将要调用的函数标签，status tag 是函数返回值的一部分，binding 和 exit 是参数或结果。
 
 值域不是第三个执行领域：总纲的双域对偶指的是对象域与函数域两个执行域，值域是在这两个执行域之间流动的不变数据身份；三域切分与双域对偶并不矛盾。
 
 这个切分最重要的效果是，调度器不再解释业务词。假设 C 的 agent 返回 `needs_revision`。只要它通过声明的返回 union，并由派发表接住，这就是一次正常返回；业务上是否失败由下一个 task 处理。只有 runner 崩溃或 attempts 耗尽、从而没有提交返回值，才是引擎异常。若把两者继续混成“失败状态”，scheduler 就必须知道每个 preset 的词义，并且无法区分“已产生可路由的负面结果”和“没有结果”。
 
-删除对象域与值域的分界，D 的种子数据就可能再次变成一个可变队列单元；删除对象域与函数域的分界，worktree 生命周期便会跟业务 status 绑定；删除函数域和值域的分界，session 中的临时现场可能被误当成可重放的持久输入。三域不是要求实现三个服务，而是要求跨模块数据类型不再用同一个松散 record 冒充三种身份。
+删除对象域与值域的分界，D 的种子数据就可能再次变成一个可变队列单元；删除对象域与函数域的分界，工作空间生命周期便会跟业务 status 绑定；删除函数域和值域的分界，session 中的临时现场可能被误当成可重放的持久输入。三域不是要求实现三个服务，而是要求跨模块数据类型不再用同一个松散 record 冒充三种身份。
 
 对用户来说，这意味着 `status` 读面会明确展示“task 是否已返回或异常”“closure 资源处于何种生命周期”“业务返回值是什么”，而不是给出一个含义随命令变化的字符串。迁移期必须为旧字段建立明确投影或转换，不能继续让任何字段既是权威输入又是派生输出。
 
@@ -1123,7 +1124,7 @@ v2 的队列可以分别为这些问题增加条件分支，但那样得到的�
 
 ## 4. 三种事实形态使“定义”和“正在运行的程序”不再互相改写
 
-同一个工作流至少有定义态、编译态、运行态三种事实形态。定义态描述 phase 能返回哪些 variant、每个 variant 接到什么后继、是否会 await 下级任务、chain 使用哪个 base branch，以及 finalizer 是什么。编译态把这些声明解析为精确类型并形成可引用的 compiled product。运行态只实例化已经发布并 pin 的构造，持有锁，追加事实，不修改正在运行实例的定义。定义冻结、publish、pin 与 resolver 的机制归面 1，本篇只消费 exact definition ref。
+同一个工作流至少有定义态、编译态、运行态三种事实形态。定义态描述 phase 能返回哪些 variant、每个 variant 接到什么后继、是否会 await 下级任务，以及 finalizer 是什么。编译态把这些声明解析为精确类型并形成可引用的 compiled product。运行态只实例化已经发布并 pin 的构造，持有锁，追加事实，不修改正在运行实例的定义。工作空间后端及其准备参数来自显式 typed 配置，不因后端使用 Git 就成为工作流的业务输入。定义冻结、publish、pin 与 resolver 的机制归面 1，本篇只消费 exact definition ref。
 
 这不是“chain 先配置、再编译、最后永远运行”的三段流水线。D 在 chain 已运行后追加，仍需经过自己的定义解析和编译边界。B 运行中派生 B-check 时，B-check 的定义也必须已经被 pin 并通过同样检查。运行中可以实例化新对象，但不能热改旧对象。
 
@@ -1163,7 +1164,7 @@ B 需要 B-check 时，B 的闭包尚未返回。await 允许运行中的 task �
 
 dependsOn 解决另一种需求：D 只要求 A2 先落定，却不消费 A2 的返回值。它是严格弱于消费的布尔门，只能按 identity 观察“是否落定”，不能读取返回值或成为第二条值通道。依赖图在写入或装载时查环；依赖方在前驱 exception 而无可消费结果时不会启动，系统不自动升级或猜测“也许可以继续”。
 
-恢复语义按 continuation 是否仍存在分流。daemon crash 后若 worktree/session 与 continuation identity 仍可验证，重启读取同一 AwaitId：child 尚未落定时继续等待，已经落定时以消费 token 保证只向原 continuation 注入一次。若 continuation 已丢失或 provider 报告 `active loss`，同一 attempt 不得从头重放并冒充原函数现场；面 3 把该 attempt 落为 `exception`，再由声明的 retry/fail policy 决定是否创建新 attempt。新 attempt 拥有新的 AwaitId，旧 child 结果只保留为历史，除非 preset 显式把它提升为新 attempt 的输入。
+恢复语义按 continuation 是否仍存在分流。daemon crash 后若后端能够重新定位原工作空间，且 session 与 continuation identity 仍可验证，重启读取同一 AwaitId：child 尚未落定时继续等待，已经落定时以消费 token 保证只向原 continuation 注入一次。若 continuation 已丢失或 provider 报告 `active loss`，同一 attempt 不得从头重放并冒充原函数现场；面 3 把该 attempt 落为 `exception`，再由声明的 retry/fail policy 决定是否创建新 attempt。新 attempt 拥有新的 AwaitId，旧 child 结果只保留为历史，除非 preset 显式把它提升为新 attempt 的输入。远程连接中断本身不能证明现场已丢失，也不能授权另建现场重跑；不能确认执行结局时仍按面 5 的封闭事实处理。
 
 验证必须分别覆盖两条路径：保留 continuation 时停止 daemon，确认重启后 parent 不重复 spawn、child 结果只注入一次；删除或失去 continuation 时确认产生 `active loss → exception`，不会把已落定 child 注入一个新函数现场。dependsOn 另造环，写入必须在执行前失败。
 
@@ -1231,25 +1232,39 @@ generic `held` 状态本身不被本面消费：它不是面 5 的事实 variant
 
 来源：committed transition、锁与 crash replay 沿用旧 546 §10；原 `spawn/commit/admit/release/await` 五词表把事务原语与领域语义混在同一层，无法覆盖 waiting/consume 与 await resume，故不作为规范闭集。transition family 由当前对象域事实和 owner 边界直接推导。【设计插入判定 | 构造性封闭与原子提交 | 已纳入】
 
-## 11. 函数域资源让并发真正隔离，而不是只让数据库行并行
+## 11. 工作空间接口统一现场合同，不固定准备方式
 
-即使 A、B、C 在调度表中并行，如果它们共享同一可写 checkout，内容仍会互相覆盖。当前合同为每个 task 供给私有 closure：独立 worktree、引擎命名的 closure branch、runner session 和 scratch。B await 时释放运行锁，但这些现场原地保留；恢复从 closure branch tip 和保存的 session 继续，不是回到 chain base 重新开始。
+每个 task 的 closure 拥有私有工作空间、runner session 和 scratch。工作空间回答“在哪里工作、怎样访问和保留现场”，不回答“工作流消费什么值”。Git worktree 只是通过 CLI 准备工作目录的一种实现；文件复制到独立目录、远程容器环境同样可以提供现场。后端可选，task 私有可写内容互不污染、恢复可验证和回收受控的保证不可选。
 
-跨 task 的正式值传递只有针眼路径：`returned` 值经 committed transition 进入后继 item，并形成其初始 context。Git 世界等外部内容若要参与后继判定，必须由声明式 map 采样并提升为值；未被提升的共享文件、对象库内容都属于会被丢弃的副作用面，其结构性写入仍按稳定 repository identity 协调，并限制在引擎 namespace 内。cwd、remote URL、chain id 和 repository identity 不能互换。
+工作空间后端及其参数由显式 typed 配置选择。不同后端使用各自完整的配置与资源引用，经统一接口提供现场；不能用一个本机路径字符串冒充远程现场，也不能在准备失败时静默换后端或退回操作者的 checkout。没有 Git 的任务链正常使用同一接口，不要求安装 Git、提供仓库或创建空仓库。
 
-Git 的职责还要分清。引擎负责 fetch、解析 `chain.baseBranch` 的新鲜起点、建立 branch/worktree、保存 pin、采样终态和回收；agent 负责内容性的 commit、冲突解决、push 与 PR。base branch 的权威来自 chain 声明，prompt 或 ambient checkout 不能成为第二来源。并行成员从持久 pin 派生，避免各自在不同时间 fetch 后得到不同基底。
+| 接口职责 | 统一合同 |
+|---|---|
+| 准备现场 | 接收 task/closure identity 与已解析的准备参数，建立私有可写目录，返回能定位执行环境及目录的 typed 资源引用；重启可用同一归属信息核对准备中留下的资源 |
+| 使用现场 | 为 runner 和需要访问任务文件的 map 提供对同一现场的执行、文件和输出访问；远程路径在所属环境内解释，不能默认由 daemon 本机读写或执行 |
+| 保留现场 | await 释放运行锁时保留文件、scratch 和恢复所需资源；释放连接或本地句柄不等于销毁现场，工作空间不能另行拥有 runner session 的生命周期 |
+| 重新接入 | 按持久引用定位并核对原现场及归属，向既有恢复逻辑报告可确认的事实；连接失败、确认丢失和结果未知不能混为一谈，不能以新建空目录冒充恢复 |
+| 回收现场 | 只在面 3 判定满足 GC 条件后清理归属于该 closure 的资源；暴露未完成清理与不一致残留，不能因为目录名或容器名相似就删除陌生资源 |
 
-删除这种资源合同，所谓并行只会把竞态搬到文件系统；反过来，把所有 Git 行为都收进引擎也会使引擎理解 PR 和项目策略。验证必须让 A/B 同时修改同名文件，证明未提交内容互不可见，并在 fetch、branch create、worktree create 与 DB 登记边界逐点 crash，启动对账应枚举 residue，而不是静默删除。
+面 3 决定资源何时需要、何时保留以及何时允许回收；后端只实施这些操作并报告结果，不新增任务状态机，不决定 ready、retry、业务成功或结束。工作空间准备与其资源引用的持久登记不假装是跨介质事务；在两者之间 crash 后，由归属信息对账并暴露 residue。
 
-来源：沿用旧 546 §11 的闭包资源合同；其私有资源 owner 与跨 task 针眼边界一致。【旧 RFC 候选 | A.md 旧 546 §11 | 已纳入】
+Git worktree 后端可以负责 fetch、解析显式声明的 base branch、固定起点、建立引擎 namespace 内的 branch/worktree 和后续清理。使用同一声明起点的并行工作副本从同一持久 pin 派生，不各自按变化中的 HEAD 猜测基底。这些是该后端准备现场的责任，不是所有后端都必须提供的 branch/worktree 接口；内容性的 commit、冲突解决、push 与 PR 仍由工作流中的 agent 或脚本承担。
 
-## 12. GC 和 publication 证据解决“资源已删”与“历史仍真”的冲突
+工作空间实现与 Git 状态的值消费相互独立。使用 worktree 准备目录不意味着工作流必须消费 Git 状态；由复制目录或远程容器提供的现场，也可以由声明 map 读取 Git 状态。只有被解析、提升并在声明位置消费的值才能参与 prompt、检查与流转，工作空间引用、文件和 Git 状态不会因后端选择而自动成为 context。这里不增加 Git 任务链模式、Git 资源领域或第二条值通道。
 
-完成 task 不等于立即删除 closure。其返回值可能尚未被 join 消费，活 run 或前向可达引用也可能存在。消费谓词要求没有活 run，且该 closure 不再被任何未来可达结构引用。在消费时刻，系统先采样并持久保存 observer 所需的证据；证据被冻结为历史数据后，GC 才回收 worktree、引擎分支和 session 等活资源。release 只是暂时解锁，绝不触发 GC。
+所有后端都服从相同授权边界。Git worktree 与文件复制提供工作副本分离，但目录分开本身不构成访问控制；runner 的 env、文件可见范围、网络和 sandbox 仍按面 5 显式限定。使用共享 Git 存储时，结构性操作仍按 repository identity 协调并限制在引擎 namespace；这项后端实现约束不能代替 task identity，也不能成为工作流的隐式依赖。
 
-资源 identity 与历史 identity 必须分开。回收 worktree 或删除引擎分支后，task 的应用、返回、异常、admit 和消费记录仍然存在；否则 delete 会变成改写过去。启动时系统对数据库、分支和 worktree 三方核对，且只清理引擎 namespace。发现不一致要暴露为可处理 residue，不能猜测某个陌生分支是垃圾。
+验收至少使用本地 worktree 与远程容器两个真实后端运行同一工作流，证明替换实现不改变输入、值消费与任务流转合同，而不是只证明配置能够解析。并行任务修改同名文件时私有修改互不可见；await 后重新接入仍能读到原现场；现场确认丢失时不能冒充原 attempt 继续。远程容器覆盖不提供 Git 的任务链，worktree 覆盖不消费 Git 状态的工作流，非 worktree 后端另覆盖通过声明 map 消费 Git 状态；由此证明准备方式与值消费没有绑定。后端准备和登记之间的 crash 必须留下可对账的证据，不静默删除；文件复制等其他实现接入时服从同一合同和验收。
 
-publication 是消费时采样的证据，不是生命周期门。它回答 closure 自己负责的远端通道是否包含 closure tip：有工作且已包含、明确未包含、查询无法求值、没有工作分别保留。远端是否 merged 是业务判定 task 的职责，不应由 GC 推断。采样结果及其 origin freshness 必须持久化，通知重试使用同一份样本，而不是重启后重新查询变化后的远端。
+来源：私有 closure 与资源生命周期沿用 A.md 旧 546 §11；可替换工作空间、远程容器、无 Git 任务链及工作空间准备与 Git 值消费相互独立，按操作员明确要求纳入。
+
+## 12. GC 先冻结观测证据，再回收工作空间
+
+完成 task 不等于立即删除 closure。其返回值可能尚未被 join 消费，活 run 或前向可达引用也可能存在。消费谓词要求没有活 run，且该 closure 不再被任何未来可达结构引用。在消费时刻，系统先采样并持久保存已声明的观测证据；证据被冻结为历史数据后，GC 才经对应后端回收工作空间，并按 closure 归属回收 session 等活资源。release 只是暂时解锁，绝不触发 GC；本地调用结束或远程连接关闭也不构成回收许可。
+
+资源 identity 与历史 identity 必须分开。回收本地目录或远程容器后，task 的应用、返回、异常、admit 和消费记录仍然存在；否则 delete 会变成改写过去。启动时系统用持久资源引用和后端实际资源对账，只清理可证明归属于引擎的资源。发现不一致要暴露为可处理 residue，不能猜测某个陌生目录、分支或容器是垃圾；使用 worktree 后端时，对账具体包括数据库、分支和 worktree。
+
+Git 交付场景中的 publication 是消费时采样的证据，不是生命周期门，也不由工作空间后端选择来决定是否观察。它回答 closure 自己负责的远端通道是否包含 closure tip：有工作且已包含、明确未包含、查询无法求值、没有工作分别保留。远端是否 merged 是业务判定 task 的职责，不应由 GC 推断。采样结果及其 origin freshness 必须持久化，通知重试使用同一份样本，而不是重启后重新查询变化后的远端。非 Git 工作不为了回收而制造 branch、tip 或 publication 样本；若 Git 状态参与工作流决策，仍须通过声明 map 提升为值，而不能读取这份旁路观测替代正式输入。
 
 没有四值证据，网络错误会被压成“未发布”；若 publication 参与推进，provider 抖动会阻塞任务代数；若回收时重新查询，force-push 或 ref 删除会篡改历史报告。验证应在 consume 后改变远端 ref，再重放通知，结果保持原样；模拟 fetch 失败时不得输出 unpublished；GC 后仍能查询 closure identity 与冻结证据。
 
@@ -1269,11 +1284,11 @@ publication 是消费时采样的证据，不是生命周期门。它回答 clos
 
 任务代数赋予 derive 和 admit 后，安全边界不再只是“runner 能写哪个目录”。被攻陷的 agent 若能向任意位置追加 task，就能改变未来程序结构；若能读取 loop-data 全局目录，就能跨 task 获得凭据或未声明输入；若能修改共享 Git config/hooks，则能影响其他 closure 的执行。
 
-目标授权把 runner 可见面穷尽分为 task 私有资源、显式声明通道和 repo 级共享 Git 协调面。内部调用者默认拒绝，只有 phase slice 明确授予对象域调用权并限定 scope 时才能提出位置与时机声称；外部调用者也必须经面 4 的 identity、授权与审计进入同一端口。缺失 runtime binding 时不能退回全局搜索。
+目标授权把 runner 可见面穷尽分为 task 私有资源和显式声明通道；后端涉及 repo 级共享 Git 存储时，结构性操作另服从受限的协调面。内部调用者默认拒绝，只有 phase slice 明确授予对象域调用权并限定 scope 时才能提出位置与时机声称；外部调用者也必须经面 4 的 identity、授权与审计进入同一端口。缺失 runtime binding 时不能退回全局搜索。
 
 若授权只检查命令名、不检查目标 identity，B 可以合法调用 admit 却把 D 声称到 A 的位置。若 sandbox 只保护文件系统而允许 ambient Git credential，无声明通道仍可外泄。非目标是封装 agent 的所有计算或禁止项目允许的互联网；目标是让每一条跨 task 和共享写路径都有可说明的来源。
 
-验证要用真实 runner credential：读取自己的 closure 成功，读取另一 task scratch 失败；读取声明 context 成功，无 binding 时不能 fallback；scope 内 admit 成功，跨 scope typed 拒绝；共享 Git 写只作用于引擎 namespace，所有结果均带 run/task/phase 审计 identity。
+验证要在本地和远程现场使用真实 runner credential：读取自己的 closure 成功，读取另一 task scratch 失败；读取声明 context 成功，无 binding 时不能 fallback；scope 内 admit 成功，跨 scope typed 拒绝；涉及共享 Git 的结构性写只作用于引擎 namespace，所有结果均带 run/task/phase 审计 identity。
 
 来源：沿用旧 546 §14，并将 append 权限收束到 typed admit；授权与 admission owner 边界一致。【旧 RFC 候选 | A.md 旧 546 §14 | 已纳入】
 
@@ -1303,11 +1318,11 @@ closure 的持久键也要从旧 `(item, phase)` 观念迁向 task identity，�
 
 ## 17. 从用户入口看，完成后的系统应怎样表现
 
-回到案例。chain 创建后，status 展示 A/B/C 所属群组和三个 ready task，它们有不同 closure identity 和同一冻结 base pin。scheduler 可同时锁定三者。A 提交返回时，一笔 committed transition 完成 A 并物化 A2；B 派生 B-check 后释放运行锁，closure 显示 suspended 而非 terminal；B-check 返回后，B 只消费一次该值并继续。C attempts 耗尽后记录 exception，A、B 仍运行。
+回到案例。chain 创建后，status 展示 A/B/C 所属群组和三个 ready task，它们有不同 closure identity 和各自的工作空间引用；采用 worktree 后端并使用同一声明起点时，工作副本共享冻结 base pin。scheduler 可同时锁定三者。A 提交返回时，一笔 committed transition 完成 A 并物化 A2；B 派生 B-check 后释放运行锁，closure 显示 suspended 而非 terminal；B-check 返回后，B 只消费一次该值并继续。C attempts 耗尽后记录 exception，A、B 仍运行。
 
 D 的 admit 明示事实 identity、位置和时机。若原位置已经结束，界面返回 typed 拒绝及本次判定产生的开放前沿，提议方可以换位置重新声称，引擎不代选。群组全体成员落定后，按声明立即结束或进入等待窗口；期满事实写入日志，固定 join 再把包含 exception 与正常返回的完整值包交给 finalizer。
 
-若 daemon 在任何一步 crash，重启先重建事件前缀和锁，再对账 branch/worktree/DB；它不会从 flat status 猜一个额外 ready task，也不会用改过的 preset 重解释旧 task。消费后，GC 依据 durable 可达性回收 closure 资源，同时保留 task history、级联决定与 publication 样本。GUI 可晚于 DB 刷新，但不能因缓存显示 completed 就触发删除。
+若 daemon 在任何一步 crash，重启先重建事件前缀和锁，再经工作空间后端对账实际资源与持久引用；它不会从 flat status 猜一个额外 ready task，也不会用改过的 preset 重解释旧 task。消费后，GC 依据 durable 可达性回收 closure 资源，同时保留 task history、级联决定与已冻结的观测证据。GUI 可晚于 DB 刷新，但不能因缓存显示 completed 就触发删除。
 
 这套行为的价值在于所有观察点共享一套因果关系。用户不必知道“对象域”这个词，也能得到稳定答案：为什么 task 能跑、从哪个值派生、在等谁、为什么一次 admit 被拒绝、哪个结果让群组放行、资源为何还没删、远端证据为何无法求值。任一问题无法回答，都说明任务代数尚未真正实现。
 
@@ -1333,7 +1348,7 @@ D 的 admit 明示事实 identity、位置和时机。若原位置已经结束�
 
 出站事实验收穷尽 `pre-spawn absence`、`terminal winner`、`active loss` 与 `unknown effect`，分别观察无 run 的 held、正常针眼提交、exception 落定与 unknown hold 不重复推进；generic held 不得作为输入 variant。持久化验收在 task admission、lease、settlement、await suspension/resumption、group termination/consumption 边界注入 crash，两个 scheduler 竞争同 task 时至多一个活 run。
 
-资源与授权验收实际创建并行 closure，证明文件隔离、resume、base pin、residue 对账、GC 后历史与 publication 样本仍在；真实 runner 只能访问自己的资源与声明 binding，scope 外 admit 明确拒绝。单 issue 的最小 runtime/integration、冻结合流 SHA 的整链路 integration 与发布候选 compatibility E2E 各自证明自己的边界，任何一个反例仍可产生时，本篇目标语义都尚未实现。
+资源与授权验收按 §11 的真实后端场景创建并行 closure，证明文件隔离、同一现场恢复、residue 对账、GC 后历史与冻结证据仍在；涉及 Git 工作副本或交付观测时，再验证 base pin 与 publication 样本，不能把它们变成无 Git 场景的前置条件。远程场景还要证明 runner 与文件测量访问同一现场、断线不冒充结束、scope 外资源和 admit 均明确拒绝。单 issue 的最小 runtime/integration、冻结合流 SHA 的整链路 integration 与发布候选 compatibility E2E 各自证明自己的边界，任何一个反例仍可产生时，本篇目标语义都尚未实现。
 
 来源：保持旧 546 §19 的可证伪验收精神，并补入 record-1 2:48、record-2 3:06—3:10、record-3 第 10 轮与 division-plan.md 面 3/面 5 的合同；所有曾悬置的行为已经由插入判定转成规范参数、纳入项或拒绝项。【旧 RFC 候选 | A.md 旧 546 §19 | 已纳入】
 
@@ -1418,7 +1433,7 @@ CLI 是跨进程公共边界，daemon socket 是 engine 内部 transport。这�
 - `into-chain`：向既有 chain 提交一项工作；
 - `new-workspace`：先创建新 chain，再向它提交第一项工作。
 
-`workspace` 不成为新的 engine 实体。chain 已承担命名、repository、凭据与隔离边界；`new-workspace` 只是 `chain.create` 与后续 work admission 的组合语义。
+此处 `new-workspace` 是入站操作名，只表示 `chain.create` 与后续 work admission 的组合，不新增 engine 任务实体，也不表示立即创建面 3 的执行工作空间。chain 承担命名与授权边界；具体 task 的私有现场经工作空间接口按需提供，不能因该操作名而要求所有任务链存在 Git 仓库。
 
 两个请求各自 durable，不承诺跨命令事务。第一步成功而第二步尚未成功时，空 active chain 是合法且可长期存在的状态；engine 不自动补种、不自动删除，也不把空 chain 归给某个 delivery。
 
@@ -1584,13 +1599,15 @@ provider 合同显式包含 argv builder、model、spawn environment/sandbox、s
 |---|---|
 | argv builder | 把固化 prompt 投影与 typed 配置转换为 argv |
 | model | 由调用显式给出，不从 ambient 配置推断 |
-| spawn environment/sandbox | 完整声明 env、cwd、资源、网络与 sandbox 能力 |
+| spawn environment/sandbox | 绑定已选工作空间的执行环境与目录，完整声明 env、可见资源、网络与 sandbox 能力；远程目录不能作为本地 cwd 使用 |
 | session identity 与 resume | 只在当前 closure 的私有函数域内创建、保存与恢复 |
 | result reader | 按 endpoint 与 run identity 读取并解析封闭事实 |
 
 第一个历史漏气孔是 spawn environment。target 合同从 allowlist 构造封闭 env，并显式给出 cwd、可见资源、网络与 sandbox 能力；不得整体透传 daemon ambient env，也不得让未声明变量、默认 credential principal 或宿主 profile 改变函数输入。地址或凭据存在于进程环境，不等于它已成为 context。
 
-第二个历史漏气孔是 session。continuation（来源：division-plan.md“面 5”）指当前函数调用为了 resume 而保存的私有续接状态；session identity 只能标识这份 continuation，不能成为函数输入，也不能跨 task 充当共享权威。session 生命周期服从 closure authority，外部终端不另建 cwd、branch 或 cleanup owner。
+第二个历史漏气孔是 session。continuation（来源：division-plan.md“面 5”）指当前函数调用为了 resume 而保存的私有续接状态；session identity 只能标识这份 continuation，不能成为函数输入，也不能跨 task 充当共享权威。session 生命周期服从 closure authority；runner 使用已绑定的工作空间，外部终端不另建现场或 cleanup owner。
+
+工作空间后端与 runner provider 分别回答“在哪里工作”和“怎样调用执行工具”，二者必须通过同一 typed 资源引用接通。远程执行必须把已 pin 的 prompt、脚本及素材送到声明可见的位置，并保持内容 identity；需要读取任务文件的 map 在同一远程现场执行或通过该现场的受控访问能力测量，不能读取本机同名目录。agent 的 self-report 与 admit 仍携带匹配当前 run 的授权进入既有边界，远程 transport 不扩大授权，也不增加值通道。远程执行的启动、停止、输出与终态必须对应真实 run，不能以本地连接进程的退出码代替；不支持所需现场访问或恢复能力的组合应明确拒绝，不能静默降级为本地执行。
 
 v2-current 采用三目 runner 分派与平行字段；新增一个 runner 需要改动约七处代码并执行一次 DB migration。这是 current 状态陈述。target 合同把 runner 差异收敛到上述槽位；adapter 如何提取、迁移或兼容不在本 RFC 范围内。
 
@@ -1610,7 +1627,7 @@ current 调查没有找到历史假设的 `hapi-remote-session`；实际安装�
 
 ## 4. 缺席与恢复只产生事实
 
-runner endpoint 在 spawn 前缺席是正常运行态，不是本地进程 spawn failure。检测到缺席时，本篇产生 durable `pre-spawn absence`，携带 endpoint identity 与观测证据；此时不建立 run 或 worktree，也不进入普通 spawn backoff。
+runner endpoint 在 spawn 前缺席是正常运行态，不是本地进程 spawn failure。检测到缺席时，本篇产生 durable `pre-spawn absence`，携带 endpoint identity 与观测证据；此时不建立 run 或为本次调用新建工作空间，也不进入普通 spawn backoff。
 
 本篇只负责检测缺席、持久化事实并识别后续 endpoint 恢复。held 调度处置、恢复后何时重新取得资格以及 status 投影归面 3；本篇不输出没有原因的 generic `held`。
 
@@ -1738,9 +1755,11 @@ hook 自身的声明期与发射期都实行零自反（no self-trigger）。
 
 ## 3. subprocess primitive、delivery 与进程所有权
 
-引擎提供一套领域无关的 subprocess primitive，统一负责 spawn、stdio 处理、进程组建立与跟踪、timeout、TERM 后 KILL 的信号升级，以及进程 close 事件。
-终态必须以真实进程生命周期为依据：启动后持续排空并关闭 stdio，在 close 到达后归结退出码、超时或信号结局。
+引擎提供一套领域无关的 subprocess primitive，在声明的执行环境中统一负责启动、stdio 处理、进程树跟踪、timeout、停止与终态确认。
+终态必须以真实执行进程的生命周期为依据。本地实现持续排空并关闭 stdio，以进程组实施 TERM 后 KILL 的信号升级，在 close 到达后归结退出码、超时或信号结局；远程实现必须通过真实执行端兑现对应的停止、输出收尾与终态合同，不能把连接客户端的 close 当成远程脚本结束。
 公共层只拥有进程机制，不解释 hook 的领域含义；hook adapter 负责把一次锚点触发接到这套机制。
+
+需要访问 task 文件的 map 使用已绑定的工作空间；operator hook 的执行位置来自其显式配置，不能因为共用 primitive 就获得 task 私有目录或接管现场回收。
 
 每次“锚点触发 × 匹配 hook”形成一项独立 delivery。
 delivery 表示引擎应完成的一次逻辑投递责任，execution 表示履行该 delivery 的一次真实启动尝试。
@@ -1753,9 +1772,9 @@ delivery 表示引擎应完成的一次逻辑投递责任，execution 表示履�
 该语义保证的是 delivery 尝试不会因引擎失忆而遗漏，不保证脚本只执行一次。
 
 正常停止执行有界回收。
-引擎先停止派发新的 hook delivery，再在限定时间内等待已经运行的进程自然退出；等待超时后向对应进程组发送 TERM，再次超时后发送 KILL。
-回收始终等待 close 并记录结局后再关闭相关存储，以免正常停机制造新的未知执行。
-使用进程组而非单个 PID，确保脚本派生的子进程仍属于引擎必须收回的进程树。
+引擎先停止派发新的 hook delivery，再在限定时间内等待已经运行的进程自然退出；等待超时后，由执行端实施有界停止。本地实现先向对应进程组发送 TERM，再次超时后发送 KILL；远程实现停止实际远程进程树，不只关闭连接客户端。
+回收取得真实终态并记录结局后再关闭相关存储；无法确认远程结局时保留未决 execution，不能伪造成功停止。
+进程树归属包含脚本派生的子进程；本地使用进程组而非单个 PID，远程通过执行端对应的生命周期能力履行同一责任。
 
 来源：division-plan.md“面 6”；A.md 旧 543 第四节的 observer 进程所有权与崩溃恢复语义。
 
@@ -1823,7 +1842,7 @@ mindmap
       正常与fail路径
       对象域值账本
     副作用观测面
-      worktree
+      本地或远程工作空间
       进程三证
       events与日志
       Git残迹
@@ -1896,7 +1915,7 @@ flowchart LR
 
 GUI 的本体是 context 与副作用的可观测手段，不是 daemon 领域模型的另一种实现。**context 观测面**展示被提升并参与交接的值：各时态 context 快照、谓词结果、正常 / fail 路径，以及对象域值账本。它让人看见值怎样进入闭包、何时有效、怎样被检查并经针眼交付，但不把观察投影升级为新的 context owner。
 
-**副作用观测面**展示被引擎语义丢弃、却对人仍有诊断价值的内容：worktree、进程三证、events、日志和 Git 残迹。这些内容没有经 self-report 或 measurement 提升，不参与主流转；它们仍能说明 runner 是否落过文件、进程在哪一层失联、现场留下了什么。引擎丢弃的副作用对人不是丢弃的——GUI 是人对被丢弃部分的读面。这个读面只能呈现来源与原始分歧，不能把 worktree、日志或 Git 残迹解释成 `returned(value)`、`exception` 或 committed transition。
+**副作用观测面**展示被引擎语义丢弃、却对人仍有诊断价值的内容：本地或远程工作空间、进程三证、events、日志和 Git 等外部系统残迹。这些内容没有经 self-report 或 measurement 提升，不参与主流转；它们仍能说明 runner 是否落过文件、进程在哪一层失联、现场留下了什么。引擎丢弃的副作用对人不是丢弃的——GUI 是人对被丢弃部分的读面。现场位置与资源状态来自工作空间 owner，不假定一定有 worktree 或本机可读目录；Git 旁证可以独立展示，不因采用某种工作空间后端就自动出现或成为业务值。这个读面只能呈现来源与原始分歧，不能把现场、日志或 Git 残迹解释成 `returned(value)`、`exception` 或 committed transition。
 
 GUI 因而是“观测本体 + 分栏的有限运维动作面”。观察区回答发生了什么，动作区只承载恢复观察对象和调整既有工作的闭集命令。二者共享 daemon、chain、item、task、run、phase 与 attempt 的稳定 identity，但共享 identity 不共享权威：GUI 不拥有引擎的写权威，也不解释 mutation 是否合法。
 
@@ -2051,7 +2070,7 @@ context 页读取面 2 词汇下的观测面：`context₀`、`context₁`、`co
 
 URL 从 daemon、chain、item、task、run 到 phase / attempt 都携带明确 typed identity。解析结果区分对象存在、消失、过期或父子关系不成立；显示名、数组位置和“当前选择”不能替代 identity。
 
-对象域页面直接消费面 3 的群组消费结构，展示群组、消费者、committed transition、closure lifecycle、branch 与 session identity。新增 variant 必须暴露编译缺口；前端不复活旧 slot，也不从 worktree 或 Git 重建对象结构。
+对象域页面直接消费面 3 的群组消费结构，展示群组、消费者、committed transition、closure lifecycle、工作空间引用与 session identity；branch 等后端具体信息由对应 owner 投影，不作为所有 task 的必有字段。新增 variant 必须暴露编译缺口；前端不复活旧 slot，也不从目录、容器或 Git 重建对象结构。
 
 event envelope 的 chain、item、run 与 phase identity 用于跳到对象；对象页以相同 typed filter 反查事件。共享 identity 不表示共享存储事务、时间顺序或写权威。
 
@@ -2121,7 +2140,7 @@ daemon dead 时，gateway 仍显示 SQLite 终态、events 历史与诊断来源
 
 chain 页解释当前对象域状态、群组消费结构、active run 与 operator hook 声明；item / task / run / attempt 逐层缩小 identity，并把 events、时态二快照、context 快照和副作用证据放回同一执行语境。
 
-compile 页回答 current source snapshot 的唯一编译判定；context 页回答闭包各时态拥有什么值；副作用页回答进程、worktree、日志与 Git 留下什么。用户无需知道物理文件名，但每项事实必须标明 owner、来源与采样时点。
+compile 页回答 current source snapshot 的唯一编译判定；context 页回答闭包各时态拥有什么值；副作用页回答本地或远程现场、进程、日志与外部系统留下什么。用户无需知道物理文件名，但每项事实必须标明 owner、来源与采样时点；远程失联不能显示成已回收，也不能退回读取本机同名路径。
 
 来源：A.md 旧 544 第 5.2 节；division-plan.md“面 7”；A.md 面 6 第 4 节。
 
@@ -2157,7 +2176,7 @@ compile 页回答 current source snapshot 的唯一编译判定；context 页回
 
 这些是需求强度边界，不是实现者可以用“更稳健”为理由追加的候选。调查发现的风险可以影响实验与未来提案，但不能自动引入 outbox、saga、exactly-once、无限 retention、全局事件序或第二审计日志。
 
-完成后，操作员可以直接区分 gateway 网络故障与 daemon 死亡；在 daemon dead 时读取最后持久状态与 events；查看三证原始分歧；沿 identity 找到一次闭包与 attempt；对照各时态 context、谓词和正常 / fail 路径；阅读 runner 当时真正收到的固化输入；查看 worktree、进程、日志、Git 与 hook 审计；在手机或桌面执行有限动作；最后从权威 status、events 与 audit 判断结果。
+完成后，操作员可以直接区分 gateway 网络故障与 daemon 死亡；在 daemon dead 时读取最后持久状态与 events；查看三证原始分歧；沿 identity 找到一次闭包与 attempt；对照各时态 context、谓词和正常 / fail 路径；阅读 runner 当时真正收到的固化输入；查看本地或远程工作空间、进程、日志与 hook 审计，以及已声明的 Git 等外部系统观测；在手机或桌面执行有限动作；最后从权威 status、events 与 audit 判断结果。
 
 面 7 建立的不是更多写权威，而是一条不会因 daemon 死亡、时间漂移、前端猜测或控制越权而断裂的人类读面。
 
