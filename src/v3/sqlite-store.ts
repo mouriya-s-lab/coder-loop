@@ -65,7 +65,7 @@ export type TransitionRequest = {
 export type CommitResult =
 	| { readonly kind: "committed"; readonly identity: string }
 	| { readonly kind: "already-committed"; readonly identity: string }
-export type AdmissionStoreResult =
+type AdmissionStoreResult =
 	| { readonly kind: "admitted"; readonly admission: Extract<AdmissionResult, { kind: "admitted" }>; readonly commit: CommitResult }
 	| Extract<AdmissionResult, { kind: "rejected" }>
 
@@ -232,7 +232,7 @@ function listTransitions(database: Database, chain: ObjectDomainSnapshot["chain"
 	const boundary = arkType({
 		cursor: "number.integer > 0",
 		identity_key: "string",
-		family: "'task-admission' | 'closure-allocation-start' | 'closure-allocation-cleanup' | 'lease-acquire' | 'lease-release' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'await-consumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
+		family: "'task-admission' | 'closure-allocation-start' | 'closure-allocation-cleanup' | 'lease-acquire' | 'task-held' | 'task-unhold' | 'task-resume' | 'task-settlement' | 'await-suspension' | 'await-resumption' | 'await-consumption' | 'group-waiting' | 'group-termination' | 'group-consumer-start' | 'group-consumption' | 'resource-intent'",
 		committed_at: "number",
 		"+": "reject",
 	})
@@ -395,11 +395,6 @@ function applyTransition(database: Database, transition: CommittedTransition): v
 			if (task.closure.kind !== "allocating" && task.closure.kind !== "active" && task.closure.kind !== "suspended") reject(transition.family, "state-mismatch", "task closure has no durable allocation to lease")
 			if (transition.expiresAt <= transition.acquiredAt) reject(transition.family, "invalid-transition", "lease expiry must follow acquisition")
 			updateTask(database, replaceTaskLifecycle(task, { kind: "leased", run: transition.run, acquiredAt: transition.acquiredAt, expiresAt: transition.expiresAt }, transition.closure))
-			return
-		}
-		case "lease-release": {
-			const task = requireLeasedTask(database, transition.task, transition.run, transition.family)
-			updateTask(database, replaceTaskLifecycle(task, { kind: "ready" }, task.closure))
 			return
 		}
 		case "task-held": {
@@ -718,7 +713,6 @@ function transitionChain(transition: CommittedTransition): string {
 		case "task-held":
 		case "task-unhold":
 		case "task-resume":
-		case "lease-release":
 		case "task-settlement":
 		case "await-suspension":
 		case "await-resumption":

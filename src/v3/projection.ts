@@ -1,5 +1,3 @@
-import type { Context0, Context1, Context2, Context3 } from "./context"
-import type { JsonValue } from "./definition"
 import type { HookDeliveryAudit } from "./hooks"
 import {
 	groupKey,
@@ -43,17 +41,6 @@ export type EventProjectionV3 = {
 	readonly transitions: readonly CommittedTransitionAudit[]
 }
 
-export type PredicateObservation = { readonly name: string; readonly passed: boolean }
-
-export type FunctionTimelineProjection = {
-	readonly schemaVersion: 3
-	readonly closure: string
-	readonly contexts: readonly {
-		readonly timeline: "context-0" | "context-1" | "context-2" | "context-3"
-		readonly values: Readonly<Record<string, JsonValue>>
-	}[]
-	readonly predicates: readonly PredicateObservation[]
-}
 
 export type SideEffectAuditProjection = {
 	readonly schemaVersion: 3
@@ -88,14 +75,6 @@ export function buildEventProjection(chain: string, transitions: readonly Commit
 	return { schemaVersion: 3, chain, transitions }
 }
 
-export function buildFunctionTimelineProjection(closure: string, contexts: readonly [Context0, Context1, Context2, Context3], predicates: readonly PredicateObservation[]): FunctionTimelineProjection {
-	return {
-		schemaVersion: 3,
-		closure,
-		contexts: contexts.map((context) => ({ timeline: context.stage, values: context.values })),
-		predicates,
-	}
-}
 
 export function buildSideEffectAuditProjection(hooks: readonly HookDeliveryAudit[], providers: readonly ProviderFactRecord[]): SideEffectAuditProjection {
 	return { schemaVersion: 3, hooks, providers }

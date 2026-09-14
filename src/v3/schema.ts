@@ -1,6 +1,5 @@
 import { scope, type as arkType } from "arktype"
-import type { CompiledDefinitionProduct, PresetDefinition, JsonValue } from "./definition"
-import { parseDeclaredValue } from "./definition"
+import type { CompiledDefinitionProduct, PresetDefinition } from "./definition"
 
 const v3Types = scope({
 	DefinitionSourceIdentity: { kind: "'definition-source'", digest: "string > 0", "+": "reject" },
@@ -77,7 +76,6 @@ const v3Types = scope({
 
 export const PresetDefinitionBoundary = v3Types.PresetDefinition
 export const CompiledDefinitionProductBoundary = v3Types.CompiledDefinitionProduct
-export const PresetDefinitionSchemaVersion = 3
 
 export type PresetDefinitionParseResult =
 	| { readonly kind: "accepted"; readonly definition: PresetDefinition }
@@ -109,8 +107,3 @@ export function parseCompiledDefinitionProduct(candidate: unknown): CompiledDefi
 	return parsed instanceof arkType.errors ? null : parsed
 }
 
-export function publicPresetDefinitionSchema(): JsonValue {
-	const parsed = parseDeclaredValue({ kind: "json" }, PresetDefinitionBoundary.toJsonSchema())
-	if (parsed.kind === "rejected") throw new Error("ArkType emitted a non-JSON schema")
-	return parsed.value
-}

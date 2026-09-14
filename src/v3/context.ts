@@ -163,7 +163,7 @@ export type AgentFieldRejection = {
 
 export type PromptRenderResult =
 	| { readonly kind: "frozen"; readonly prompt: FrozenPrompt }
-	| { readonly kind: "exception"; readonly missingValues: readonly string[]; readonly undeclaredPlaceholders: readonly string[] }
+	| { readonly kind: "exception"; readonly missingValues: readonly string[] }
 
 export type PredicateEvaluator = (name: string, context: Context3) => boolean
 export type ChooserEvaluator = (name: string, kind: "agent" | "map", context: Context3) => JsonValue | undefined
@@ -223,7 +223,7 @@ export function settlePreAgentMaps(
 export function freezePrompt(template: string, context: Context1): PromptRenderResult {
 	const placeholders = [...template.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/gu)].map((match) => match[1]).filter((value): value is string => value !== undefined)
 	const missingValues = [...new Set(placeholders.filter((name) => !Object.hasOwn(context.values, name)))]
-	if (missingValues.length > 0) return { kind: "exception", missingValues, undeclaredPlaceholders: [] }
+	if (missingValues.length > 0) return { kind: "exception", missingValues }
 	const text = template.replaceAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/gu, (_placeholder, name: string) => canonicalValueText(context.values[name] ?? null))
 	return { kind: "frozen", prompt: { kind: "frozen-prompt", text, inputValues: { ...context.values } } }
 }
@@ -384,9 +384,6 @@ function settleMapBatch(
 	}
 	for (const [valueName, declaration] of Object.entries(expected)) {
 		if (!grouped.has(valueName)) faults.push({ valueName, reason: declaration.required ? { kind: "required-value-absent" } : { kind: "missing-result" } })
-	}
-	for (const valueName of Object.keys(additions)) {
-		if (Object.hasOwn(entryValues, valueName)) faults.push({ valueName, reason: { kind: "duplicate-result" } })
 	}
 	return faults.length > 0
 		? { kind: "exception", exception: { kind: "map-batch-exception", stage, faults } }
